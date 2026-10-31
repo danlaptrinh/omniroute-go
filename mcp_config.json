@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "omni-parallel-dispatcher": {
+      "command": "C:/Users/cloud/.gemini/bin/omni-parallel-mcp.exe",
+      "args": [],
+      "env": {
+        "GATEWAY_BASE_URL": "http://127.0.0.1:8787/v1",
+        "OMNIROUTE_MODEL": "gemini-4-argon-high",
+        "OMNIROUTE_MAX_CONCURRENCY": "0"
+      }
+    }
+  }
+}

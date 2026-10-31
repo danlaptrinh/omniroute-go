@@ -1,0 +1,20 @@
+# Compiled binaries
+*.exe
+*.out
+*.test
+omni-gateway
+omni-parallel-mcp
+
+# Runtime data & credentials (never commit live OAuth tokens or API keys)
+data/
+.gemini/
+gateway_config.json
+*.log
+.env
+.env.*
+
+# OS / IDE files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
