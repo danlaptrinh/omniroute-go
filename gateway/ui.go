@@ -1129,7 +1129,7 @@ const gatewayUIHTML = `<!DOCTYPE html>
           Toàn bộ mã nguồn đã tích hợp sẵn <code>Dockerfile</code> và <code>docker-compose.yml</code>. Chỉ cần chạy lệnh sau trên VPS Ubuntu/Debian của bạn:
         </div>
         <div style="font-size:12px;font-weight:600;color:#e2e8f0;margin-bottom:6px;">1. Khởi chạy bằng Docker Compose trên VPS:</div>
-        <pre id="epVpsDockerCmd">git clone &lt;repo-cua-ban&gt; omniroute-vps &amp;&amp; cd omniroute-vps
+        <pre id="epVpsDockerCmd">git clone https://github.com/danlaptrinh/omniroute-go.git &amp;&amp; cd omniroute-go
 docker compose up -d --build</pre>
         <div style="font-size:12px;font-weight:600;color:#e2e8f0;margin:12px 0 6px;">2. Cấu hình Nginx Reverse Proxy cho tên miền công khai (SSE Streaming chuẩn):</div>
         <pre id="epVpsNginxConf">server {
