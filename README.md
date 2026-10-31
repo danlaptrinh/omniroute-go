@@ -29,7 +29,7 @@ Hệ thống **AI Gateway đa nhà cung cấp (Multi-Provider Routing Engine)** 
 ## 🐳 Triển khai nhanh trên VPS (Docker Compose)
 
 ```bash
-git clone https://github.com/vioncloud/omniroute-go.git
+git clone https://github.com/vn369-com/omniroute-go.git
 cd omniroute-go
 docker compose up -d --build
 ```

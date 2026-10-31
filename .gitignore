@@ -2,8 +2,8 @@
 *.exe
 *.out
 *.test
-omni-gateway
-omni-parallel-mcp
+/omni-gateway
+/omni-parallel-mcp
 
 # Runtime data & credentials (never commit live OAuth tokens or API keys)
 data/
