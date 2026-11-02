@@ -72,6 +72,7 @@ func CreateAPIKey(name string, admin bool, selfUsage, sharedQuota, localUsageCmd
 		return GatewayAPIKey{}, fmt.Errorf("failed to save api key: %w", err)
 	}
 
+	SyncAPIKeysToPostgresAsync()
 	return keyObj, nil
 }
 
@@ -87,10 +88,12 @@ func DeleteAPIKey(identifier string) error {
 	cfg := loadSavedAuthConfigLocked()
 
 	var filtered []GatewayAPIKey
+	var deletedID string
 	found := false
 	for _, k := range cfg.APIKeys {
 		if k.ID == identifier || k.Key == identifier {
 			found = true
+			deletedID = k.ID
 			continue
 		}
 		filtered = append(filtered, k)
@@ -102,7 +105,11 @@ func DeleteAPIKey(identifier string) error {
 
 	cfg.APIKeys = filtered
 	cfg.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	return saveAuthConfigLocked(cfg)
+	if err := saveAuthConfigLocked(cfg); err != nil {
+		return err
+	}
+	DeleteAPIKeyFromPostgresAsync(deletedID)
+	return nil
 }
 
 // ValidateAPIKey checks if the incoming Authorization header contains a valid OmniRoute API key.
@@ -169,5 +176,6 @@ func RecordAPIKeyUsage(keyStr string, tokens int) {
 	if updated {
 		cfg.UpdatedAt = now
 		_ = saveAuthConfigLocked(cfg)
+		SyncAPIKeysToPostgresAsync()
 	}
 }

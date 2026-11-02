@@ -15,13 +15,17 @@ Hệ thống **AI Gateway đa nhà cung cấp (Multi-Provider Routing Engine)** 
    - Tích hợp 4 đường hầm: **Cloud OmniRoute (VPS Custom Domain)**, **Cloudflare Quick Tunnel**, **Tailscale Funnel**, **ngrok Tunnel**.
    - Hỗ trợ **Lời nhắc hệ thống tùy chỉnh (Custom System Prompt)** tự động chèn vào mọi yêu cầu mô hình.
    - Hỗ trợ chuẩn **MCP (`/v1/mcp/info`)** và **A2A (`/.well-known/agent.json`, `/v1/a2a`)**.
-3. **Theo dõi Token & Hạn mức thực tế (Real-time Quota & Token Tracking)**:
+3. **Tích hợp PostgreSQL & Giám sát Prompt Nhân viên (Employee API Keys & Prompt Audit)**:
+   - Cấp phát **Khóa API riêng cho từng nhân viên** (`sk-omni-...`) để làm việc trên Cursor, Claude Code, Cline, Antigravity.
+   - Tự động lưu trữ bền vững vào **PostgreSQL 16** (`omni_api_keys`, `omni_prompt_logs`) kèm cơ chế tự động fallback về `Local JSON + RAM` khi chạy local không cần cài đặt DB.
+   - **Kiểm tra chi tiết lịch sử Prompt của từng nhân viên**: Xem chính xác nội dung câu hỏi (Prompt) nhân viên đã gửi, câu trả lời AI phản hồi, model đã dùng, số token tiêu thụ và độ trễ ngay trên giao diện Control Center.
+4. **Theo dõi Token & Hạn mức thực tế (Real-time Quota & Token Tracking)**:
    - Đo chính xác 100% số token thực tế tiêu thụ trên từng tài khoản (`prompt_tokens`, `completion_tokens`, `total_tokens`).
    - Tự động xoay vòng tài khoản (`round-robin`, `least-used`, `p2c`, `fill-first`) kèm Circuit Breaker & Cooldown tự động.
-4. **Tối ưu hóa hiệu năng cao**:
+5. **Tối ưu hóa hiệu năng cao**:
    - **Nén Token (Prompt Compression)**: Chế độ `Lite`, `Caveman`, `RTK`, `Ultra` + nén luồng HTTP `gzip`.
    - **Semantic Exact-Match Cache (LRU)**, **Model Aliasing** & **Speculative Hedged Requests** kèm **SSE Keep-Alive Heartbeat**.
-5. **MCP Server (`omni_parallel_workers`)**:
+6. **MCP Server (`omni_parallel_workers`)**:
    - Phá bỏ giới hạn tuần tự bằng cách điều phối **N Goroutines chạy song song 100%** qua cổng Gateway và ghi trực tiếp kết quả xuống ổ cứng.
 
 ---

@@ -68,6 +68,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/models/toggle-visibility", s.handleModelToggleVisibility)
 	mux.HandleFunc("/v1/keys", s.handleAPIKeys)
 	mux.HandleFunc("/v1/logs", s.handleLogs)
+	mux.HandleFunc("/v1/database", s.handleDatabaseConfig)
 	mux.HandleFunc("/v1/quota", s.handleQuotaSummary)
 	mux.HandleFunc("/v1/quota/toggle", s.handleQuotaToggle)
 	mux.HandleFunc("/v1/quota/threshold", s.handleQuotaThreshold)
@@ -367,9 +368,10 @@ func (s *Server) handleAPIKeys(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"object": "list",
-			"data":   keys,
-			"total":  len(keys),
+			"object":   "list",
+			"data":     keys,
+			"total":    len(keys),
+			"postgres": GetPostgresStatus(),
 		})
 	case http.MethodPost:
 		var req struct {
@@ -429,14 +431,21 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 		}
 		provider := r.URL.Query().Get("provider")
 		errorsOnly := r.URL.Query().Get("errors_only") == "true" || r.URL.Query().Get("error") == "true"
+		apiKeyFilter := r.URL.Query().Get("api_key_id")
+		if apiKeyFilter == "" {
+			apiKeyFilter = r.URL.Query().Get("employee")
+		}
+		searchQuery := r.URL.Query().Get("q")
 
-		logs := GetRecentLogs(limit, provider, errorsOnly)
+		logs := QueryPromptLogs(limit, provider, errorsOnly, apiKeyFilter, searchQuery)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"object": "list",
-			"data":   logs,
-			"total":  len(logs),
+			"object":    "list",
+			"data":      logs,
+			"total":     len(logs),
+			"postgres":  GetPostgresStatus(),
+			"employees": GetEmployeeUsageStats(),
 		})
 	case http.MethodDelete:
 		ClearLogs()
@@ -445,6 +454,31 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"status": "cleared",
 		})
+	default:
+		writeOpenAIError(w, http.StatusMethodNotAllowed, "method not allowed", "invalid_request_error")
+	}
+}
+
+func (s *Server) handleDatabaseConfig(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(GetPostgresStatus())
+	case http.MethodPost:
+		var req struct {
+			DSN string `json:"dsn"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 16*1024)).Decode(&req); err != nil {
+			writeOpenAIError(w, http.StatusBadRequest, "invalid JSON payload: "+err.Error(), "invalid_request_error")
+			return
+		}
+		err := ConfigurePostgresDSN(req.DSN)
+		status := GetPostgresStatus()
+		if err != nil {
+			status["error"] = err.Error()
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(status)
 	default:
 		writeOpenAIError(w, http.StatusMethodNotAllowed, "method not allowed", "invalid_request_error")
 	}
@@ -784,6 +818,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ctx := WithAuditContext(r.Context(), apiKeyObj, req)
+
 	if IsImageModel(req.Model) {
 		prompt := ""
 		for i := len(req.Messages) - 1; i >= 0; i-- {
@@ -795,7 +831,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		if prompt == "" && len(req.Messages) > 0 {
 			prompt = req.Messages[len(req.Messages)-1].ContentText()
 		}
-		imgResp, err := GenerateImageChatCompletion(r.Context(), req.Model, prompt)
+		imgResp, err := GenerateImageChatCompletion(ctx, req.Model, prompt)
 		if err != nil {
 			writeOpenAIError(w, http.StatusBadGateway, "failed to generate image: "+err.Error(), "image_generation_error")
 			return
@@ -818,7 +854,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		if cachedResp.Usage != nil {
 			tokens = int64(cachedResp.Usage.TotalTokens)
 		}
-		RecordLogEntry(GatewayLogEntry{
+		cachedContent := ""
+		if len(cachedResp.Choices) > 0 && cachedResp.Choices[0].Message != nil {
+			cachedContent = cachedResp.Choices[0].Message.Content
+		}
+		SetAuditResponse(ctx, cachedContent, EstimateTokens(req.Messages), int(tokens))
+		cacheEntry := GatewayLogEntry{
 			Provider:       resolved.Provider,
 			Account:        "in-memory-cache",
 			RequestedModel: req.Model,
@@ -827,7 +868,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			LatencyMs:      0,
 			TotalTokens:    int(tokens),
 			IsError:        false,
-		})
+		}
+		EnrichLogEntryFromContext(ctx, &cacheEntry, req)
+		RecordLogEntry(cacheEntry)
 		if req.Stream {
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.Header().Set("Cache-Control", "no-cache")
@@ -894,7 +937,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("X-Omni-Gateway-Cache", "MISS")
 
-	_ = s.upstream.HandleChatCompletion(r.Context(), w, req, resolved, incomingAuth)
+	_ = s.upstream.HandleChatCompletion(ctx, w, req, resolved, incomingAuth)
 	if apiKeyObj != nil {
 		usedTokens := parseRecordedTokens(w.Header().Get("X-Omni-Gateway-Tokens"), req)
 		RecordAPIKeyUsage(apiKeyObj.Key, usedTokens)
@@ -958,7 +1001,8 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	_ = s.upstream.HandleChatCompletion(r.Context(), w, oaiReq, resolved, incomingAuth)
+	ctx := WithAuditContext(r.Context(), apiKeyObj, oaiReq)
+	_ = s.upstream.HandleChatCompletion(ctx, w, oaiReq, resolved, incomingAuth)
 	if apiKeyObj != nil {
 		usedTokens := parseRecordedTokens(w.Header().Get("X-Omni-Gateway-Tokens"), oaiReq)
 		RecordAPIKeyUsage(apiKeyObj.Key, usedTokens)

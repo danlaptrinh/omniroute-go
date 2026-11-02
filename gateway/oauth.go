@@ -95,6 +95,7 @@ type SavedGatewayAuth struct {
 	AdminSalt         string             `json:"admin_salt,omitempty"`
 	CompressionConfig *CompressionConfig `json:"compression_config,omitempty"`
 	EndpointConfig    *EndpointConfig    `json:"endpoint_config,omitempty"`
+	PostgresDSN       string             `json:"postgres_dsn,omitempty"`
 	ModelAliases      map[string]string  `json:"model_aliases,omitempty"`
 	EnableHedgedReqs  bool               `json:"enable_hedged_reqs,omitempty"`
 	HedgeDelayMs      int                `json:"hedge_delay_ms,omitempty"`

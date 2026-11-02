@@ -174,6 +174,17 @@ func (u *GatewayUpstream) handleAlibabaProvider(
 			}
 			alibabaTokens := extractTokensFromOpenAIBody(bodyBytes, req)
 			w.Header().Set("X-Omni-Gateway-Tokens", fmt.Sprintf("%d", alibabaTokens))
+			merged := aggregateSSEToResponse(bodyBytes, resolved.RequestedID)
+			respText := ""
+			if len(merged.Choices) > 0 && merged.Choices[0].Message != nil {
+				respText = merged.Choices[0].Message.Content
+			}
+			pToks := EstimateTokens(req.Messages)
+			cToks := alibabaTokens - pToks
+			if cToks < 0 {
+				cToks = 0
+			}
+			SetAuditResponse(ctx, respText, pToks, cToks)
 
 			if req.Stream {
 				return writeStreamingResponse(w, bodyBytes, resolved.RequestedID)
@@ -409,6 +420,7 @@ func (u *GatewayUpstream) handleClaudeCodeProvider(
 	w.Header().Set("X-Omni-Gateway-Provider", "claude-code")
 	w.Header().Set("X-Omni-Gateway-Resolved-Model", resolved.UpstreamModelID)
 	w.Header().Set("X-Omni-Gateway-Tokens", fmt.Sprintf("%d", totalToks))
+	SetAuditResponse(ctx, textContent.String(), promptToks, compToks)
 	if acc.Email != "" {
 		w.Header().Set("X-Omni-Gateway-Account", acc.Email)
 	}

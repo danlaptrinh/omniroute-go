@@ -14,6 +14,9 @@ import (
 
 func main() {
 	saved := gateway.LoadSavedAuthConfig()
+	if err := gateway.InitPostgresDB(""); err != nil {
+		log.Printf("[omni-gateway] PostgreSQL connection warning (falling back to Local JSON mode): %v", err)
+	}
 
 	var (
 		listenAddr   = flag.String("listen", envOrDefault("GATEWAY_LISTEN_ADDR", "127.0.0.1:8787"), "Local HTTP listen address for the Standalone AI Gateway")
@@ -82,6 +85,12 @@ func main() {
 	fmt.Printf("  External Upstream     : %s\n", omniStatus)
 	fmt.Printf("  Direct CCPA Endpoint  : %s\n", cfg.CCPAEndpoint)
 	fmt.Printf("  Config File Path      : %s\n", gateway.GatewayConfigFilePath())
+	pgStatus := gateway.GetPostgresStatus()
+	if pgConnected, _ := pgStatus["connected"].(bool); pgConnected {
+		fmt.Printf("  Database Backend      : PostgreSQL Connected (%v)\n", pgStatus["dsn_masked"])
+	} else {
+		fmt.Printf("  Database Backend      : Local JSON + RAM (Set DATABASE_URL for PostgreSQL)\n")
+	}
 	fmt.Printf("  Connected Accounts    : %d\n", len(saved.Accounts))
 	fmt.Printf("  Supported Providers   : 1. Google Antigravity (Gen 3, Gen 4 & Claude)\n")
 	fmt.Printf("                          2. Anthropic Claude Code (OAuth PKCE / API Key)\n")

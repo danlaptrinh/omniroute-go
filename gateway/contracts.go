@@ -200,22 +200,29 @@ type GatewayAPIKey struct {
 	LastUsedAt         string `json:"last_used_at,omitempty"`
 }
 
-// GatewayLogEntry records upstream requests, latency, tokens, and errors across providers.
+// GatewayLogEntry records upstream requests, latency, tokens, employee API key, prompt, and AI response across providers.
 type GatewayLogEntry struct {
-	ID             string     `json:"id"`
-	Timestamp      string     `json:"timestamp"`
-	Provider       ProviderID `json:"provider"`
-	Account        string     `json:"account,omitempty"`
-	RequestedModel string     `json:"requested_model"`
-	ResolvedModel  string     `json:"resolved_model"`
-	StatusCode     int        `json:"status_code"`
-	LatencyMs      int64      `json:"latency_ms"`
-	TotalTokens    int        `json:"total_tokens,omitempty"`
-	TokensSaved    int        `json:"tokens_saved,omitempty"`
-	ErrorMessage   string     `json:"error_message,omitempty"`
-	ErrorDetail    string     `json:"error_detail,omitempty"`
-	IsError        bool       `json:"is_error"`
-	FallbackChain  []string   `json:"fallback_chain,omitempty"`
+	ID               string     `json:"id"`
+	Timestamp        string     `json:"timestamp"`
+	APIKeyID         string     `json:"api_key_id,omitempty"`
+	EmployeeName     string     `json:"employee_name,omitempty"`
+	MaskedKey        string     `json:"masked_key,omitempty"`
+	Provider         ProviderID `json:"provider"`
+	Account          string     `json:"account,omitempty"`
+	RequestedModel   string     `json:"requested_model"`
+	ResolvedModel    string     `json:"resolved_model"`
+	PromptText       string     `json:"prompt_text,omitempty"`
+	ResponseText     string     `json:"response_text,omitempty"`
+	PromptTokens     int        `json:"prompt_tokens,omitempty"`
+	CompletionTokens int        `json:"completion_tokens,omitempty"`
+	StatusCode       int        `json:"status_code"`
+	LatencyMs        int64      `json:"latency_ms"`
+	TotalTokens      int        `json:"total_tokens,omitempty"`
+	TokensSaved      int        `json:"tokens_saved,omitempty"`
+	ErrorMessage     string     `json:"error_message,omitempty"`
+	ErrorDetail      string     `json:"error_detail,omitempty"`
+	IsError          bool       `json:"is_error"`
+	FallbackChain    []string   `json:"fallback_chain,omitempty"`
 }
 
 // CompressionMode defines the compression strategy for prompt and context reduction.

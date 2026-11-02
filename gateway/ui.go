@@ -637,15 +637,38 @@ const gatewayUIHTML = `<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- VIEW 4: API KEYS MANAGEMENT -->
+  <!-- VIEW 4: API KEYS MANAGEMENT & POSTGRESQL -->
   <div id="view-keys" class="view-content">
-    <div class="card">
-      <div style="display:flex;justify-content:space-between;align-items:center;">
+    <!-- PostgreSQL Database Card -->
+    <div class="card" style="border:1px solid #263147;background:#121722;">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
         <div>
-          <h2>🔑 Quản Lý Khóa API (API Keys)</h2>
-          <div style="font-size:12.5px;color:var(--muted);">Tạo và phân quyền các khóa API để dùng cho Cursor, Cline, Claude Code hoặc các client OpenAI.</div>
+          <h2>🐘 Cơ Sở Dữ Liệu PostgreSQL (Lưu Trữ Khóa API &amp; Lịch Sử Prompt Nhân Viên)</h2>
+          <div style="font-size:12.5px;color:var(--muted);">
+            Lưu trữ bền vững toàn bộ API Key của nhân viên, số lượng token, nội dung Prompt câu hỏi và câu trả lời AI vào PostgreSQL.
+          </div>
         </div>
-        <button class="btn-purple" onclick="openCreateKeyModal()">+ Tạo Khóa API</button>
+        <span id="pgStatusBadge" class="badge badge-yellow">🟡 Local JSON Mode</span>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr auto auto;gap:8px;margin-top:14px;align-items:center;">
+        <input id="pgDsnInput" type="text" placeholder="postgres://omniroute:omniroute_secret@postgres:5432/omniroute?sslmode=disable" style="font-family:monospace;font-size:12.5px;" />
+        <button onclick="fillDefaultDockerPostgres()" title="Điền chuỗi kết nối PostgreSQL mặc định trong docker-compose.yml">🐳 Docker DSN</button>
+        <button class="btn-primary" onclick="savePostgresConfig()">🔌 Lưu &amp; Kết Nối PostgreSQL</button>
+      </div>
+      <div id="pgStatusDetail" class="hint" style="margin-top:8px;">
+        Khi chạy trên VPS bằng <code>docker compose up -d</code>, container PostgreSQL 16 sẽ tự động kết nối và tạo bảng <code>omni_api_keys</code> &amp; <code>omni_prompt_logs</code>.
+      </div>
+    </div>
+
+    <!-- Employee API Keys Card -->
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
+        <div>
+          <h2>🔑 Quản Lý Khóa API Nhân Viên (Employee API Keys)</h2>
+          <div style="font-size:12.5px;color:var(--muted);">Cấp cho mỗi nhân viên 1 mã API Key riêng (ví dụ: <code>Nguyễn Văn A - Frontend</code>) để làm việc và nhấn <strong>"🔍 Xem Prompt đã dùng"</strong> để hỗ trợ kỹ thuật.</div>
+        </div>
+        <button class="btn-purple" onclick="openCreateKeyModal()">+ Cấp Khóa API Nhân Viên</button>
       </div>
       <div id="apiKeysTableBox" style="margin-top:14px;">Đang tải danh sách khóa...</div>
     </div>
@@ -720,25 +743,35 @@ const gatewayUIHTML = `<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- VIEW 6: ERROR & CONNECTION LOGS -->
+  <!-- VIEW 6: ERROR & CONNECTION LOGS + EMPLOYEE PROMPT AUDIT -->
   <div id="view-logs" class="view-content">
     <div class="card">
       <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
         <div>
-          <h2>📋 Nhật Ký Kết Nối & Kiểm Tra Lỗi Nhà Cung Cấp</h2>
-          <div style="font-size:12.5px;color:var(--muted);">Giám sát chi tiết request, độ trễ và thông báo lỗi (404, 429, 502) từ Antigravity, Claude Code, Alibaba.</div>
+          <h2>📋 Nhật Ký Kết Nối &amp; Giám Sát Prompt Nhân Viên (PostgreSQL Audit)</h2>
+          <div style="font-size:12.5px;color:var(--muted);">Kiểm tra chi tiết từng nhân viên đã gửi Prompt gì, dùng Model nào, tốn bao nhiêu Token và câu trả lời AI để hỗ trợ tốt hơn.</div>
         </div>
         <div style="display:flex;align-items:center;gap:8px;">
+          <span id="logPgModeBadge" class="badge badge-antigravity">Local / PG</span>
           <label style="font-size:12px;color:var(--muted);display:flex;align-items:center;gap:5px;cursor:pointer;">
             <input type="checkbox" id="autoRefreshLogsCheckbox" onchange="toggleAutoRefreshLogs(this.checked)" checked /> Tự động làm mới (2s)
           </label>
           <button onclick="loadLogs()">🔄 Làm Mới</button>
-          <button onclick="clearLogs()" style="color:#f87171;">🗑️ Xoá Logs</button>
+          <button onclick="clearLogs()" style="color:#f87171;">🗑️ Xoá Bộ Đệm</button>
         </div>
       </div>
 
-      <!-- Filters -->
-      <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap;">
+      <!-- Employee & Prompt Search Bar -->
+      <div style="display:grid;grid-template-columns:260px 1fr auto;gap:10px;margin-top:14px;align-items:center;">
+        <select id="logEmployeeFilterSelect" onchange="loadLogs()">
+          <option value="all">👥 Tất cả Nhân viên / API Key</option>
+        </select>
+        <input id="logPromptSearchInput" type="text" placeholder="🔎 Tìm theo nội dung Prompt nhân viên đã hỏi, câu trả lời hoặc tên model..." oninput="debouncedLoadLogs()" />
+        <button onclick="resetEmployeeLogFilter()">Đặt lại bộ lọc</button>
+      </div>
+
+      <!-- Provider Filters -->
+      <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;">
         <button id="btnFilterAll" class="btn" style="background:#222b3d;color:#fff;" onclick="setLogFilter('all')">Tất cả logs</button>
         <button id="btnFilterErrors" class="btn" onclick="setLogFilter('errors')">⚠️ Chỉ hiển thị Lỗi</button>
         <button id="btnFilterAgy" class="btn" onclick="setLogFilter('antigravity')">Antigravity</button>
@@ -1266,9 +1299,9 @@ docker compose up -d --build</pre>
       </div>
       <div class="modal-body">
         <div class="form-group">
-          <label class="form-label">Tên khóa</label>
-          <input id="keyNameInput" type="text" placeholder="ví dụ: Khóa sản xuất" />
-          <div class="hint">Chọn một tên mô tả để xác định mục đích của khóa này</div>
+          <label class="form-label">Tên Nhân Viên / Tên Khóa</label>
+          <input id="keyNameInput" type="text" placeholder="ví dụ: Nguyễn Văn A - Dev Backend (hoặc Khóa sản xuất)" />
+          <div class="hint">Đặt tên theo nhân viên hoặc phòng ban để dễ dàng kiểm tra lịch sử Prompt họ đã dùng</div>
         </div>
 
         <div class="setting-card">
@@ -1352,6 +1385,39 @@ docker compose up -d --build</pre>
       </div>
       <div class="modal-footer" style="justify-content:flex-end;">
         <button class="btn-purple" onclick="closeNewKeySuccessModal()">Đã Lưu Khóa</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL: CHI TIẾT PROMPT NHÂN VIÊN & CÂU TRẢ LỜI AI -->
+  <div id="promptDetailModal" class="modal-backdrop">
+    <div class="modal-card" style="max-width:780px;">
+      <div class="modal-header">
+        <div class="traffic-lights">
+          <span class="dot dot-red"></span>
+          <span class="dot dot-yellow"></span>
+          <span class="dot dot-green"></span>
+        </div>
+        <div class="modal-title" id="promptModalTitle">Chi Tiết Prompt Nhân Viên &amp; Phản Hồi AI</div>
+        <button class="modal-close" onclick="closePromptDetailModal()">✕</button>
+      </div>
+      <div class="modal-body" style="max-height:78vh;overflow-y:auto;">
+        <div id="promptModalMeta" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px;padding:10px 12px;background:#111520;border:1px solid #242c3d;border-radius:8px;font-size:12px;"></div>
+
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+          <label class="form-label" style="margin:0;color:#38bdf8;">💬 Nội dung Prompt Nhân viên đã gửi:</label>
+          <button style="padding:3px 9px;font-size:11px;" onclick="copyPromptModalText('promptModalUserText')">📋 Sao chép Prompt</button>
+        </div>
+        <pre id="promptModalUserText" style="max-height:260px;white-space:pre-wrap;word-break:break-word;background:#0a0e17;border:1px solid #1e293b;color:#f1f5f9;font-size:12.5px;margin-bottom:14px;"></pre>
+
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+          <label class="form-label" style="margin:0;color:#34d399;">🤖 Câu trả lời AI đã phản hồi:</label>
+          <button style="padding:3px 9px;font-size:11px;" onclick="copyPromptModalText('promptModalAiText')">📋 Sao chép Câu trả lời</button>
+        </div>
+        <pre id="promptModalAiText" style="max-height:280px;white-space:pre-wrap;word-break:break-word;background:#0a0e17;border:1px solid #1e293b;color:#cbd5e1;font-size:12.5px;"></pre>
+      </div>
+      <div class="modal-footer" style="justify-content:flex-end;">
+        <button class="btn-primary" onclick="closePromptDetailModal()">Đóng</button>
       </div>
     </div>
   </div>
@@ -1977,27 +2043,36 @@ docker compose up -d --build</pre>
       try {
         const r = await fetch('/v1/keys');
         const d = await r.json();
+        if (d.postgres) {
+          renderPostgresBanner(d.postgres);
+        }
+        populateEmployeeFilterDropdown(d.data || []);
+
         if (!d.data || d.data.length === 0) {
           box.innerHTML = '<div style="color:var(--muted);padding:14px;background:var(--card-inner);border-radius:8px;">' +
-            'Chưa có khóa API nào. Hệ thống đang ở chế độ mở (Open Access). ' +
-            'Khi bạn tạo khóa đầu tiên, hệ thống sẽ tự động yêu cầu xác thực Bearer Token để bảo vệ an toàn VPS.</div>';
+            'Chưa có khóa API nhân viên nào. Hệ thống đang ở chế độ mở (Open Access). ' +
+            'Khi bạn cấp khóa API đầu tiên cho nhân viên, hệ thống sẽ tự động yêu cầu xác thực Bearer Token và ghi nhận chi tiết từng Prompt theo tên nhân viên.</div>';
           return;
         }
 
         let html = '<table><thead><tr>' +
-          '<th>Tên Khóa</th><th>Masked Key</th><th>Quyền Hạn</th><th>Số Request</th><th>Token Sử Dụng</th><th>Tạo Lúc</th><th>Thao Tác</th>' +
+          '<th>Nhân Viên / Tên Khóa</th><th>Mã Key (Masked)</th><th>Quyền Hạn</th><th>Số Request</th><th>Token Đã Dùng</th><th>Hoạt Động Cuối</th><th>Giám Sát &amp; Thao Tác</th>' +
           '</tr></thead><tbody>';
 
         for (const k of d.data) {
-          const adminBadge = k.admin_access ? '<span class="badge badge-purple" style="background:#581c87;color:#d8b4fe;">Admin</span>' : '<span style="color:var(--muted);">User</span>';
+          const adminBadge = k.admin_access ? '<span class="badge badge-purple" style="background:#581c87;color:#d8b4fe;">Admin</span>' : '<span class="badge badge-antigravity">Nhân viên</span>';
+          const lastTime = (k.last_used_at || k.created_at || '').replace('T', ' ').slice(0, 19);
           html += '<tr>' +
-            '<td><strong>' + k.name + '</strong></td>' +
-            '<td><code style="color:#34d399;">' + k.masked_key + '</code></td>' +
+            '<td><strong>👤 ' + htmlEscape(k.name) + '</strong></td>' +
+            '<td><code style="color:#34d399;">' + htmlEscape(k.masked_key) + '</code></td>' +
             '<td>' + adminBadge + '</td>' +
-            '<td>' + (k.total_requests || 0) + '</td>' +
-            '<td>' + (k.total_tokens || 0) + '</td>' +
-            '<td style="color:var(--muted);font-size:11px;">' + (k.created_at || '').replace('T', ' ').slice(0, 19) + '</td>' +
-            '<td><button onclick="deleteKey(\'' + k.id + '\')" style="color:#f87171;padding:4px 8px;font-size:11.5px;">Xoá</button></td>' +
+            '<td><strong>' + (k.total_requests || 0).toLocaleString() + '</strong></td>' +
+            '<td style="color:#38bdf8;font-weight:700;">' + (k.total_tokens || 0).toLocaleString() + ' tok</td>' +
+            '<td style="color:var(--muted);font-size:11px;">' + lastTime + '</td>' +
+            '<td style="display:flex;gap:6px;flex-wrap:wrap;">' +
+              '<button class="btn-primary" onclick="inspectEmployeePrompts(\'' + htmlEscape(k.id) + '\', \'' + htmlEscape(k.name) + '\')" style="padding:4px 9px;font-size:11.5px;">🔍 Xem Prompt đã dùng</button>' +
+              '<button onclick="deleteKey(\'' + htmlEscape(k.id) + '\')" style="color:#f87171;padding:4px 8px;font-size:11.5px;">Xoá</button>' +
+            '</td>' +
             '</tr>';
         }
         html += '</tbody></table>';
@@ -2005,6 +2080,128 @@ docker compose up -d --build</pre>
       } catch (err) {
         box.innerHTML = '<div style="color:#f87171;">Lỗi tải danh sách khóa: ' + err.message + '</div>';
       }
+    }
+
+    function renderPostgresBanner(pg) {
+      const badge = document.getElementById('pgStatusBadge');
+      const detail = document.getElementById('pgStatusDetail');
+      const logBadge = document.getElementById('logPgModeBadge');
+      const dsnInput = document.getElementById('pgDsnInput');
+
+      if (dsnInput && !dsnInput.value && pg.dsn_masked) {
+        dsnInput.placeholder = pg.dsn_masked;
+      }
+
+      if (pg.connected) {
+        if (badge) {
+          badge.className = 'badge badge-green';
+          badge.textContent = '🟢 PostgreSQL Connected (' + (pg.total_prompt_logs || 0) + ' prompts)';
+        }
+        if (logBadge) {
+          logBadge.className = 'badge badge-green';
+          logBadge.textContent = '🐘 PostgreSQL (' + (pg.total_prompt_logs || 0) + ' bản ghi)';
+        }
+        if (detail) {
+          detail.innerHTML = '<span style="color:#34d399;">✔ Đã kết nối PostgreSQL: <code>' + htmlEscape(pg.dsn_masked || '') + '</code> — Đang lưu trữ bền vững <strong>' +
+            (pg.total_keys_in_db || 0) + ' khóa nhân viên</strong> và <strong>' + (pg.total_prompt_logs || 0) + ' lịch sử Prompt</strong>.</span>';
+        }
+      } else {
+        if (badge) {
+          badge.className = 'badge badge-yellow';
+          badge.textContent = '🟡 Chế độ Local JSON (Chưa kết nối PostgreSQL)';
+        }
+        if (logBadge) {
+          logBadge.className = 'badge badge-yellow';
+          logBadge.textContent = '💾 Bộ đệm Local';
+        }
+        if (detail && pg.last_error) {
+          detail.innerHTML = '<span style="color:#fbbf24;">⚠️ Chưa kết nối được PostgreSQL (' + htmlEscape(pg.last_error) + '). Hệ thống đang tự động dùng Local JSON + RAM dự phòng.</span>';
+        }
+      }
+    }
+
+    function fillDefaultDockerPostgres() {
+      const inp = document.getElementById('pgDsnInput');
+      if (inp) {
+        inp.value = 'postgres://omniroute:omniroute_secret@postgres:5432/omniroute?sslmode=disable';
+      }
+    }
+
+    async function savePostgresConfig() {
+      const inp = document.getElementById('pgDsnInput');
+      const detail = document.getElementById('pgStatusDetail');
+      const dsn = inp ? inp.value.trim() : '';
+      if (detail) detail.textContent = '⏳ Đang kiểm tra kết nối PostgreSQL và khởi tạo bảng...';
+      try {
+        const r = await fetch('/v1/database', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({dsn: dsn})
+        });
+        const d = await r.json();
+        renderPostgresBanner(d);
+        if (d.connected) {
+          loadApiKeys();
+          loadLogs();
+        }
+      } catch (err) {
+        if (detail) detail.innerHTML = '<span style="color:#f87171;">Lỗi: ' + htmlEscape(err.message) + '</span>';
+      }
+    }
+
+    function populateEmployeeFilterDropdown(keys) {
+      const sel = document.getElementById('logEmployeeFilterSelect');
+      if (!sel) return;
+      const currentVal = sel.value || 'all';
+      let html = '<option value="all">👥 Tất cả Nhân viên / API Key</option>';
+      for (const k of keys) {
+        html += '<option value="' + htmlEscape(k.id) + '">👤 ' + htmlEscape(k.name) + ' (' + htmlEscape(k.masked_key) + ')</option>';
+      }
+      sel.innerHTML = html;
+      sel.value = currentVal;
+    }
+
+    function inspectEmployeePrompts(keyId, employeeName) {
+      const navBtns = document.querySelectorAll('.nav-tab');
+      let logsBtn = null;
+      navBtns.forEach(b => {
+        if (b.getAttribute('onclick') && b.getAttribute('onclick').includes('view-logs')) {
+          logsBtn = b;
+        }
+      });
+      switchMainTab('view-logs', logsBtn);
+      const sel = document.getElementById('logEmployeeFilterSelect');
+      if (sel) {
+        let found = false;
+        for (let i = 0; i < sel.options.length; i++) {
+          if (sel.options[i].value === keyId) {
+            found = true;
+            break;
+          }
+        }
+        if (!found) {
+          const opt = document.createElement('option');
+          opt.value = keyId;
+          opt.textContent = '👤 ' + employeeName;
+          sel.appendChild(opt);
+        }
+        sel.value = keyId;
+      }
+      loadLogs();
+    }
+
+    function resetEmployeeLogFilter() {
+      const sel = document.getElementById('logEmployeeFilterSelect');
+      const search = document.getElementById('logPromptSearchInput');
+      if (sel) sel.value = 'all';
+      if (search) search.value = '';
+      setLogFilter('all');
+    }
+
+    let logSearchTimer = null;
+    function debouncedLoadLogs() {
+      if (logSearchTimer) clearTimeout(logSearchTimer);
+      logSearchTimer = setTimeout(() => loadLogs(), 300);
     }
 
     async function deleteKey(id) {
@@ -2057,24 +2254,41 @@ docker compose up -d --build</pre>
       }
     }
 
+    let cachedPromptLogs = [];
+
     async function loadLogs() {
       const box = document.getElementById('logsListBox');
-      let url = '/v1/logs?limit=50';
+      let url = '/v1/logs?limit=80';
       if (activeLogFilter === 'errors') url += '&errors_only=true';
       else if (activeLogFilter !== 'all') url += '&provider=' + encodeURIComponent(activeLogFilter);
+
+      const empSel = document.getElementById('logEmployeeFilterSelect');
+      if (empSel && empSel.value && empSel.value !== 'all') {
+        url += '&api_key_id=' + encodeURIComponent(empSel.value);
+      }
+      const qInp = document.getElementById('logPromptSearchInput');
+      if (qInp && qInp.value.trim()) {
+        url += '&q=' + encodeURIComponent(qInp.value.trim());
+      }
 
       try {
         const r = await fetch(url);
         const d = await r.json();
-        if (!d.data || d.data.length === 0) {
-          box.innerHTML = '<div style="color:var(--muted);padding:14px;background:var(--card-inner);border-radius:8px;">Không có bản ghi nhật ký nào.</div>';
+        if (d.postgres) {
+          renderPostgresBanner(d.postgres);
+        }
+        cachedPromptLogs = d.data || [];
+
+        if (!cachedPromptLogs || cachedPromptLogs.length === 0) {
+          box.innerHTML = '<div style="color:var(--muted);padding:14px;background:var(--card-inner);border-radius:8px;">Không có bản ghi nhật ký / Prompt nào khớp bộ lọc hiện tại.</div>';
           return;
         }
 
-        let html = '<div style="display:flex;flex-direction:column;gap:8px;">';
-        for (const log of d.data) {
+        let html = '<div style="display:flex;flex-direction:column;gap:10px;">';
+        for (let idx = 0; idx < cachedPromptLogs.length; idx++) {
+          const log = cachedPromptLogs[idx];
           const isErr = log.is_error || log.status_code >= 400;
-          const borderCol = isErr ? 'rgba(239, 68, 68, 0.4)' : 'rgba(255,255,255,0.06)';
+          const borderCol = isErr ? 'rgba(239, 68, 68, 0.4)' : 'rgba(255,255,255,0.08)';
           const bgCol = isErr ? 'rgba(239, 68, 68, 0.05)' : 'var(--card-inner)';
           const statusBadge = isErr ?
             '<span class="badge badge-red">HTTP ' + log.status_code + '</span>' :
@@ -2083,24 +2297,47 @@ docker compose up -d --build</pre>
           const provBadge = log.provider === 'antigravity' ? 'badge-antigravity' :
                             log.provider === 'claude-code' ? 'badge-claude' : 'badge-alibaba';
 
+          const empName = log.employee_name || 'Admin / Local';
+          const empBadge = '<span class="badge" style="background:rgba(56,189,248,0.14);color:#38bdf8;border:1px solid rgba(56,189,248,0.3);">👤 ' +
+            htmlEscape(empName) + (log.masked_key ? (' · ' + htmlEscape(log.masked_key)) : '') + '</span>';
+
+          const promptSnippet = log.prompt_text ?
+            ('<div style="margin-top:8px;padding:8px 10px;background:#0b0f18;border:1px solid #1e293b;border-radius:6px;font-size:12px;color:#e2e8f0;">' +
+              '<span style="color:#38bdf8;font-weight:700;">💬 Prompt: </span>' +
+              htmlEscape(log.prompt_text.length > 260 ? (log.prompt_text.slice(0, 260) + '...') : log.prompt_text) +
+            '</div>') : '';
+
+          const respSnippet = log.response_text ?
+            ('<div style="margin-top:6px;padding:7px 10px;background:rgba(16,185,129,0.05);border:1px solid rgba(16,185,129,0.18);border-radius:6px;font-size:11.5px;color:#cbd5e1;">' +
+              '<span style="color:#34d399;font-weight:700;">🤖 Trả lời AI: </span>' +
+              htmlEscape(log.response_text.length > 220 ? (log.response_text.slice(0, 220) + '...') : log.response_text) +
+            '</div>') : '';
+
           const errBlock = isErr && log.error_message ?
             ('<div style="margin-top:6px;padding:8px;background:rgba(239, 68, 68, 0.1);border-radius:6px;font-family:monospace;font-size:11.5px;color:#fca5a5;white-space:pre-wrap;">' +
              htmlEscape(log.error_message) + '</div>') : '';
 
-          html += '<div style="background:' + bgCol + ';border:1px solid ' + borderCol + ';border-radius:8px;padding:10px 14px;">' +
-            '<div style="display:flex;justify-content:space-between;align-items:center;font-size:12px;margin-bottom:4px;">' +
-              '<div style="display:flex;align-items:center;gap:8px;">' +
+          html += '<div style="background:' + bgCol + ';border:1px solid ' + borderCol + ';border-radius:8px;padding:11px 14px;">' +
+            '<div style="display:flex;justify-content:space-between;align-items:center;font-size:12px;flex-wrap:wrap;gap:8px;">' +
+              '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">' +
                 statusBadge +
-                '<span class="badge ' + provBadge + '">' + log.provider + '</span>' +
-                '<strong>' + (log.resolved_model || log.requested_model) + '</strong>' +
-                (log.account ? ('<span style="color:var(--muted);font-size:11px;">(' + log.account + ')</span>') : '') +
+                empBadge +
+                '<span class="badge ' + provBadge + '">' + htmlEscape(log.provider) + '</span>' +
+                '<strong>' + htmlEscape(log.resolved_model || log.requested_model) + '</strong>' +
+                (log.account ? ('<span style="color:var(--muted);font-size:11px;">(' + htmlEscape(log.account) + ')</span>') : '') +
               '</div>' +
-              '<div style="color:var(--muted);font-size:11px;">' +
-                log.latency_ms + 'ms' +
-                (log.total_tokens ? (' | ' + log.total_tokens + ' tok') : '') +
-                ' | ' + (log.timestamp || '').slice(11, 19) +
+              '<div style="display:flex;align-items:center;gap:10px;">' +
+                '<span style="color:var(--muted);font-size:11px;">' +
+                  log.latency_ms + 'ms' +
+                  (log.total_tokens ? (' | <strong style="color:#38bdf8;">' + log.total_tokens + ' tok</strong>') : '') +
+                  ' | ' + (log.timestamp || '').replace('T', ' ').slice(0, 19) +
+                '</span>' +
+                ((log.prompt_text || log.response_text || log.error_message) ?
+                  ('<button style="padding:3px 8px;font-size:11px;" onclick="openPromptDetailModal(' + idx + ')">👁️ Chi tiết</button>') : '') +
               '</div>' +
             '</div>' +
+            promptSnippet +
+            respSnippet +
             errBlock +
           '</div>';
         }
@@ -2109,6 +2346,35 @@ docker compose up -d --build</pre>
       } catch (err) {
         box.innerHTML = '<div style="color:#f87171;">Lỗi tải logs: ' + err.message + '</div>';
       }
+    }
+
+    function openPromptDetailModal(idx) {
+      const log = cachedPromptLogs[idx];
+      if (!log) return;
+      const empName = log.employee_name || 'Admin / Local';
+      document.getElementById('promptModalTitle').textContent = 'Chi Tiết Prompt — ' + empName;
+      document.getElementById('promptModalMeta').innerHTML =
+        '<span><strong>👤 Nhân viên:</strong> ' + htmlEscape(empName) + '</span>' +
+        (log.masked_key ? ('<span>| <strong>🔑 Key:</strong> <code>' + htmlEscape(log.masked_key) + '</code></span>') : '') +
+        '<span>| <strong>🤖 Model:</strong> ' + htmlEscape(log.resolved_model || log.requested_model) + '</span>' +
+        '<span>| <strong>⚡ Token:</strong> ' + (log.total_tokens || 0) + ' (Prompt: ' + (log.prompt_tokens || 0) + ', Output: ' + (log.completion_tokens || 0) + ')</span>' +
+        '<span>| <strong>⏱️ Độ trễ:</strong> ' + (log.latency_ms || 0) + 'ms</span>' +
+        '<span>| <strong>🕒 Lúc:</strong> ' + htmlEscape((log.timestamp || '').replace('T', ' ').slice(0, 19)) + '</span>';
+
+      document.getElementById('promptModalUserText').textContent = log.prompt_text || '(Không có nội dung prompt)';
+      document.getElementById('promptModalAiText').textContent = log.response_text || log.error_message || '(Chưa ghi nhận nội dung phản hồi)';
+      document.getElementById('promptDetailModal').classList.add('open');
+    }
+
+    function closePromptDetailModal() {
+      document.getElementById('promptDetailModal').classList.remove('open');
+    }
+
+    function copyPromptModalText(elId) {
+      const el = document.getElementById(elId);
+      if (!el) return;
+      navigator.clipboard.writeText(el.textContent || '');
+      alert('Đã sao chép nội dung vào clipboard!');
     }
 
     async function clearLogs() {

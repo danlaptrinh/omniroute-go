@@ -45,14 +45,15 @@ func (l *GatewayLogger) RecordLogEntry(entry GatewayLogEntry) {
 	}
 
 	l.mu.Lock()
-	defer l.mu.Unlock()
-
 	if len(l.entries) >= l.maxEntries {
 		copy(l.entries, l.entries[1:])
 		l.entries[len(l.entries)-1] = entry
 	} else {
 		l.entries = append(l.entries, entry)
 	}
+	l.mu.Unlock()
+
+	InsertPromptLogAsync(entry)
 }
 
 // GetRecentLogs returns up to limit logs in reverse chronological order with optional filters.

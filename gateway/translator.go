@@ -169,7 +169,7 @@ func (u *GatewayUpstream) tryTarget(
 		if err == nil {
 			usedTokens := parseRecordedTokens(w.Header().Get("X-Omni-Gateway-Tokens"), req)
 			RecordAccountResult(acc.Email, ProviderClaudeCode, true, lat, usedTokens, http.StatusOK)
-			RecordLogEntry(GatewayLogEntry{
+			entry := GatewayLogEntry{
 				Provider:       ProviderClaudeCode,
 				Account:        acc.Email,
 				RequestedModel: req.Model,
@@ -179,11 +179,13 @@ func (u *GatewayUpstream) tryTarget(
 				TotalTokens:    usedTokens,
 				IsError:        false,
 				FallbackChain:  target.FallbackChain,
-			})
+			}
+			EnrichLogEntryFromContext(ctx, &entry, req)
+			RecordLogEntry(entry)
 			return nil
 		}
 		RecordAccountResult(acc.Email, ProviderClaudeCode, false, lat, 0, http.StatusBadGateway)
-		RecordLogEntry(GatewayLogEntry{
+		errEntry := GatewayLogEntry{
 			Provider:       ProviderClaudeCode,
 			Account:        acc.Email,
 			RequestedModel: req.Model,
@@ -193,7 +195,9 @@ func (u *GatewayUpstream) tryTarget(
 			IsError:        true,
 			ErrorMessage:   err.Error(),
 			FallbackChain:  target.FallbackChain,
-		})
+		}
+		EnrichLogEntryFromContext(ctx, &errEntry, req)
+		RecordLogEntry(errEntry)
 		log.Printf("[omniroute-go] claude-code target %q failed: %v; trying next provider in chain", target.CanonicalID, err)
 		return err
 
@@ -210,7 +214,7 @@ func (u *GatewayUpstream) tryTarget(
 		if err == nil {
 			usedTokens := parseRecordedTokens(w.Header().Get("X-Omni-Gateway-Tokens"), req)
 			RecordAccountResult(acc.Email, ProviderAlibaba, true, lat, usedTokens, http.StatusOK)
-			RecordLogEntry(GatewayLogEntry{
+			entry := GatewayLogEntry{
 				Provider:       ProviderAlibaba,
 				Account:        acc.Email,
 				RequestedModel: req.Model,
@@ -220,11 +224,13 @@ func (u *GatewayUpstream) tryTarget(
 				TotalTokens:    usedTokens,
 				IsError:        false,
 				FallbackChain:  target.FallbackChain,
-			})
+			}
+			EnrichLogEntryFromContext(ctx, &entry, req)
+			RecordLogEntry(entry)
 			return nil
 		}
 		RecordAccountResult(acc.Email, ProviderAlibaba, false, lat, 0, http.StatusBadGateway)
-		RecordLogEntry(GatewayLogEntry{
+		errEntry := GatewayLogEntry{
 			Provider:       ProviderAlibaba,
 			Account:        acc.Email,
 			RequestedModel: req.Model,
@@ -234,7 +240,9 @@ func (u *GatewayUpstream) tryTarget(
 			IsError:        true,
 			ErrorMessage:   err.Error(),
 			FallbackChain:  target.FallbackChain,
-		})
+		}
+		EnrichLogEntryFromContext(ctx, &errEntry, req)
+		RecordLogEntry(errEntry)
 		log.Printf("[omniroute-go] alibaba target %q failed: %v; trying next provider in chain", target.CanonicalID, err)
 		return err
 
@@ -271,7 +279,7 @@ func (u *GatewayUpstream) tryTarget(
 				if accountEmail != "" {
 					RecordAccountResult(accountEmail, ProviderAntigravity, true, lat, usedTokens, http.StatusOK)
 				}
-				RecordLogEntry(GatewayLogEntry{
+				entry := GatewayLogEntry{
 					Provider:       ProviderAntigravity,
 					Account:        accountEmail,
 					RequestedModel: req.Model,
@@ -281,7 +289,9 @@ func (u *GatewayUpstream) tryTarget(
 					TotalTokens:    usedTokens,
 					IsError:        false,
 					FallbackChain:  target.FallbackChain,
-				})
+				}
+				EnrichLogEntryFromContext(ctx, &entry, req)
+				RecordLogEntry(entry)
 				return nil
 			}
 
@@ -295,7 +305,7 @@ func (u *GatewayUpstream) tryTarget(
 			if accountEmail != "" {
 				RecordAccountResult(accountEmail, ProviderAntigravity, false, lat, 0, failCode)
 			}
-			RecordLogEntry(GatewayLogEntry{
+			errEntry := GatewayLogEntry{
 				Provider:       ProviderAntigravity,
 				Account:        accountEmail,
 				RequestedModel: req.Model,
@@ -305,7 +315,9 @@ func (u *GatewayUpstream) tryTarget(
 				IsError:        true,
 				ErrorMessage:   errMsg,
 				FallbackChain:  target.FallbackChain,
-			})
+			}
+			EnrichLogEntryFromContext(ctx, &errEntry, req)
+			RecordLogEntry(errEntry)
 			lastErr = err
 			log.Printf("[omniroute-go] antigravity CCPA attempt %d for %q (%s, acc=%s) failed: %v", attempt+1, target.RequestedID, target.CCPAModelID, accountEmail, err)
 			if failCode != http.StatusUnauthorized && failCode != http.StatusTooManyRequests {
@@ -740,6 +752,7 @@ func (u *GatewayUpstream) handleDirectCCPA(
 
 		usage := computeCCPAUsage(req, streamedText.Len(), streamedThoughts.Len(), lastUsage)
 		w.Header().Set("X-Omni-Gateway-Tokens", fmt.Sprintf("%d", usage.TotalTokens))
+		SetAuditResponse(ctx, streamedText.String(), usage.PromptTokens, usage.CompletionTokens)
 
 		stopReason := "stop"
 		finalChunk := OpenAIChatResponse{
@@ -828,6 +841,7 @@ func (u *GatewayUpstream) handleDirectCCPA(
 
 	usage := computeCCPAUsage(req, fullText.Len(), fullThoughts.Len(), lastUsage)
 	w.Header().Set("X-Omni-Gateway-Tokens", fmt.Sprintf("%d", usage.TotalTokens))
+	SetAuditResponse(ctx, fullText.String(), usage.PromptTokens, usage.CompletionTokens)
 
 	outResp := OpenAIChatResponse{
 		ID:      respID,
