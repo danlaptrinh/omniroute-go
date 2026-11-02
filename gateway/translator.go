@@ -80,6 +80,12 @@ func (u *GatewayUpstream) HandleChatCompletion(
 	// Inject global Custom System Prompt if enabled in EndpointConfig
 	req = ApplyCustomSystemPrompt(req)
 
+	// Retrieve & inject Long-Term Vector Database RAG memories if enabled
+	if ragReq, ragCount := ApplyVectorMemoryRAG(req); ragCount > 0 {
+		req = ragReq
+		w.Header().Set("X-Omni-Gateway-Vector-Matches", fmt.Sprintf("%d", ragCount))
+	}
+
 	// Apply OmniRoute Prompt and Token Compression pipeline
 	compCfg := GetCompressionConfig()
 	compressedReq, tokensBefore, tokensAfter := CompressRequest(req, compCfg)

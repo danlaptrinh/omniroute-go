@@ -258,8 +258,9 @@ func InitPostgresDB(dsn string) error {
 
 	log.Printf("[omniroute-postgres] Connected to PostgreSQL (%s) and verified schema", MaskPostgresDSN(dsn))
 
-	// Bidirectional sync of API keys on startup
+	// Bidirectional sync of API keys and Vector DB memories on startup
 	syncAPIKeysBidirectional(db)
+	migratePostgresVectorTables(ctx, db)
 	return nil
 }
 

@@ -95,6 +95,7 @@ type SavedGatewayAuth struct {
 	AdminSalt         string             `json:"admin_salt,omitempty"`
 	CompressionConfig *CompressionConfig `json:"compression_config,omitempty"`
 	EndpointConfig    *EndpointConfig    `json:"endpoint_config,omitempty"`
+	VectorDBConfig    *VectorDBConfig    `json:"vector_db_config,omitempty"`
 	PostgresDSN       string             `json:"postgres_dsn,omitempty"`
 	ModelAliases      map[string]string  `json:"model_aliases,omitempty"`
 	EnableHedgedReqs  bool               `json:"enable_hedged_reqs,omitempty"`
@@ -135,6 +136,10 @@ func cloneAuthConfig(src SavedGatewayAuth) SavedGatewayAuth {
 	if src.EndpointConfig != nil {
 		ec := *src.EndpointConfig
 		out.EndpointConfig = &ec
+	}
+	if src.VectorDBConfig != nil {
+		vc := *src.VectorDBConfig
+		out.VectorDBConfig = &vc
 	}
 	if len(src.ModelAliases) > 0 {
 		out.ModelAliases = make(map[string]string, len(src.ModelAliases))

@@ -401,6 +401,10 @@ const gatewayUIHTML = `<!DOCTYPE html>
           <span class="nav-icon">🚀</span>
           <span class="nav-text">Tối Ưu & Bộ Nhớ Đệm</span>
         </button>
+        <button class="nav-btn" onclick="switchNav('view-vectordb')">
+          <span class="nav-icon">🧠</span>
+          <span class="nav-text">Vector DB (Trí Nhớ AI)</span>
+        </button>
         <button class="nav-btn" onclick="switchNav('view-logs')">
           <span class="nav-icon">📋</span>
           <span class="nav-text">Nhật Ký Kết Nối</span>
@@ -1189,6 +1193,133 @@ docker compose up -d --build</pre>
       </div>
     </div>
   </div>
+
+  <!-- VIEW 10: VECTOR DATABASE & LONG-TERM AI MEMORY -->
+  <div id="view-vectordb" class="view-content">
+    <div class="card" style="border:1px solid #2b354f;background:#121723;">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
+        <div>
+          <h2>🧠 Cơ Sở Dữ Liệu Vector &amp; Trí Nhớ Dài Hạn AI (PGVector + Hybrid Semantic RAG)</h2>
+          <div style="font-size:12.5px;color:var(--muted);">
+            Giúp AI càng ngày càng thông minh hơn và ghi nhớ lâu hơn: tự động học từ lịch sử giải quyết vấn đề của nhân viên &amp; tài liệu dự án, sau đó tự động truy xuất ngữ cảnh tương đồng Cosine (Semantic RAG) bơm vào mỗi câu hỏi mới.
+          </div>
+        </div>
+        <span id="vecEngineBadge" class="badge badge-green">🟢 256-dim Cosine Vector DB</span>
+      </div>
+
+      <!-- KPI Cards -->
+      <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(180px, 1fr));gap:12px;margin-top:16px;">
+        <div class="setting-card" style="padding:14px;border-left:3px solid #38bdf8;">
+          <div style="font-size:11px;color:var(--muted);font-weight:600;">TỔNG VECTOR GHI NHỚ</div>
+          <div id="vecStatTotal" style="font-size:25px;font-weight:700;color:#f1f5f9;margin-top:4px;">0</div>
+        </div>
+        <div class="setting-card" style="padding:14px;border-left:3px solid #a855f7;">
+          <div style="font-size:11px;color:#c084fc;font-weight:600;">📌 TRI THỨC CỐ ĐỊNH (PINNED)</div>
+          <div id="vecStatPinned" style="font-size:25px;font-weight:700;color:#c084fc;margin-top:4px;">0</div>
+        </div>
+        <div class="setting-card" style="padding:14px;border-left:3px solid #10b981;">
+          <div style="font-size:11px;color:#34d399;font-weight:600;">🤖 TỰ HỌC TỪ NHÂN VIÊN</div>
+          <div id="vecStatAuto" style="font-size:25px;font-weight:700;color:#10b981;margin-top:4px;">0</div>
+        </div>
+        <div class="setting-card" style="padding:14px;border-left:3px solid #f59e0b;">
+          <div style="font-size:11px;color:#fbbf24;font-weight:600;">⚡ LƯỢT BƠM NGỮ CẢNH RAG</div>
+          <div id="vecStatRagHits" style="font-size:25px;font-weight:700;color:#fbbf24;margin-top:4px;">0</div>
+        </div>
+      </div>
+
+      <!-- Cấu hình Auto-Learn & Auto-RAG -->
+      <div class="setting-card" style="margin-top:16px;">
+        <div class="setting-row">
+          <div class="setting-info">
+            <div class="setting-title">Tự động học từ Prompt &amp; Câu trả lời của Nhân viên (Auto-Learn Memory)</div>
+            <div class="setting-desc">Mỗi khi nhân viên hỏi và nhận được câu trả lời thành công, hệ thống tự động mã hóa Vector 256 chiều và lưu vào bảng <code>omni_vector_memories</code> (tự động chống trùng lặp nếu độ tương đồng &gt; 93%).</div>
+          </div>
+          <button id="toggleVecAutoLearnBtn" class="toggle-btn on" onclick="toggleSetting('toggleVecAutoLearnBtn')">
+            🧠 <span>Đã bật</span>
+          </button>
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-info">
+            <div class="setting-title">Tự động truy xuất Vector &amp; Bơm ngữ cảnh RAG thông minh (Auto-RAG Injection)</div>
+            <div class="setting-desc">Khi bất kỳ nhân viên nào đặt câu hỏi liên quan đến vấn đề từng giải quyết hoặc tài liệu dự án đã ghim, Gateway tự động tìm Top-K vector gần nhất và đính kèm vào System Context để AI trả lời chuẩn xác ngay lập tức.</div>
+          </div>
+          <button id="toggleVecAutoRagBtn" class="toggle-btn on" onclick="toggleSetting('toggleVecAutoRagBtn')">
+            🚀 <span>Đã bật</span>
+          </button>
+        </div>
+
+        <div style="margin-top:12px;padding-top:12px;border-top:1px solid rgba(255,255,255,0.06);display:flex;flex-wrap:wrap;align-items:center;gap:16px;">
+          <div style="display:flex;align-items:center;gap:8px;">
+            <span style="font-size:12.5px;color:#e2e8f0;font-weight:600;">Số Vector lấy ra (Top-K):</span>
+            <input id="vecTopKInput" type="number" value="3" min="1" max="10" style="width:80px;padding:6px 10px;" />
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;">
+            <span style="font-size:12.5px;color:#e2e8f0;font-weight:600;">Ngưỡng tương đồng Cosine (0.10 - 0.90):</span>
+            <input id="vecMinSimInput" type="number" value="0.24" min="0.05" max="0.95" step="0.02" style="width:95px;padding:6px 10px;" />
+          </div>
+          <button class="btn-primary" onclick="saveVectorDBConfigUI()">💾 Lưu Cấu Hình Vector DB</button>
+          <span id="vecConfigMsg" class="hint"></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Nạp Tri Thức Cốt Lõi / Tài Liệu Dự Án -->
+    <div class="card">
+      <h2>📌 Nạp Tri Thức Cốt Lõi &amp; Tài Liệu Dự Án (Pinned Knowledge Base)</h2>
+      <div style="font-size:12.5px;color:var(--muted);margin-bottom:12px;">
+        Thêm kiến thức dự án (ví dụ: kiến trúc server BuCloud, quy chuẩn đặt tên biến, cấu hình Docker/DB nội bộ...) để toàn bộ nhân viên khi hỏi AI đều được AI ghi nhớ và áp dụng chính xác.
+      </div>
+      <div class="grid-2">
+        <div>
+          <label class="form-label">Tiêu đề Tri thức / Chủ đề</label>
+          <input id="vecAddTitle" type="text" placeholder="Ví dụ: Quy chuẩn triển khai Docker &amp; PostgreSQL dự án BuCloud" />
+        </div>
+        <div>
+          <label class="form-label">Danh mục (Category)</label>
+          <select id="vecAddCategory">
+            <option value="knowledge">📌 Tri thức cốt lõi / Tài liệu công ty</option>
+            <option value="bucloud">☁️ Dự án BuCloud / Hạ tầng VPS</option>
+            <option value="coding">💻 Quy chuẩn Code &amp; Kiến trúc</option>
+          </select>
+        </div>
+      </div>
+      <div class="grid-2" style="margin-top:10px;">
+        <div>
+          <label class="form-label">Câu hỏi / Từ khóa tình huống nhận diện</label>
+          <textarea id="vecAddPrompt" rows="3" placeholder="Ví dụ: Khi nhân viên hỏi về cách deploy BuCloud, cổng kết nối DB hoặc lỗi kết nối API..."></textarea>
+        </div>
+        <div>
+          <label class="form-label">Kiến thức chuẩn / Giải pháp AI cần ghi nhớ</label>
+          <textarea id="vecAddAnswer" rows="3" placeholder="Ví dụ: Hệ thống sử dụng PostgreSQL 16 (pgvector), cổng 8787 cho AI Gateway, xác thực bằng Bearer sk-omni-..."></textarea>
+        </div>
+      </div>
+      <div class="btn-row" style="justify-content:flex-end;margin-top:10px;">
+        <button class="btn-purple" onclick="addPinnedVectorMemory()">+ Lưu Vào Vector Database (Ghim Cố Định)</button>
+      </div>
+    </div>
+
+    <!-- Tìm kiếm Ngữ nghĩa Vector & Danh sách Trí nhớ -->
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
+        <div>
+          <h2>🔎 Tìm Kiếm Ngữ Nghĩa Vector (Cosine Similarity Search) &amp; Kho Trí Nhớ</h2>
+          <div style="font-size:12.5px;color:var(--muted);">Thử nhập một câu hỏi để xem Vector Database tính toán điểm tương đồng Cosine (%) và trích xuất ký ức như thế nào.</div>
+        </div>
+        <div style="display:flex;gap:8px;">
+          <button onclick="loadVectorDB()">🔄 Làm mới</button>
+          <button onclick="clearAutoVectorMemories()" style="color:#f87171;">🗑️ Xoá Vector Tự Học (Giữ lại Ghim)</button>
+        </div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr auto;gap:8px;margin-top:12px;">
+        <input id="vecSearchQueryInput" type="text" placeholder="🔎 Nhập câu hỏi hoặc chủ đề để tìm kiếm Vector tương đồng Cosine..." onkeydown="if(event.key==='Enter')searchVectorMemoriesUI()" />
+        <button class="btn-primary" onclick="searchVectorMemoriesUI()">🔍 Tìm Kiếm Vector</button>
+      </div>
+
+      <div id="vectorMemoriesListBox" style="margin-top:14px;">Đang tải dữ liệu Vector Database...</div>
+    </div>
+  </div>
     </main>
   </div>
 
@@ -1882,6 +2013,7 @@ docker compose up -d --build</pre>
       if (viewId === 'view-providers') loadProvidersAndAccounts();
       if (viewId === 'view-compression') loadCompressionConfig();
       if (viewId === 'view-optimization') loadOptimizationConfig();
+      if (viewId === 'view-vectordb') loadVectorDB();
     }
 
     function switchProvTab(tabId) {
@@ -2162,14 +2294,7 @@ docker compose up -d --build</pre>
     }
 
     function inspectEmployeePrompts(keyId, employeeName) {
-      const navBtns = document.querySelectorAll('.nav-tab');
-      let logsBtn = null;
-      navBtns.forEach(b => {
-        if (b.getAttribute('onclick') && b.getAttribute('onclick').includes('view-logs')) {
-          logsBtn = b;
-        }
-      });
-      switchMainTab('view-logs', logsBtn);
+      switchNav('view-logs');
       const sel = document.getElementById('logEmployeeFilterSelect');
       if (sel) {
         let found = false;
@@ -3042,6 +3167,207 @@ docker compose up -d --build</pre>
       } catch (e) {
         alert('Lỗi: ' + e.message);
       }
+    }
+
+    // --- VECTOR DATABASE & LONG-TERM AI MEMORY FLOW ---
+
+    async function loadVectorDB() {
+      const box = document.getElementById('vectorMemoriesListBox');
+      try {
+        const r = await fetch('/v1/vector');
+        const d = await r.json();
+        renderVectorDBStatus(d);
+        renderVectorMemoriesList(d.memories || []);
+      } catch (err) {
+        if (box) box.innerHTML = '<div style="color:#f87171;">Lỗi tải Vector DB: ' + htmlEscape(err.message) + '</div>';
+      }
+    }
+
+    function renderVectorDBStatus(d) {
+      if (!d) return;
+      const elTotal = document.getElementById('vecStatTotal');
+      const elPinned = document.getElementById('vecStatPinned');
+      const elAuto = document.getElementById('vecStatAuto');
+      const elHits = document.getElementById('vecStatRagHits');
+      const elBadge = document.getElementById('vecEngineBadge');
+
+      if (elTotal) elTotal.textContent = Number(d.total_memories || 0).toLocaleString();
+      if (elPinned) elPinned.textContent = Number(d.pinned_count || 0).toLocaleString();
+      if (elAuto) elAuto.textContent = Number(d.auto_learned_count || 0).toLocaleString();
+      if (elHits && d.config) elHits.textContent = Number(d.config.total_rag_hits || 0).toLocaleString();
+      if (elBadge && d.engine) elBadge.textContent = '🟢 ' + d.engine;
+
+      if (d.config) {
+        const learnBtn = document.getElementById('toggleVecAutoLearnBtn');
+        const ragBtn = document.getElementById('toggleVecAutoRagBtn');
+        if (learnBtn) {
+          if (d.config.auto_learn_prompts !== false) {
+            learnBtn.classList.add('on');
+            learnBtn.innerHTML = '🧠 <span>Đã bật</span>';
+          } else {
+            learnBtn.classList.remove('on');
+            learnBtn.innerHTML = '🧠 <span>Đã tắt</span>';
+          }
+        }
+        if (ragBtn) {
+          if (d.config.auto_inject_rag !== false) {
+            ragBtn.classList.add('on');
+            ragBtn.innerHTML = '🚀 <span>Đã bật</span>';
+          } else {
+            ragBtn.classList.remove('on');
+            ragBtn.innerHTML = '🚀 <span>Đã tắt</span>';
+          }
+        }
+        const topKInp = document.getElementById('vecTopKInput');
+        const simInp = document.getElementById('vecMinSimInput');
+        if (topKInp && d.config.top_k) topKInp.value = d.config.top_k;
+        if (simInp && d.config.min_similarity) simInp.value = d.config.min_similarity;
+      }
+    }
+
+    function renderVectorMemoriesList(memories) {
+      const box = document.getElementById('vectorMemoriesListBox');
+      if (!box) return;
+      if (!memories || memories.length === 0) {
+        box.innerHTML = '<div style="color:var(--muted);padding:14px;background:var(--card-inner);border-radius:8px;">' +
+          'Kho Vector Database hiện chưa có bản ghi nào. Bạn có thể thêm <strong>Tri thức cốt lõi</strong> ở trên hoặc để nhân viên trò chuyện với AI để hệ thống tự động học và ghi nhớ!</div>';
+        return;
+      }
+
+      let html = '<div style="display:flex;flex-direction:column;gap:10px;">';
+      for (const m of memories) {
+        const typeBadge = m.pinned
+          ? '<span class="badge badge-purple" style="background:#581c87;color:#e9d5ff;">📌 Tri thức Ghim (' + htmlEscape(m.category || 'knowledge') + ')</span>'
+          : '<span class="badge badge-antigravity">🤖 Tự học từ Prompt</span>';
+
+        const simBadge = m.similarity
+          ? ('<span class="badge badge-green">🎯 Cosine Similarity: ' + (m.similarity * 100).toFixed(1) + '%</span>')
+          : '';
+
+        const empBadge = m.employee_name
+          ? ('<span style="color:#38bdf8;font-size:11.5px;">👤 ' + htmlEscape(m.employee_name) + '</span>')
+          : '';
+
+        html += '<div style="background:var(--card-inner);border:1px solid rgba(255,255,255,0.08);border-radius:8px;padding:12px 14px;">' +
+          '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:6px;">' +
+            '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">' +
+              typeBadge +
+              simBadge +
+              '<strong>' + htmlEscape(m.title || 'Vector Memory') + '</strong>' +
+              empBadge +
+            '</div>' +
+            '<div style="display:flex;align-items:center;gap:10px;">' +
+              '<span style="color:var(--muted);font-size:11px;">Hits: ' + (m.hit_count || 1) + ' | ' + htmlEscape((m.created_at || '').replace('T', ' ').slice(0, 19)) + '</span>' +
+              '<button onclick="deleteVectorMemoryUI(\'' + htmlEscape(m.id) + '\')" style="color:#f87171;padding:3px 8px;font-size:11px;">Xoá</button>' +
+            '</div>' +
+          '</div>' +
+          (m.prompt_text ? ('<div style="font-size:12px;color:#cbd5e1;background:#0a0e17;padding:8px 10px;border-radius:6px;border:1px solid #1e293b;margin-top:6px;"><strong style="color:#38bdf8;">Câu hỏi / Ngữ cảnh:</strong> ' + htmlEscape(m.prompt_text) + '</div>') : '') +
+          (m.answer_text ? ('<div style="font-size:12px;color:#e2e8f0;background:rgba(16,185,129,0.06);padding:8px 10px;border-radius:6px;border:1px solid rgba(16,185,129,0.2);margin-top:6px;white-space:pre-wrap;"><strong style="color:#34d399;">Kiến thức / Giải pháp đã nhớ:</strong> ' + htmlEscape(m.answer_text.length > 450 ? (m.answer_text.slice(0, 450) + '...') : m.answer_text) + '</div>') : '') +
+        '</div>';
+      }
+      html += '</div>';
+      box.innerHTML = html;
+    }
+
+    async function saveVectorDBConfigUI() {
+      const autoLearn = document.getElementById('toggleVecAutoLearnBtn').classList.contains('on');
+      const autoRag = document.getElementById('toggleVecAutoRagBtn').classList.contains('on');
+      const topK = parseInt(document.getElementById('vecTopKInput').value || '3', 10);
+      const minSim = parseFloat(document.getElementById('vecMinSimInput').value || '0.24');
+      const msg = document.getElementById('vecConfigMsg');
+
+      try {
+        const r = await fetch('/v1/vector', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            action: 'config',
+            enabled: true,
+            auto_learn_prompts: autoLearn,
+            auto_inject_rag: autoRag,
+            top_k: topK,
+            min_similarity: minSim
+          })
+        });
+        const d = await r.json();
+        renderVectorDBStatus(d);
+        if (msg) msg.innerHTML = '<span style="color:#34d399;">✔ Đã lưu cấu hình Vector Database!</span>';
+      } catch (err) {
+        if (msg) msg.innerHTML = '<span style="color:#f87171;">Lỗi: ' + htmlEscape(err.message) + '</span>';
+      }
+    }
+
+    async function addPinnedVectorMemory() {
+      const title = document.getElementById('vecAddTitle').value.trim();
+      const category = document.getElementById('vecAddCategory').value;
+      const promptText = document.getElementById('vecAddPrompt').value.trim();
+      const answerText = document.getElementById('vecAddAnswer').value.trim();
+
+      if (!promptText && !answerText) {
+        alert('Vui lòng nhập nội dung câu hỏi/tình huống hoặc kiến thức cần ghi nhớ!');
+        return;
+      }
+
+      try {
+        const r = await fetch('/v1/vector', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            action: 'add',
+            title: title,
+            category: category,
+            prompt_text: promptText,
+            answer_text: answerText,
+            pinned: true
+          })
+        });
+        if (r.ok) {
+          document.getElementById('vecAddTitle').value = '';
+          document.getElementById('vecAddPrompt').value = '';
+          document.getElementById('vecAddAnswer').value = '';
+          loadVectorDB();
+        } else {
+          const d = await r.json();
+          alert('Lỗi: ' + (d.error ? d.error.message : 'Không thể lưu'));
+        }
+      } catch (err) {
+        alert('Lỗi kết nối: ' + err.message);
+      }
+    }
+
+    async function searchVectorMemoriesUI() {
+      const q = document.getElementById('vecSearchQueryInput').value.trim();
+      if (!q) {
+        loadVectorDB();
+        return;
+      }
+      try {
+        const r = await fetch('/v1/vector', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            action: 'search',
+            query: q,
+            top_k: 15
+          })
+        });
+        const d = await r.json();
+        renderVectorMemoriesList(d.matches || []);
+      } catch (err) {
+        alert('Lỗi tìm kiếm vector: ' + err.message);
+      }
+    }
+
+    async function deleteVectorMemoryUI(id) {
+      if (!confirm('Bạn có muốn xoá bản ghi Vector Memory này?')) return;
+      await fetch('/v1/vector?id=' + encodeURIComponent(id), {method: 'DELETE'});
+      loadVectorDB();
+    }
+
+    async function clearAutoVectorMemories() {
+      if (!confirm('Xoá toàn bộ các Vector tự học (nhưng vẫn giữ nguyên các Tri thức Cốt lõi đã ghim)?')) return;
+      await fetch('/v1/vector?id=all_auto', {method: 'DELETE'});
+      loadVectorDB();
     }
 
     // Initialize on load

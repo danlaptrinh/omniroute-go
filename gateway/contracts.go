@@ -262,6 +262,33 @@ type EndpointConfig struct {
 	CustomSystemPrompt   string `json:"custom_system_prompt,omitempty"`    // Custom system prompt text
 }
 
+// VectorDBConfig holds settings for the Long-Term Semantic Vector Database & RAG Memory Engine.
+type VectorDBConfig struct {
+	Enabled          bool    `json:"enabled"`             // Enable Vector Database & Long-Term Memory
+	AutoLearnPrompts bool    `json:"auto_learn_prompts"`  // Automatically embed & store employee prompts + AI answers
+	AutoInjectRAG    bool    `json:"auto_inject_rag"`     // Automatically retrieve & inject Top-K similar memories into prompts
+	TopK             int     `json:"top_k"`               // Number of similar memories to retrieve (default: 3)
+	MinSimilarity    float64 `json:"min_similarity"`      // Minimum Cosine Similarity threshold (default: 0.25)
+	TotalRAGHits     int64   `json:"total_rag_hits"`      // Total times Vector RAG enriched an incoming prompt
+}
+
+// VectorMemoryEntry represents a single semantic vector memory (either pinned knowledge or auto-learned Q&A).
+type VectorMemoryEntry struct {
+	ID           string    `json:"id"`
+	CreatedAt    string    `json:"created_at"`
+	Title        string    `json:"title"`
+	Category     string    `json:"category"` // e.g. "knowledge", "auto_qa", "bucloud", "coding"
+	EmployeeName string    `json:"employee_name,omitempty"`
+	APIKeyID     string    `json:"api_key_id,omitempty"`
+	Model        string    `json:"model,omitempty"`
+	PromptText   string    `json:"prompt_text"`
+	AnswerText   string    `json:"answer_text"`
+	Pinned       bool      `json:"pinned"`
+	HitCount     int64     `json:"hit_count"`
+	Similarity   float64   `json:"similarity,omitempty"` // Populated during semantic search
+	Embedding    []float32 `json:"embedding,omitempty"`
+}
+
 // UpstreamHandler executes a resolved request across Antigravity, Claude Code, and Alibaba Token Plan.
 type UpstreamHandler interface {
 	HandleChatCompletion(ctx context.Context, w http.ResponseWriter, req OpenAIChatRequest, resolved ResolvedModel, incomingAuth string) error

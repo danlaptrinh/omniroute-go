@@ -69,6 +69,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/keys", s.handleAPIKeys)
 	mux.HandleFunc("/v1/logs", s.handleLogs)
 	mux.HandleFunc("/v1/database", s.handleDatabaseConfig)
+	mux.HandleFunc("/v1/vector", s.handleVectorDB)
 	mux.HandleFunc("/v1/quota", s.handleQuotaSummary)
 	mux.HandleFunc("/v1/quota/toggle", s.handleQuotaToggle)
 	mux.HandleFunc("/v1/quota/threshold", s.handleQuotaThreshold)
@@ -479,6 +480,121 @@ func (s *Server) handleDatabaseConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(status)
+	default:
+		writeOpenAIError(w, http.StatusMethodNotAllowed, "method not allowed", "invalid_request_error")
+	}
+}
+
+func (s *Server) handleVectorDB(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		q := strings.TrimSpace(r.URL.Query().Get("q"))
+		var memories []VectorMemoryEntry
+		if q != "" {
+			memories = SearchVectorMemories(q, 20, 0.05)
+		} else {
+			memories = ListVectorMemories(100)
+		}
+		res := GetVectorDBStatus()
+		res["memories"] = memories
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(res)
+
+	case http.MethodPost:
+		var payload struct {
+			Action           string  `json:"action"` // "config", "add", "search"
+			Enabled          *bool   `json:"enabled,omitempty"`
+			AutoLearnPrompts *bool   `json:"auto_learn_prompts,omitempty"`
+			AutoInjectRAG    *bool   `json:"auto_inject_rag,omitempty"`
+			TopK             int     `json:"top_k,omitempty"`
+			MinSimilarity    float64 `json:"min_similarity,omitempty"`
+			Title            string  `json:"title,omitempty"`
+			Category         string  `json:"category,omitempty"`
+			PromptText       string  `json:"prompt_text,omitempty"`
+			AnswerText       string  `json:"answer_text,omitempty"`
+			Pinned           bool    `json:"pinned,omitempty"`
+			Query            string  `json:"query,omitempty"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 256*1024)).Decode(&payload); err != nil {
+			writeOpenAIError(w, http.StatusBadRequest, "invalid JSON payload: "+err.Error(), "invalid_request_error")
+			return
+		}
+
+		switch strings.ToLower(strings.TrimSpace(payload.Action)) {
+		case "config":
+			vc := GetVectorDBConfig()
+			if payload.Enabled != nil {
+				vc.Enabled = *payload.Enabled
+			}
+			if payload.AutoLearnPrompts != nil {
+				vc.AutoLearnPrompts = *payload.AutoLearnPrompts
+			}
+			if payload.AutoInjectRAG != nil {
+				vc.AutoInjectRAG = *payload.AutoInjectRAG
+			}
+			if payload.TopK > 0 {
+				vc.TopK = payload.TopK
+			}
+			if payload.MinSimilarity > 0 {
+				vc.MinSimilarity = payload.MinSimilarity
+			}
+			if err := SaveVectorDBConfig(vc); err != nil {
+				writeOpenAIError(w, http.StatusInternalServerError, err.Error(), "vector_config_error")
+				return
+			}
+			res := GetVectorDBStatus()
+			res["status"] = "saved"
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(res)
+
+		case "search":
+			topK := payload.TopK
+			if topK <= 0 {
+				topK = 10
+			}
+			matches := SearchVectorMemories(payload.Query, topK, 0.05)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status":  "ok",
+				"query":   payload.Query,
+				"matches": matches,
+				"total":   len(matches),
+			})
+
+		default: // "add"
+			entry, err := AddVectorMemory(
+				payload.Title,
+				payload.Category,
+				payload.PromptText,
+				payload.AnswerText,
+				"Admin Knowledge Base",
+				"",
+				"manual",
+				payload.Pinned,
+			)
+			if err != nil {
+				writeOpenAIError(w, http.StatusBadRequest, err.Error(), "vector_add_error")
+				return
+			}
+			entry.Embedding = nil
+			res := GetVectorDBStatus()
+			res["status"] = "added"
+			res["entry"] = entry
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(res)
+		}
+
+	case http.MethodDelete:
+		id := strings.TrimSpace(r.URL.Query().Get("id"))
+		if err := DeleteVectorMemory(id); err != nil {
+			writeOpenAIError(w, http.StatusBadRequest, err.Error(), "vector_delete_error")
+			return
+		}
+		res := GetVectorDBStatus()
+		res["status"] = "deleted"
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(res)
+
 	default:
 		writeOpenAIError(w, http.StatusMethodNotAllowed, "method not allowed", "invalid_request_error")
 	}
