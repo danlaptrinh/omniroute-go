@@ -37,8 +37,10 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleRootOrHealth)
 	mux.HandleFunc("/healthz", s.handleRootOrHealth)
+	mux.HandleFunc("/v1/health", s.handleRootOrHealth)
 	mux.HandleFunc("/ui", s.handleUI)
 	mux.HandleFunc("/dashboard", s.handleUI)
+	mux.HandleFunc("/dashboard/", s.handleUI)
 	mux.HandleFunc("/dashboard/endpoint", s.handleUI)
 	mux.HandleFunc("/callback", s.handleOAuthCallback)
 	mux.HandleFunc("/v1/endpoint", s.handleEndpointAPI)
@@ -86,7 +88,11 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) handleRootOrHealth(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" && r.URL.Path != "/healthz" {
+	if r.URL.Path == "/" && r.URL.Query().Get("format") != "json" {
+		s.handleUI(w, r)
+		return
+	}
+	if r.URL.Path != "/" && r.URL.Path != "/healthz" && r.URL.Path != "/v1/health" {
 		writeOpenAIError(w, http.StatusNotFound, "endpoint not found: "+r.URL.Path, "invalid_request_error")
 		return
 	}
