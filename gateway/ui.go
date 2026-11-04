@@ -389,6 +389,10 @@ const gatewayUIHTML = `<!DOCTYPE html>
           <span class="nav-icon">🔗</span>
           <span class="nav-text">Combo Đa Mô Hình</span>
         </button>
+        <button class="nav-btn" onclick="switchNav('view-subagents')">
+          <span class="nav-icon">🐝</span>
+          <span class="nav-text">Sub-Agents Song Song</span>
+        </button>
         <button class="nav-btn" onclick="switchNav('view-providers')">
           <span class="nav-icon">🔌</span>
           <span class="nav-text">Kết Nối Nhà Cung Cấp</span>
@@ -1485,6 +1489,121 @@ docker compose up -d --build</pre>
       <div id="comboSaveMsg" class="hint"></div>
     </div>
   </div>
+
+  <!-- VIEW 12: PARALLEL SUB-AGENTS SWARM ENGINE (50 ANTIGRAVITY ACCOUNTS) -->
+  <div id="view-subagents" class="view-content">
+    <div class="card" style="border:1px solid #2b354f;background:#121723;">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;">
+        <div>
+          <h2>🐝 Cơ Chế Chạy Nhiều Sub-Agents Cùng Lúc (50-Account Parallel Goroutine Swarm)</h2>
+          <div style="font-size:12.5px;color:var(--muted);">
+            Phân bổ <strong>1 Sub-Agent = 1 Tài khoản Antigravity độc lập</strong> (Least In-Flight + Account Pinning). Khi có 50 tài khoản trong Pool, bạn có thể kích hoạt <strong>50 Sub-Agents chạy song song 100% cùng 1 mili-giây</strong> mà không bao giờ bị đụng Rate-Limit hay nghẽn hàng đợi.
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <span class="badge badge-green">🟢 100% Parallel Goroutines</span>
+          <button onclick="loadSubAgentsView()">🔄 Làm mới trạng thái</button>
+        </div>
+      </div>
+
+      <!-- KPI Cards -->
+      <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(185px, 1fr));gap:12px;margin-top:16px;">
+        <div class="setting-card" style="padding:14px;border-left:3px solid #fb923c;">
+          <div style="font-size:11px;color:var(--muted);font-weight:600;">TÀI KHOẢN ANTIGRAVITY (MỤC TIÊU 50)</div>
+          <div id="saKpiAgyCount" style="font-size:25px;font-weight:700;color:#fb923c;margin-top:4px;">0 / 50</div>
+        </div>
+        <div class="setting-card" style="padding:14px;border-left:3px solid #10b981;">
+          <div style="font-size:11px;color:#34d399;font-weight:600;">SLOT SẴN SÀNG CHẠY SONG SONG</div>
+          <div id="saKpiReadyCount" style="font-size:25px;font-weight:700;color:#10b981;margin-top:4px;">0</div>
+        </div>
+        <div class="setting-card" style="padding:14px;border-left:3px solid #a855f7;">
+          <div style="font-size:11px;color:#c084fc;font-weight:600;">🔥 SUB-AGENTS ĐANG CHẠY CÙNG LÚC</div>
+          <div id="saKpiActiveNow" style="font-size:25px;font-weight:700;color:#c084fc;margin-top:4px;">0</div>
+        </div>
+        <div class="setting-card" style="padding:14px;border-left:3px solid #38bdf8;">
+          <div style="font-size:11px;color:#38bdf8;font-weight:600;">⚡ TỔNG SUB-AGENTS ĐÃ THỰC THI</div>
+          <div id="saKpiTotalRun" style="font-size:25px;font-weight:700;color:#38bdf8;margin-top:4px;">0</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Ma Trận 50 Tài Khoản & Slot Sub-Agent -->
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:10px;">
+        <div>
+          <h2>🎛️ Ma Trận Phân Tải Tài Khoản Thời Gian Thực (1 Slot = 1 Sub-Agent)</h2>
+          <div style="font-size:12px;color:var(--muted);">Bộ cân bằng tải <code>Least-In-Flight + Atomic Round-Robin</code> tự động gán mỗi Sub-Agent vào một tài khoản đang rảnh (<code>In-Flight = 0</code>) để tối đa hóa tốc độ khi chạy 50 tài khoản.</div>
+        </div>
+        <button onclick="switchNav('view-providers')">+ Thêm Tài Khoản Mới</button>
+      </div>
+      <div id="saAccountSlotsGrid" style="display:grid;grid-template-columns:repeat(auto-fill, minmax(250px, 1fr));gap:10px;">
+        Đang tải ma trận tài khoản...
+      </div>
+    </div>
+
+    <!-- Bảng Điều Khiển Kích Hoạt Đàn Sub-Agents Song Song -->
+    <div class="card" style="border:1px solid #2b354f;">
+      <h2>🚀 Kích Hoạt Đàn Sub-Agents Chạy Cùng 1 Lúc (Parallel Swarm Dispatcher)</h2>
+      <div style="font-size:12.5px;color:var(--muted);margin-bottom:14px;">
+        Giao một bài toán lớn hoặc danh sách các module độc lập để hệ thống phóng đồng loạt N Sub-Agents chạy song song trên N tài khoản Antigravity khác nhau:
+      </div>
+
+      <div class="grid-2">
+        <div>
+          <label class="form-label">Số lượng Sub-Agents chạy đồng thời</label>
+          <select id="saAgentCountSelect">
+            <option value="3">3 Sub-Agents chạy cùng lúc (3 Tài khoản song song)</option>
+            <option value="5" selected>5 Sub-Agents chạy cùng lúc (5 Tài khoản song song)</option>
+            <option value="8">8 Sub-Agents chạy cùng lúc (8 Tài khoản song song)</option>
+            <option value="10">10 Sub-Agents chạy cùng lúc (10 Tài khoản song song)</option>
+            <option value="20">20 Sub-Agents chạy cùng lúc (20 Tài khoản song song)</option>
+            <option value="30">30 Sub-Agents chạy cùng lúc (30 Tài khoản song song)</option>
+            <option value="50">50 Sub-Agents chạy cùng lúc (Toàn bộ 50 Tài khoản Antigravity)</option>
+          </select>
+        </div>
+        <div>
+          <label class="form-label">Model sử dụng cho Đàn Sub-Agents</label>
+          <select id="saModelSelect">
+            <option value="antigravity/gemini-4-argon-high" selected>antigravity/gemini-4-argon-high (Gemini 4 Argon High - Ưu tiên Pool Antigravity)</option>
+            <option value="antigravity/gemini-3.8-flash-high">antigravity/gemini-3.8-flash-high (Tốc độ siêu nhanh)</option>
+            <option value="antigravity/gemini-3.1-pro-high">antigravity/gemini-3.1-pro-high</option>
+            <option value="auto/best-coding">auto/best-coding (Argon 4 ➔ Claude Opus 5.5 ➔ Qwen 3.8 Max)</option>
+            <option value="claude-code/claude-opus-5-5">claude-code/claude-opus-5-5 (Claude Opus 5.5)</option>
+            <option value="alibaba/qwen3.8-max">alibaba/qwen3.8-max (⚡ 40% Off Nights)</option>
+          </select>
+        </div>
+      </div>
+
+      <div style="margin-top:12px;">
+        <label class="form-label">Bài toán lớn / Yêu cầu dự án (Hệ thống sẽ tự động phân tách cho N Sub-Agents chuyên biệt làm việc cùng lúc — hoặc nhập mỗi dòng 1 nhiệm vụ nếu muốn giao việc riêng)</label>
+        <textarea id="saMasterGoalInput" rows="4" placeholder="Ví dụ: Thiết kế và viết mã nguồn hệ thống quản lý Cloud VPS tự động cho BuCloud gồm: Kiến trúc tổng thể, API thanh toán, Quản lý Docker Container, Schema PostgreSQL và Giao diện Dashboard..."></textarea>
+      </div>
+
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:12px;flex-wrap:wrap;gap:10px;">
+        <label style="font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px;cursor:pointer;">
+          <input type="checkbox" id="saLineByLineCheckbox" style="width:auto;" /> Mỗi dòng là 1 nhiệm vụ Sub-Agent riêng biệt (Custom Tasks Mode)
+        </label>
+        <button id="saLaunchBtn" class="btn-primary" onclick="launchSubAgentSwarmUI()">🚀 Phóng Đàn Sub-Agents Chạy Song Song Ngay</button>
+      </div>
+      <div id="saLaunchStatus" class="hint" style="margin-top:8px;"></div>
+
+      <!-- Kết quả thực thi Đàn Sub-Agents -->
+      <div id="saSwarmResultsBox" style="margin-top:16px;"></div>
+    </div>
+
+    <!-- Nhập Hàng Loạt 50 Tài Khoản Antigravity -->
+    <div class="card">
+      <h2>📥 Nhập Nhanh Hàng Loạt 50 Tài Khoản Antigravity (Bulk Account Importer)</h2>
+      <div style="font-size:12.5px;color:var(--muted);margin-bottom:10px;">
+        Ngoài việc bấm kết nối từng tài khoản ở mục <strong>🔌 Kết Nối Nhà Cung Cấp</strong>, bạn có thể dán danh sách nhiều URL Callback OAuth, Refresh Token (<code>1//0g...</code> hoặc <code>email@gmail.com|1//0g...</code>) hoặc Access Token (<code>ya29...</code>) — mỗi dòng 1 tài khoản — để nạp nhanh đủ 50 tài khoản vào Pool:
+      </div>
+      <textarea id="saBulkImportInput" rows="4" placeholder="Mỗi dòng 1 tài khoản:&#10;http://127.0.0.1:20128/callback?code=4/0A...&#10;acc1@gmail.com|1//0gxxxxxxx...&#10;ya29.a0AfH6SM..."></textarea>
+      <div class="btn-row" style="justify-content:flex-end;margin-top:10px;">
+        <button class="btn-purple" onclick="submitBulkImportAccounts()">📥 Nạp Hàng Loạt Vào Pool Antigravity</button>
+      </div>
+      <div id="saBulkImportMsg" class="hint"></div>
+    </div>
+  </div>
     </main>
   </div>
 
@@ -2175,6 +2294,7 @@ docker compose up -d --build</pre>
       if (viewId === 'view-quota') loadQuotaSummary();
       if (viewId === 'view-models') loadModelsDiagnostics();
       if (viewId === 'view-combos') loadCombosView();
+      if (viewId === 'view-subagents') loadSubAgentsView();
       if (viewId === 'view-keys') loadApiKeys();
       if (viewId === 'view-logs') loadLogs();
       if (viewId === 'view-providers') loadProvidersAndAccounts();
@@ -3878,6 +3998,207 @@ docker compose up -d --build</pre>
           sel.appendChild(opt);
           sel.value = comboId;
         }
+      }
+    }
+
+    // --- PARALLEL SUB-AGENTS SWARM & 50-ACCOUNT POOL FLOW ---
+    let saPollingTimer = null;
+
+    async function loadSubAgentsView() {
+      try {
+        const r = await fetch('/v1/subagents');
+        const d = await r.json();
+        const agyEl = document.getElementById('saKpiAgyCount');
+        const rdyEl = document.getElementById('saKpiReadyCount');
+        const actEl = document.getElementById('saKpiActiveNow');
+        const totEl = document.getElementById('saKpiTotalRun');
+        if (agyEl) agyEl.textContent = (d.antigravity_accounts || 0) + ' / ' + (d.max_parallel_target || 50);
+        if (rdyEl) rdyEl.textContent = d.ready_accounts || 0;
+        if (actEl) actEl.textContent = d.active_sub_agents || 0;
+        if (totEl) totEl.textContent = d.total_sub_agents_run || 0;
+
+        renderSubAgentSlots(d.account_slots || []);
+        if (d.recent_swarms && d.recent_swarms.length > 0 && !document.getElementById('saSwarmResultsBox').innerHTML.trim()) {
+          renderSwarmSummary(d.recent_swarms[0]);
+        }
+      } catch (err) {
+        console.error('Failed to load subagents status:', err);
+      }
+    }
+
+    function renderSubAgentSlots(slots) {
+      const box = document.getElementById('saAccountSlotsGrid');
+      if (!box) return;
+      if (!slots || slots.length === 0) {
+        box.innerHTML = '<div style="color:var(--muted);">Chưa có tài khoản nào trong Pool.</div>';
+        return;
+      }
+
+      let html = '';
+      slots.forEach(s => {
+        const isBusy = s.in_flight > 0;
+        const borderCol = isBusy ? '#a855f7' : (s.in_cooldown ? '#f59e0b' : '#242c3d');
+        const bgCol = isBusy ? 'rgba(168, 85, 247, 0.1)' : '#10141f';
+        const statusBadge = !s.enabled
+          ? '<span style="color:#64748b;font-size:11px;">⏸️ Đã tắt</span>'
+          : (isBusy
+              ? '<span style="color:#c084fc;font-weight:700;font-size:11px;">🔥 Đang chạy (' + s.in_flight + ' Sub-Agent)</span>'
+              : (s.in_cooldown
+                  ? '<span style="color:#fbbf24;font-size:11px;">⏳ Cooldown</span>'
+                  : '<span style="color:#34d399;font-weight:600;font-size:11px;">🟢 Rảnh 100% (Idle)</span>'));
+
+        let provColor = '#fb923c';
+        if (s.provider === 'claude-code') provColor = '#c084fc';
+        else if (s.provider === 'alibaba') provColor = '#38bdf8';
+
+        html += '<div style="background:' + bgCol + ';border:1px solid ' + borderCol + ';border-radius:10px;padding:11px 12px;">' +
+          '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px;">' +
+            '<span style="font-size:11px;font-weight:700;color:' + provColor + ';">SLOT #' + s.slot_index + ' • ' + htmlEscape(s.provider.toUpperCase()) + '</span>' +
+            statusBadge +
+          '</div>' +
+          '<div style="font-size:12.5px;font-weight:700;color:#f1f5f9;word-break:break-all;margin-bottom:4px;">' + htmlEscape(s.email) + '</div>' +
+          (s.active_role ? '<div style="font-size:11px;color:#c084fc;margin-bottom:4px;">🤖 ' + htmlEscape(s.active_role) + '</div>' : '') +
+          '<div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted);border-top:1px solid rgba(255,255,255,0.05);padding-top:5px;margin-top:4px;">' +
+            '<span>Req: <strong style="color:#cbd5e1;">' + (s.success_count || 0) + '</strong></span>' +
+            '<span>Tok: <strong style="color:#38bdf8;">' + Number(s.total_tokens || 0).toLocaleString() + '</strong></span>' +
+            '<span>Lat: <strong style="color:#34d399;">' + (s.avg_latency_ms ? s.avg_latency_ms + 'ms' : '—') + '</strong></span>' +
+          '</div>' +
+        '</div>';
+      });
+      box.innerHTML = html;
+    }
+
+    async function launchSubAgentSwarmUI() {
+      const goal = document.getElementById('saMasterGoalInput').value.trim();
+      const count = parseInt(document.getElementById('saAgentCountSelect').value || '5', 10);
+      const model = document.getElementById('saModelSelect').value;
+      const lineByLine = document.getElementById('saLineByLineCheckbox').checked;
+      const statusBox = document.getElementById('saLaunchStatus');
+      const btn = document.getElementById('saLaunchBtn');
+
+      if (!goal) {
+        if (statusBox) statusBox.innerHTML = '<span style="color:#f87171;">❌ Vui lòng nhập bài toán hoặc danh sách nhiệm vụ cho Đàn Sub-Agents!</span>';
+        return;
+      }
+
+      let customTasks = [];
+      let mode = 'auto-decompose';
+      if (lineByLine) {
+        mode = 'custom-tasks';
+        const lines = goal.split('\n').map(l => l.trim()).filter(Boolean);
+        customTasks = lines.map((line, i) => ({
+          index: i + 1,
+          role: 'Sub-Agent #' + (i + 1),
+          prompt: line,
+          model: model
+        }));
+      }
+
+      btn.disabled = true;
+      btn.textContent = '⏳ Đang chạy song song ' + (customTasks.length || count) + ' Sub-Agents...';
+      statusBox.innerHTML = '<span style="color:#38bdf8;">🐝 Đang kích hoạt đồng loạt ' + (customTasks.length || count) + ' Goroutine Sub-Agents phân bổ trên các tài khoản Antigravity...</span>';
+
+      if (saPollingTimer) clearInterval(saPollingTimer);
+      saPollingTimer = setInterval(loadSubAgentsView, 900);
+
+      try {
+        const r = await fetch('/v1/subagents/swarm', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            action: 'swarm',
+            mode: mode,
+            master_goal: goal,
+            agent_count: count,
+            model: model,
+            tasks: customTasks
+          })
+        });
+        const d = await r.json();
+        if (saPollingTimer) { clearInterval(saPollingTimer); saPollingTimer = null; }
+        loadSubAgentsView();
+
+        if (r.ok && d.summary) {
+          statusBox.innerHTML = '<span style="color:#34d399;">✔ Hoàn tất ' + d.summary.success_count + '/' + d.summary.total_sub_agents + ' Sub-Agents song song trên ' + d.summary.distinct_accounts + ' tài khoản khác nhau trong <strong>' + d.summary.total_wall_time_ms + ' ms</strong>!</span>';
+          renderSwarmSummary(d.summary);
+        } else {
+          statusBox.innerHTML = '<span style="color:#f87171;">❌ Lỗi: ' + htmlEscape(d.error ? d.error.message : 'Thất bại') + '</span>';
+        }
+      } catch (err) {
+        if (saPollingTimer) { clearInterval(saPollingTimer); saPollingTimer = null; }
+        statusBox.innerHTML = '<span style="color:#f87171;">❌ Lỗi kết nối: ' + htmlEscape(err.message) + '</span>';
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '🚀 Phóng Đàn Sub-Agents Chạy Song Song Ngay';
+      }
+    }
+
+    function renderSwarmSummary(summary) {
+      const box = document.getElementById('saSwarmResultsBox');
+      if (!box || !summary) return;
+
+      let html = '<div style="background:#0b0f17;border:1px solid #242c3d;border-radius:10px;padding:14px;">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:12px;padding-bottom:10px;border-bottom:1px solid #1e293b;">' +
+          '<div>' +
+            '<span class="badge badge-green">🐝 Kết Quả Đàn Sub-Agents Song Song</span> ' +
+            '<strong style="color:#fff;margin-left:6px;">' + summary.success_count + '/' + summary.total_sub_agents + ' Sub-Agents Thành Công</strong>' +
+          '</div>' +
+          '<div style="font-size:12px;color:var(--muted);">' +
+            'Tài khoản tham gia: <strong style="color:#fb923c;">' + summary.distinct_accounts + ' acc</strong> | ' +
+            'Tổng thời gian (Wall-time): <strong style="color:#34d399;">' + summary.total_wall_time_ms + ' ms</strong> | ' +
+            'Tổng Token: <strong style="color:#38bdf8;">' + Number(summary.total_tokens || 0).toLocaleString() + '</strong>' +
+          '</div>' +
+        '</div>' +
+        '<div style="display:grid;grid-template-columns:repeat(auto-fill, minmax(380px, 1fr));gap:12px;">';
+
+      (summary.results || []).forEach(res => {
+        const ok = res.status === 'ok';
+        const bCol = ok ? 'rgba(16,185,129,0.35)' : 'rgba(239,68,68,0.4)';
+        html += '<div style="background:#121722;border:1px solid ' + bCol + ';border-radius:9px;padding:12px;">' +
+          '<div style="display:flex;justify-content:space-between;align-items:center;gap:6px;margin-bottom:6px;">' +
+            '<strong style="font-size:12.5px;color:#c084fc;">' + htmlEscape(res.role || ('Sub-Agent #' + res.index)) + '</strong>' +
+            '<span style="font-size:11px;color:' + (ok ? '#34d399' : '#f87171') + ';font-weight:700;">' + (ok ? ('✔ ' + res.latency_ms + ' ms') : '❌ Lỗi') + '</span>' +
+          '</div>' +
+          '<div style="font-size:11.5px;color:#fb923c;margin-bottom:6px;font-family:monospace;">👤 Tài khoản xử lý: <strong>' + htmlEscape(res.account_email || 'auto-pool') + '</strong> (' + htmlEscape(res.resolved_model || '') + ')</div>' +
+          '<pre style="max-height:220px;overflow-y:auto;font-size:11.5px;margin:0;background:#080b11;color:#e2e8f0;">' + htmlEscape(ok ? res.output : res.error) + '</pre>' +
+        '</div>';
+      });
+
+      html += '</div></div>';
+      box.innerHTML = html;
+    }
+
+    async function submitBulkImportAccounts() {
+      const raw = document.getElementById('saBulkImportInput').value.trim();
+      const msg = document.getElementById('saBulkImportMsg');
+      if (!raw) {
+        if (msg) msg.innerHTML = '<span style="color:#f87171;">❌ Vui lòng dán danh sách URL Callback / Refresh Token / Access Token!</span>';
+        return;
+      }
+      if (msg) msg.innerHTML = '<span style="color:#38bdf8;">⏳ Đang nạp và xác thực danh sách tài khoản vào Pool...</span>';
+      try {
+        const r = await fetch('/v1/subagents', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            action: 'bulk_import',
+            bulk_input: raw
+          })
+        });
+        const d = await r.json();
+        if (r.ok) {
+          let errNote = (d.errors && d.errors.length > 0) ? (' (Lỗi: ' + d.errors.join('; ') + ')') : '';
+          msg.innerHTML = '<span style="color:#34d399;">✔ Đã nạp thành công <strong>' + (d.imported || 0) + '</strong> tài khoản mới vào Pool!' + htmlEscape(errNote) + '</span>';
+          if (d.imported > 0) {
+            document.getElementById('saBulkImportInput').value = '';
+          }
+          loadSubAgentsView();
+          loadQuotaSummary(true);
+        } else {
+          msg.innerHTML = '<span style="color:#f87171;">❌ ' + htmlEscape(d.error ? d.error.message : 'Lỗi nạp tài khoản') + '</span>';
+        }
+      } catch (err) {
+        msg.innerHTML = '<span style="color:#f87171;">❌ Lỗi: ' + htmlEscape(err.message) + '</span>';
       }
     }
 

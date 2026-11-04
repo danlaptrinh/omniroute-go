@@ -841,6 +841,40 @@ func SelectProviderAccount(ctx context.Context, provider ProviderID) (*Connected
 		candidates = matching
 	}
 
+	// 1. Check if this Sub-Agent / Request explicitly pinned a specific account (1-to-1 Sub-Agent slot binding)
+	if pinnedEmail := PinnedAccountFromContext(ctx); pinnedEmail != "" {
+		for _, c := range candidates {
+			if strings.EqualFold(c.Email, pinnedEmail) || strings.EqualFold(c.ID, pinnedEmail) {
+				if (c.Provider == ProviderAntigravity || c.Provider == "") &&
+					c.ExpiresAt > 0 && c.ExpiresAt <= time.Now().Unix()+60 && c.RefreshToken != "" {
+					if err := RefreshAntigravityToken(ctx, &c); err == nil {
+						_, _ = UpsertConnectedAccount(c)
+					}
+				}
+				return &c, nil
+			}
+		}
+	}
+
+	// 2. Filter to least in-flight accounts first so 50 concurrent Sub-Agents never collide on the same account
+	if len(candidates) > 1 {
+		minInFlight := GetAccountInFlight(candidates[0].Email)
+		for _, c := range candidates[1:] {
+			if inf := GetAccountInFlight(c.Email); inf < minInFlight {
+				minInFlight = inf
+			}
+		}
+		var leastBusy []ConnectedAccount
+		for _, c := range candidates {
+			if GetAccountInFlight(c.Email) == minInFlight {
+				leastBusy = append(leastBusy, c)
+			}
+		}
+		if len(leastBusy) > 0 {
+			candidates = leastBusy
+		}
+	}
+
 	strategy := auth.RoutingStrategy
 	if strategy == "" {
 		strategy = StrategyRoundRobin

@@ -80,6 +80,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/aliases", s.handleAliases)
 	mux.HandleFunc("/v1/hedging", s.handleHedgingConfig)
 	mux.HandleFunc("/v1/combos", s.handleCombos)
+	mux.HandleFunc("/v1/subagents", s.handleSubAgents)
+	mux.HandleFunc("/v1/subagents/swarm", s.handleSubAgents)
 	mux.HandleFunc("/v1/images/generations", s.handleImageGenerations)
 	mux.HandleFunc("/v1/chat/completions", s.handleChatCompletions)
 	mux.HandleFunc("/chat/completions", s.handleChatCompletions)
@@ -976,6 +978,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := WithAuditContext(r.Context(), apiKeyObj, req)
+	if pinAcc := strings.TrimSpace(r.Header.Get("X-Omni-Pin-Account")); pinAcc != "" {
+		ctx = WithPinnedAccount(ctx, pinAcc)
+	}
 
 	if IsImageModel(req.Model) {
 		prompt := ""

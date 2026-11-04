@@ -200,7 +200,9 @@ func (u *GatewayUpstream) tryTarget(
 		if acc == nil {
 			return fmt.Errorf("no Claude Code account configured")
 		}
+		AcquireAccountInFlight(acc.Email)
 		err = u.handleClaudeCodeProvider(ctx, w, req, target, *acc)
+		ReleaseAccountInFlight(acc.Email)
 		lat := time.Now().UnixMilli() - startMs
 		if err == nil {
 			usedTokens := parseRecordedTokens(w.Header().Get("X-Omni-Gateway-Tokens"), req)
@@ -245,7 +247,9 @@ func (u *GatewayUpstream) tryTarget(
 		if acc == nil {
 			return fmt.Errorf("no Alibaba Token Plan account configured")
 		}
+		AcquireAccountInFlight(acc.Email)
 		err = u.handleAlibabaProvider(ctx, w, req, target, *acc)
+		ReleaseAccountInFlight(acc.Email)
 		lat := time.Now().UnixMilli() - startMs
 		if err == nil {
 			usedTokens := parseRecordedTokens(w.Header().Get("X-Omni-Gateway-Tokens"), req)
@@ -306,9 +310,13 @@ func (u *GatewayUpstream) tryTarget(
 
 			if accountEmail != "" {
 				w.Header().Set("X-Omni-Gateway-Account", accountEmail)
+				AcquireAccountInFlight(accountEmail)
 			}
 			w.Header().Set("X-Omni-Gateway-Provider", "antigravity")
 			err := u.handleDirectCCPA(ctx, w, req, target, agyToken, projectID)
+			if accountEmail != "" {
+				ReleaseAccountInFlight(accountEmail)
+			}
 			lat := time.Now().UnixMilli() - startMs
 			if err == nil {
 				usedTokens := parseRecordedTokens(w.Header().Get("X-Omni-Gateway-Tokens"), req)
