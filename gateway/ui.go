@@ -489,7 +489,7 @@ const gatewayUIHTML = `<!DOCTYPE html>
     </div>
 
     <!-- Filter Pills & Action Row -->
-    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:14px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:12px;">
       <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
         <span style="font-size:11.5px;color:var(--muted);font-weight:600;">HẠNG:</span>
         <button id="pillTierAll" class="btn" style="padding:4px 9px;font-size:11px;background:#242d3d;color:#fff;" onclick="filterQuotaTier('all')">Tất cả</button>
@@ -497,9 +497,25 @@ const gatewayUIHTML = `<!DOCTYPE html>
         <button id="pillTierPro" class="btn" style="padding:4px 9px;font-size:11px;" onclick="filterQuotaTier('Pro')">Pro</button>
         <button id="pillTierLite" class="btn" style="padding:4px 9px;font-size:11px;" onclick="filterQuotaTier('Lite')">Lite</button>
       </div>
-      <div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+        <button onclick="resetAccountLatency('all')" title="Xoá thống kê độ trễ trung bình cũ từ các bài viết dài để đo lại từ đầu" style="border-color:rgba(245,158,11,0.4);color:#fbbf24;">⚡ Reset Độ Trễ Cũ</button>
         <button onclick="loadQuotaSummary(true)">🔄 Làm mới tất cả</button>
       </div>
+    </div>
+
+    <!-- BẢNG GIÁM SÁT THỜI GIAN THỰC: ĐANG CHẠY TÀI KHOẢN NÀO & MODEL NÀO -->
+    <div id="liveActiveMonitorBox" class="setting-card" style="padding:12px 14px;margin-bottom:14px;border:1px solid #2b354f;background:#0e131f;">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:8px;">
+        <div style="display:flex;align-items:center;gap:8px;">
+          <span style="font-weight:700;font-size:13px;color:#38bdf8;">📡 Giám Sát Thời Gian Thực: Tài Khoản &amp; Model Đang Chạy / Vừa Chạy</span>
+          <span id="liveActiveCountBadge" class="badge badge-green">🟢 0 Request đang chạy</span>
+        </div>
+        <button style="padding:3px 9px;font-size:11px;" onclick="switchNav('view-logs')">📋 Xem toàn bộ Nhật ký</button>
+      </div>
+      <div id="liveInFlightList" style="font-size:12px;color:#cbd5e1;margin-bottom:8px;">
+        Đang kiểm tra trạng thái thực thi...
+      </div>
+      <div id="liveRecentRequestsMini" style="border-top:1px solid rgba(255,255,255,0.06);padding-top:8px;font-size:11.5px;color:var(--muted);"></div>
     </div>
 
     <!-- Account Quota Cards Grid (matching screenshot 1) -->
@@ -2001,8 +2017,86 @@ docker compose up -d --build</pre>
         document.getElementById('quotaAccountCountLabel').textContent = 'Giới hạn của nhà cung cấp (' + (d.total_accounts || 0) + ' tài khoản)';
 
         renderQuotaCards();
+        renderLiveExecutionMonitor(d);
       } catch (err) {
         box.innerHTML = '<div style="color:#f87171;">Lỗi tải hạn mức: ' + err.message + '</div>';
+      }
+    }
+
+    async function renderLiveExecutionMonitor(quotaData) {
+      const inFlightBox = document.getElementById('liveInFlightList');
+      const badgeEl = document.getElementById('liveActiveCountBadge');
+      const recentBox = document.getElementById('liveRecentRequestsMini');
+      if (!inFlightBox) return;
+
+      const accounts = (quotaData && quotaData.accounts) ? quotaData.accounts : [];
+      const activeAccs = accounts.filter(a => (a.in_flight || 0) > 0);
+      const totalInFlight = activeAccs.reduce((sum, a) => sum + (a.in_flight || 0), 0);
+
+      if (badgeEl) {
+        if (totalInFlight > 0) {
+          badgeEl.className = 'badge badge-purple';
+          badgeEl.innerHTML = '🔥 Đang chạy ' + totalInFlight + ' Request thực tế';
+        } else {
+          badgeEl.className = 'badge badge-green';
+          badgeEl.innerHTML = '🟢 0 Request đang chạy (Tất cả đang rảnh)';
+        }
+      }
+
+      if (activeAccs.length > 0) {
+        inFlightBox.innerHTML = activeAccs.map(a =>
+          '<div style="display:inline-flex;align-items:center;gap:8px;background:rgba(168,85,247,0.16);border:1px solid #a855f7;border-radius:8px;padding:6px 11px;margin-right:8px;margin-bottom:4px;">' +
+            '<span style="color:#c084fc;font-weight:700;">🔥 ĐANG XỬ LÝ:</span>' +
+            '<strong style="color:#fff;font-family:monospace;">' + htmlEscape(a.email || a.id) + '</strong>' +
+            '<span style="color:#38bdf8;font-weight:700;">➔ ' + htmlEscape(a.active_model || a.last_model || 'Model') + '</span>' +
+            '<span class="badge badge-purple">' + a.in_flight + ' req</span>' +
+          '</div>'
+        ).join('');
+      } else {
+        inFlightBox.innerHTML = '<span style="color:#34d399;font-weight:600;">🟢 Hiện tại không có lệnh nào đang chạy ngầm — Toàn bộ ' + accounts.length + ' tài khoản đều đang rảnh 100% (Idle &amp; Sẵn sàng nhận request mới).</span>';
+      }
+
+      if (recentBox) {
+        try {
+          const lr = await fetch('/v1/logs');
+          const ld = await lr.json();
+          const entries = (ld && ld.entries) ? ld.entries.slice(0, 5) : [];
+          if (entries.length === 0) {
+            recentBox.innerHTML = 'Chưa có lịch sử gọi model nào gần đây.';
+          } else {
+            let rows = '<div style="font-weight:700;color:#e2e8f0;margin-bottom:5px;">⚡ 5 Lượt Chạy Thực Tế Gần Nhất (Cho biết chính xác Tài khoản nào &amp; Model nào vừa chạy):</div>' +
+              '<div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(260px, 1fr));gap:6px;">';
+            entries.forEach(e => {
+              const latColor = e.latency_ms > 7000 ? '#f87171' : (e.latency_ms > 3000 ? '#fbbf24' : '#34d399');
+              rows += '<div style="background:#131926;border:1px solid #232c3d;border-radius:6px;padding:6px 9px;display:flex;justify-content:space-between;align-items:center;gap:6px;">' +
+                '<div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' +
+                  '<span style="color:#64748b;font-family:monospace;font-size:10.5px;">[' + htmlEscape((e.timestamp || '').split(' ')[0] || '') + ']</span> ' +
+                  '<strong style="color:#38bdf8;font-family:monospace;">' + htmlEscape(e.account || e.provider || 'auto') + '</strong>' +
+                  '<div style="color:#fbbf24;font-family:monospace;font-size:11px;font-weight:600;">🤖 ' + htmlEscape(e.resolved_model || e.requested_model || '') + '</div>' +
+                '</div>' +
+                '<div style="text-align:right;white-space:nowrap;">' +
+                  '<div style="color:' + latColor + ';font-weight:700;font-family:monospace;">' + (e.latency_ms || 0) + ' ms</div>' +
+                  '<div style="font-size:10px;color:#94a3b8;">' + (e.total_tokens || 0) + ' tok</div>' +
+                '</div>' +
+              '</div>';
+            });
+            rows += '</div>';
+            recentBox.innerHTML = rows;
+          }
+        } catch (_) {}
+      }
+    }
+
+    async function resetAccountLatency(accId) {
+      try {
+        await fetch('/v1/quota/threshold', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({action: 'reset_latency', account_id: accId || 'all'})
+        });
+        loadQuotaSummary(true);
+      } catch (e) {
+        alert('Lỗi reset độ trễ: ' + e.message);
       }
     }
 
@@ -2035,7 +2129,7 @@ docker compose up -d --build</pre>
         const isCrit = acc.status === 'critical';
         const isWarn = acc.status === 'warning';
         const statusColor = isCrit ? '#ef4444' : (isWarn ? '#f59e0b' : '#10b981');
-        const borderCol = isCrit ? 'rgba(239, 68, 68, 0.4)' : '#242c3d';
+        const borderCol = (acc.in_flight > 0) ? '#a855f7' : (isCrit ? 'rgba(239, 68, 68, 0.4)' : '#242c3d');
         const tierBg = acc.tier === 'Ultra' ? 'rgba(16, 185, 129, 0.2)' : 'rgba(56, 189, 248, 0.2)';
         const tierCol = acc.tier === 'Ultra' ? '#34d399' : '#38bdf8';
 
@@ -2069,19 +2163,32 @@ docker compose up -d --build</pre>
         const reqFail = acc.failure_count || 0;
         const realTokens = (acc.total_tokens || 0).toLocaleString();
         const avgLat = acc.avg_latency_ms ? (acc.avg_latency_ms + ' ms') : '—';
-        const routeBadge = acc.enabled
-          ? (acc.in_cooldown
+        const latColor = !acc.avg_latency_ms ? '#a78bfa' : (acc.avg_latency_ms > 7000 ? '#f87171' : (acc.avg_latency_ms > 3000 ? '#fbbf24' : '#34d399'));
+        const isBusyNow = (acc.in_flight || 0) > 0;
+        const routeBadge = !acc.enabled
+          ? '<span style="color:#94a3b8;font-weight:600;">⏸️ Đã tắt (Không nhận request)</span>'
+          : (acc.in_cooldown
               ? '<span style="color:#f59e0b;font-weight:700;">⏳ Cooldown</span>'
-              : '<span style="color:#34d399;font-weight:700;">🟢 Đang chạy thực tế</span>')
-          : '<span style="color:#94a3b8;font-weight:600;">⏸️ Đã tắt (Không nhận request)</span>';
+              : (isBusyNow
+                  ? '<span style="color:#c084fc;font-weight:700;">🔥 ĐANG XỬ LÝ (' + acc.in_flight + ' req)</span>'
+                  : '<span style="color:#34d399;font-weight:700;">🟢 Sẵn sàng (Đang rảnh)</span>'));
+
+        const activeOrLastModelText = isBusyNow
+          ? ('<span style="color:#c084fc;font-weight:700;">🔥 Đang chạy: ' + htmlEscape(acc.active_model || 'Model') + '</span>')
+          : (acc.last_model
+              ? ('<span style="color:#fbbf24;font-weight:600;">🤖 Vừa chạy: ' + htmlEscape(acc.last_model) + '</span>' + (acc.last_latency_ms ? (' <span style="color:#94a3b8;">(' + acc.last_latency_ms + ' ms)</span>') : ''))
+              : '<span style="color:#64748b;">Chưa chạy model nào</span>');
 
         const realExecStatsHTML =
-          '<div style="background:#0b0f17;border:1px solid rgba(56,189,248,0.18);border-radius:8px;padding:8px 10px;margin-bottom:12px;font-size:11.5px;">' +
-            '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px;">' +
-              '<span style="color:var(--muted);">Trạng thái chạy:</span>' +
+          '<div style="background:#0b0f17;border:1px solid ' + (isBusyNow ? '#a855f7' : 'rgba(56,189,248,0.18)') + ';border-radius:8px;padding:8px 10px;margin-bottom:12px;font-size:11.5px;">' +
+            '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">' +
+              '<span style="color:var(--muted);">Trạng thái hiện tại:</span>' +
               routeBadge +
             '</div>' +
-            '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;border-top:1px solid rgba(255,255,255,0.06);padding-top:6px;text-align:center;">' +
+            '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;padding-bottom:5px;border-bottom:1px dashed rgba(255,255,255,0.07);font-family:monospace;font-size:11px;">' +
+              activeOrLastModelText +
+            '</div>' +
+            '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;padding-top:2px;text-align:center;">' +
               '<div>' +
                 '<div style="color:var(--muted);font-size:10px;">TOKEN ĐÃ CHẠY</div>' +
                 '<div style="color:#38bdf8;font-weight:700;font-size:12.5px;font-family:monospace;">' + realTokens + '</div>' +
@@ -2091,8 +2198,8 @@ docker compose up -d --build</pre>
                 '<div style="color:#e2e8f0;font-weight:700;font-size:12.5px;font-family:monospace;">' + reqSuccess + ' <span style="color:#64748b;font-size:10.5px;">(' + reqFail + ' lỗi)</span></div>' +
               '</div>' +
               '<div>' +
-                '<div style="color:var(--muted);font-size:10px;">ĐỘ TRỄ TB</div>' +
-                '<div style="color:#a78bfa;font-weight:700;font-size:12.5px;font-family:monospace;">' + avgLat + '</div>' +
+                '<div style="color:var(--muted);font-size:10px;">ĐỘ TRỄ TB <span style="cursor:pointer;color:#fbbf24;" title="Reset độ trễ tài khoản này" onclick="resetAccountLatency(\'' + htmlEscape(acc.id) + '\')">↺</span></div>' +
+                '<div style="color:' + latColor + ';font-weight:700;font-size:12.5px;font-family:monospace;">' + avgLat + '</div>' +
               '</div>' +
             '</div>' +
           '</div>';

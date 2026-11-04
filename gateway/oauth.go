@@ -76,6 +76,8 @@ type ConnectedAccount struct {
 	SuccessCount        int64      `json:"success_count,omitempty"`
 	TotalTokens         int64      `json:"total_tokens,omitempty"`
 	AvgLatencyMs        int64      `json:"avg_latency_ms,omitempty"`
+	LastLatencyMs       int64      `json:"last_latency_ms,omitempty"`
+	LastModel           string     `json:"last_model,omitempty"`
 	QuotaUsedPercent    *float64   `json:"quota_used_percent,omitempty"`
 	QuotaResetTime      string     `json:"quota_reset_time,omitempty"`
 	WeeklyGeminiPercent *int       `json:"weekly_gemini_percent,omitempty"`
@@ -875,6 +877,20 @@ func SelectProviderAccount(ctx context.Context, provider ProviderID) (*Connected
 		}
 	}
 
+	// 3. Smart Low-Latency Filter: if multiple idle accounts exist and some are fast (< 5000ms or fresh 0ms),
+	// automatically bypass accounts that had a heavy/slow average latency (> 8000ms) so latency stays low!
+	if len(candidates) > 1 {
+		var fastCandidates []ConnectedAccount
+		for _, c := range candidates {
+			if c.AvgLatencyMs == 0 || c.AvgLatencyMs <= 6000 {
+				fastCandidates = append(fastCandidates, c)
+			}
+		}
+		if len(fastCandidates) > 0 {
+			candidates = fastCandidates
+		}
+	}
+
 	strategy := auth.RoutingStrategy
 	if strategy == "" {
 		strategy = StrategyRoundRobin
@@ -966,6 +982,11 @@ func SelectProviderAccount(ctx context.Context, provider ProviderID) (*Connected
 
 // RecordAccountResult records token usage, latency, and failure/cooldown state for an account.
 func RecordAccountResult(emailOrID string, provider ProviderID, success bool, latencyMs int64, tokens int, statusCode int) {
+	RecordAccountModelResult(emailOrID, provider, "", success, latencyMs, tokens, statusCode)
+}
+
+// RecordAccountModelResult records token usage, latency, model ID, and failure/cooldown state for an account.
+func RecordAccountModelResult(emailOrID string, provider ProviderID, modelID string, success bool, latencyMs int64, tokens int, statusCode int) {
 	configMu.Lock()
 	defer configMu.Unlock()
 	cfg := loadSavedAuthConfigLocked()
@@ -983,11 +1004,15 @@ func RecordAccountResult(emailOrID string, provider ProviderID, success bool, la
 		if acc.ID == emailOrID || strings.EqualFold(acc.Email, emailOrID) {
 			found = true
 			acc.TotalTokens += int64(tokens)
+			if strings.TrimSpace(modelID) != "" {
+				acc.LastModel = strings.TrimSpace(modelID)
+			}
 			if latencyMs > 0 {
-				if acc.AvgLatencyMs == 0 {
+				acc.LastLatencyMs = latencyMs
+				if acc.AvgLatencyMs == 0 || (acc.AvgLatencyMs > 5000 && latencyMs < 3500) {
 					acc.AvgLatencyMs = latencyMs
 				} else {
-					acc.AvgLatencyMs = (acc.AvgLatencyMs*7 + latencyMs*3) / 10
+					acc.AvgLatencyMs = (acc.AvgLatencyMs + latencyMs) / 2
 				}
 			}
 			if success {
@@ -1019,6 +1044,23 @@ func RecordAccountResult(emailOrID string, provider ProviderID, success bool, la
 		cfg.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 		saveAuthConfigAsyncLocked(cfg)
 	}
+}
+
+// ResetAccountLatencyStats clears historical latency spikes across all accounts (or a specific account).
+func ResetAccountLatencyStats(accountID string) error {
+	configMu.Lock()
+	defer configMu.Unlock()
+	cfg := loadSavedAuthConfigLocked()
+	for i := range cfg.Accounts {
+		if accountID == "" || accountID == "all" || cfg.Accounts[i].ID == accountID || strings.EqualFold(cfg.Accounts[i].Email, accountID) {
+			cfg.Accounts[i].AvgLatencyMs = 0
+			cfg.Accounts[i].LastLatencyMs = 0
+			cfg.Accounts[i].CooldownUntil = 0
+			cfg.Accounts[i].FailureCount = 0
+		}
+	}
+	cfg.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	return saveAuthConfigLocked(cfg)
 }
 
 // GetValidAccountToken returns a valid OAuth access token, project ID, and email for Antigravity,

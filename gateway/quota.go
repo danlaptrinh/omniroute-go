@@ -40,6 +40,10 @@ type AccountQuotaDetail struct {
 	FailureCount        int              `json:"failure_count"`
 	TotalTokens         int64            `json:"total_tokens"`
 	AvgLatencyMs        int64            `json:"avg_latency_ms"`
+	LastLatencyMs       int64            `json:"last_latency_ms,omitempty"`
+	LastModel           string           `json:"last_model,omitempty"`
+	InFlight            int              `json:"in_flight"`
+	ActiveModel         string           `json:"active_model,omitempty"`
 	LastUsedAt          string           `json:"last_used_at,omitempty"`
 	SessionPercent      int              `json:"session_percent"`
 	WeeklyPercent       int              `json:"weekly_percent"`
@@ -151,6 +155,10 @@ func overlayLiveAccountStats(summary *QuotaSummary) *QuotaSummary {
 				out.Accounts[i].FailureCount = acc.FailureCount
 				out.Accounts[i].TotalTokens = acc.TotalTokens
 				out.Accounts[i].AvgLatencyMs = acc.AvgLatencyMs
+				out.Accounts[i].LastLatencyMs = acc.LastLatencyMs
+				out.Accounts[i].LastModel = acc.LastModel
+				out.Accounts[i].InFlight = GetAccountInFlight(acc.Email)
+				out.Accounts[i].ActiveModel = GetAccountActiveRole(acc.Email)
 				out.Accounts[i].QuotaUsedPercent = acc.QuotaUsedPercent
 				out.Accounts[i].WeeklyGeminiPercent = acc.WeeklyGeminiPercent
 				out.Accounts[i].LastUsedAt = formatAccountLastUsed(acc.UpdatedAt)
@@ -241,6 +249,10 @@ func inspectSingleAccountQuota(ctx context.Context, acc ConnectedAccount, resetT
 		FailureCount:        acc.FailureCount,
 		TotalTokens:         acc.TotalTokens,
 		AvgLatencyMs:        acc.AvgLatencyMs,
+		LastLatencyMs:       acc.LastLatencyMs,
+		LastModel:           acc.LastModel,
+		InFlight:            GetAccountInFlight(email),
+		ActiveModel:         GetAccountActiveRole(email),
 		LastUsedAt:          formatAccountLastUsed(acc.UpdatedAt),
 		WeeklyGeminiPercent: acc.WeeklyGeminiPercent,
 		ResetTimeText:       resetText,
@@ -854,12 +866,29 @@ func (s *Server) handleQuotaThreshold(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
+		Action      string   `json:"action"`
 		AccountID   string   `json:"account_id"`
 		UsedPercent *float64 `json:"used_percent"`
 		ResetTime   string   `json:"reset_time"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 16*1024)).Decode(&req); err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid JSON payload: "+err.Error(), "invalid_request_error")
+		return
+	}
+
+	if req.Action == "reset_latency" {
+		if err := ResetAccountLatencyStats(req.AccountID); err != nil {
+			writeOpenAIError(w, http.StatusBadRequest, err.Error(), "reset_latency_error")
+			return
+		}
+		quotaCacheMu.Lock()
+		cachedSummary = nil
+		quotaCacheMu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status":     "ok",
+			"account_id": req.AccountID,
+		})
 		return
 	}
 

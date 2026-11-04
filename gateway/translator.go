@@ -200,13 +200,13 @@ func (u *GatewayUpstream) tryTarget(
 		if acc == nil {
 			return fmt.Errorf("no Claude Code account configured")
 		}
-		AcquireAccountInFlight(acc.Email)
+		AcquireAccountInFlightWithRole(acc.Email, target.CanonicalID)
 		err = u.handleClaudeCodeProvider(ctx, w, req, target, *acc)
 		ReleaseAccountInFlight(acc.Email)
 		lat := time.Now().UnixMilli() - startMs
 		if err == nil {
 			usedTokens := parseRecordedTokens(w.Header().Get("X-Omni-Gateway-Tokens"), req)
-			RecordAccountResult(acc.Email, ProviderClaudeCode, true, lat, usedTokens, http.StatusOK)
+			RecordAccountModelResult(acc.Email, ProviderClaudeCode, target.CanonicalID, true, lat, usedTokens, http.StatusOK)
 			entry := GatewayLogEntry{
 				Provider:       ProviderClaudeCode,
 				Account:        acc.Email,
@@ -222,7 +222,7 @@ func (u *GatewayUpstream) tryTarget(
 			RecordLogEntry(entry)
 			return nil
 		}
-		RecordAccountResult(acc.Email, ProviderClaudeCode, false, lat, 0, http.StatusBadGateway)
+		RecordAccountModelResult(acc.Email, ProviderClaudeCode, target.CanonicalID, false, lat, 0, http.StatusBadGateway)
 		errEntry := GatewayLogEntry{
 			Provider:       ProviderClaudeCode,
 			Account:        acc.Email,
@@ -247,13 +247,13 @@ func (u *GatewayUpstream) tryTarget(
 		if acc == nil {
 			return fmt.Errorf("no Alibaba Token Plan account configured")
 		}
-		AcquireAccountInFlight(acc.Email)
+		AcquireAccountInFlightWithRole(acc.Email, target.CanonicalID)
 		err = u.handleAlibabaProvider(ctx, w, req, target, *acc)
 		ReleaseAccountInFlight(acc.Email)
 		lat := time.Now().UnixMilli() - startMs
 		if err == nil {
 			usedTokens := parseRecordedTokens(w.Header().Get("X-Omni-Gateway-Tokens"), req)
-			RecordAccountResult(acc.Email, ProviderAlibaba, true, lat, usedTokens, http.StatusOK)
+			RecordAccountModelResult(acc.Email, ProviderAlibaba, target.CanonicalID, true, lat, usedTokens, http.StatusOK)
 			entry := GatewayLogEntry{
 				Provider:       ProviderAlibaba,
 				Account:        acc.Email,
@@ -269,7 +269,7 @@ func (u *GatewayUpstream) tryTarget(
 			RecordLogEntry(entry)
 			return nil
 		}
-		RecordAccountResult(acc.Email, ProviderAlibaba, false, lat, 0, http.StatusBadGateway)
+		RecordAccountModelResult(acc.Email, ProviderAlibaba, target.CanonicalID, false, lat, 0, http.StatusBadGateway)
 		errEntry := GatewayLogEntry{
 			Provider:       ProviderAlibaba,
 			Account:        acc.Email,
@@ -310,7 +310,7 @@ func (u *GatewayUpstream) tryTarget(
 
 			if accountEmail != "" {
 				w.Header().Set("X-Omni-Gateway-Account", accountEmail)
-				AcquireAccountInFlight(accountEmail)
+				AcquireAccountInFlightWithRole(accountEmail, target.CanonicalID)
 			}
 			w.Header().Set("X-Omni-Gateway-Provider", "antigravity")
 			err := u.handleDirectCCPA(ctx, w, req, target, agyToken, projectID)
@@ -321,7 +321,7 @@ func (u *GatewayUpstream) tryTarget(
 			if err == nil {
 				usedTokens := parseRecordedTokens(w.Header().Get("X-Omni-Gateway-Tokens"), req)
 				if accountEmail != "" {
-					RecordAccountResult(accountEmail, ProviderAntigravity, true, lat, usedTokens, http.StatusOK)
+					RecordAccountModelResult(accountEmail, ProviderAntigravity, target.CanonicalID, true, lat, usedTokens, http.StatusOK)
 				}
 				entry := GatewayLogEntry{
 					Provider:       ProviderAntigravity,
@@ -347,7 +347,7 @@ func (u *GatewayUpstream) tryTarget(
 				failCode = http.StatusTooManyRequests
 			}
 			if accountEmail != "" {
-				RecordAccountResult(accountEmail, ProviderAntigravity, false, lat, 0, failCode)
+				RecordAccountModelResult(accountEmail, ProviderAntigravity, target.CanonicalID, false, lat, 0, failCode)
 			}
 			errEntry := GatewayLogEntry{
 				Provider:       ProviderAntigravity,
