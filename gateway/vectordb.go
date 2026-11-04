@@ -706,3 +706,4 @@ func GetVectorDBStatus() map[string]any {
 		"engine":             engineLabel,
 	}
 }
+

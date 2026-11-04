@@ -658,6 +658,13 @@ func inspectAntigravityAccount(ctx context.Context, acc *ConnectedAccount, detai
 			Status:           getQuotaStatus(geminiPercent),
 		},
 		{
+			ModelID:          "gemini-3.1-pro-high",
+			DisplayName:      "Gemini 3.1 Pro (High / Low)",
+			RemainingPercent: geminiPercent,
+			ResetTime:        geminiReset,
+			Status:           getQuotaStatus(geminiPercent),
+		},
+		{
 			ModelID:          "claude-opus-4-6-thinking",
 			DisplayName:      "Claude Opus 4.6 (Thinking)",
 			RemainingPercent: claudeOpusPercent,

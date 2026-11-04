@@ -802,6 +802,8 @@ const gatewayUIHTML = `<!DOCTYPE html>
             <optgroup label="Google Antigravity (Gen 3 & 4)">
               <option value="gemini-4-argon-high">gemini-4-argon-high (Argon High Thinking)</option>
               <option value="gemini-4-argon-medium">gemini-4-argon-medium</option>
+              <option value="gemini-3.1-pro-high">gemini-3.1-pro-high (Gemini 3.1 Pro High)</option>
+              <option value="gemini-3.1-pro-low">gemini-3.1-pro-low (Gemini 3.1 Pro Low)</option>
               <option value="gemini-3.8-flash-high">gemini-3.8-flash-high</option>
               <option value="antigravity/claude-opus-4-6-thinking">antigravity/claude-opus-4-6-thinking</option>
             </optgroup>

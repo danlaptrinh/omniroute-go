@@ -912,6 +912,14 @@ func buildCCPACandidatesWithCache(resolved ResolvedModel, useFastCache bool, noT
 			"claude-opus-4-6-thinking",
 			"gemini-3-flash",
 		)
+	case strings.HasPrefix(resolved.CCPAModelID, "gemini-3.1-pro") || strings.Contains(resolved.CanonicalID, "gemini-3.1-pro"):
+		raw = append(raw,
+			"gemini-3.1-pro-preview",
+			"gemini-3.1-pro",
+			"gemini-3.8-flash-tiered",
+			"claude-sonnet-4-6",
+			"gemini-3-flash",
+		)
 	case strings.HasPrefix(resolved.CCPAModelID, "gemini-3.8-flash"):
 		raw = append(raw,
 			"gemini-3.8-flash-tiered",

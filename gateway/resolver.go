@@ -408,7 +408,7 @@ func (r *DefaultResolver) Resolve(modelID string, defaultFallbacks []string) Res
 		res.IncludeThoughts = true
 		res.PlaceholderEnum = "MODEL_PLACEHOLDER_M198"
 
-	case "gemini-3.1-pro-high", "gemini-3.1-pro:high", "gemini-3.1-pro":
+	case "gemini-3.1-pro-high", "gemini-3.1-pro:high", "gemini-3.1-pro", "gemini-3.1-pro-preview", "gemini 3.1 pro", "gemini 3.1 pro high":
 		res.CanonicalID = "antigravity/gemini-3.1-pro-high"
 		res.UpstreamModelID = "gemini-3.1-pro-preview"
 		res.CCPAModelID = "gemini-3.1-pro-preview"
@@ -417,7 +417,16 @@ func (r *DefaultResolver) Resolve(modelID string, defaultFallbacks []string) Res
 		res.ReasoningEffort = "high"
 		res.IncludeThoughts = true
 
-	case "gemini-3.1-pro-low", "gemini-3.1-pro:low":
+	case "gemini-3.1-pro-medium", "gemini-3.1-pro:medium", "gemini 3.1 pro medium":
+		res.CanonicalID = "antigravity/gemini-3.1-pro-medium"
+		res.UpstreamModelID = "gemini-3.1-pro-preview"
+		res.CCPAModelID = "gemini-3.1-pro-preview"
+		res.OmniBaseModelID = "antigravity/gemini-3.1-pro-medium"
+		res.ThinkingLevel = ThinkingLevelMedium
+		res.ReasoningEffort = "medium"
+		res.IncludeThoughts = true
+
+	case "gemini-3.1-pro-low", "gemini-3.1-pro:low", "gemini 3.1 pro low":
 		res.CanonicalID = "antigravity/gemini-3.1-pro-low"
 		res.UpstreamModelID = "gemini-3.1-pro-preview"
 		res.CCPAModelID = "gemini-3.1-pro-preview"
@@ -577,8 +586,14 @@ func (r *DefaultResolver) ListModels() []OpenAIModelCard {
 		{"antigravity/gemini-3.7-flash-high", "antigravity", "antigravity", "gen3-flash"},
 		{"antigravity/gemini-3.6-flash-high", "antigravity", "antigravity", "gen3-flash"},
 		{"antigravity/gemini-3.5-flash-lite", "antigravity", "antigravity", "gen3-flash"},
+		{"gemini-3.1-pro-high", "antigravity", "antigravity", "gen3-pro"},
+		{"gemini-3.1-pro-medium", "antigravity", "antigravity", "gen3-pro"},
+		{"gemini-3.1-pro-low", "antigravity", "antigravity", "gen3-pro"},
+		{"gemini-3.1-pro", "antigravity", "antigravity", "gen3-pro"},
 		{"antigravity/gemini-3.1-pro-high", "antigravity", "antigravity", "gen3-pro"},
+		{"antigravity/gemini-3.1-pro-medium", "antigravity", "antigravity", "gen3-pro"},
 		{"antigravity/gemini-3.1-pro-low", "antigravity", "antigravity", "gen3-pro"},
+		{"antigravity/gemini-3.1-pro", "antigravity", "antigravity", "gen3-pro"},
 		{"antigravity/gemini-3.1-flash-lite", "antigravity", "antigravity", "gen3-flash"},
 		{"antigravity/gemini-3-flash", "antigravity", "antigravity", "gen3-flash"},
 		{"claude-opus-5-5-thinking", "antigravity", "antigravity", "claude-thinking"},
