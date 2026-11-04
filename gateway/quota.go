@@ -161,10 +161,11 @@ func overlayLiveAccountStats(summary *QuotaSummary) *QuotaSummary {
 	return &out
 }
 
-// GetQuotaSummary returns the latest quota status, refreshing if cache is older than 30s.
+// GetQuotaSummary returns the latest quota status, refreshing if cache is older than 30s or account count changed.
 func GetQuotaSummary(ctx context.Context, forceRefresh bool) *QuotaSummary {
+	auth := LoadSavedAuthConfig()
 	quotaCacheMu.RLock()
-	if !forceRefresh && cachedSummary != nil && time.Since(lastQuotaCheck) < 30*time.Second {
+	if !forceRefresh && cachedSummary != nil && len(cachedSummary.Accounts) == len(auth.Accounts) && time.Since(lastQuotaCheck) < 30*time.Second {
 		res := cachedSummary
 		quotaCacheMu.RUnlock()
 		return overlayLiveAccountStats(res)

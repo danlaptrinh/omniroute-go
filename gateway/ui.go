@@ -639,6 +639,18 @@ const gatewayUIHTML = `<!DOCTYPE html>
         <div id="aliMsg" class="hint"></div>
       </div>
     </div>
+
+    <!-- Connected Accounts List in Providers View -->
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+        <div>
+          <h2>📋 Danh Sách Tài Khoản Đã Kết Nối Trong Pool</h2>
+          <div style="font-size:12px;color:var(--muted);">Hiển thị đầy đủ email và trạng thái tất cả tài khoản đang hoạt động trên Gateway</div>
+        </div>
+        <button onclick="loadProvidersAndAccounts()">🔄 Làm mới danh sách</button>
+      </div>
+      <div id="providersAccountsListBox">Đang tải danh sách tài khoản...</div>
+    </div>
   </div>
 
   <!-- VIEW 4: API KEYS MANAGEMENT & POSTGRESQL -->
@@ -1793,9 +1805,9 @@ docker compose up -d --build</pre>
                 (acc.enabled ? 'Bật' : 'Tắt') +
               '</button>' +
             '</div>' +
-            '<div style="display:flex;justify-content:space-between;align-items:center;font-size:12px;color:var(--muted);margin-bottom:9px;font-family:monospace;">' +
-              '<span title="' + htmlEscape(acc.email || '') + '">' + acc.masked_email + '</span>' +
-              (acc.last_used_at ? '<span style="font-size:10.5px;color:#64748b;">Chạy lúc: ' + acc.last_used_at + '</span>' : '') +
+            '<div style="display:flex;justify-content:space-between;align-items:center;font-size:12.5px;color:#38bdf8;font-weight:600;margin-bottom:9px;font-family:monospace;">' +
+              '<span title="' + htmlEscape(acc.email || '') + '">' + htmlEscape(acc.email || acc.masked_email) + '</span>' +
+              (acc.last_used_at ? '<span style="font-size:10.5px;color:#64748b;font-weight:400;">Chạy lúc: ' + acc.last_used_at + '</span>' : '') +
             '</div>' +
             realExecStatsHTML +
             '<div style="display:flex;flex-direction:column;gap:9px;margin-bottom:12px;">' +
@@ -1807,6 +1819,7 @@ docker compose up -d --build</pre>
             '<div style="display:flex;gap:5px;">' +
               '<button style="padding:3px 7px;font-size:10.5px;" onclick="openThresholdModal(\'' + acc.id + '\', \'' + acc.provider + '\', ' + safeUsed + ', \'' + safeReset + '\')">⚙️ Ngưỡng</button>' +
               '<button style="padding:3px 7px;font-size:10.5px;" onclick="loadQuotaSummary(true)">🔄 Làm mới</button>' +
+              '<button style="padding:3px 7px;font-size:10.5px;color:#f87171;" onclick="deleteConnectedAccount(\'' + htmlEscape(acc.id) + '\', \'' + htmlEscape(acc.email || acc.id) + '\')">🗑️ Xoá</button>' +
             '</div>' +
           '</div>' +
         '</div>';
@@ -2597,8 +2610,10 @@ docker compose up -d --build</pre>
         });
         const d = await r.json();
         if (r.ok) {
-          msg.innerHTML = '<span style="color:#10b981">✔ Kết nối Antigravity thành công!</span>';
+          msg.innerHTML = '<span style="color:#10b981">✔ Kết nối Antigravity thành công (' + htmlEscape(d.email || '') + ')!</span>';
+          document.getElementById('agyCallbackInput').value = '';
           loadQuotaSummary(true);
+          loadProvidersAndAccounts();
         } else {
           msg.innerHTML = '<span style="color:#f87171">❌ Lỗi: ' + (d.error ? d.error.message : d.message) + '</span>';
         }
@@ -2607,12 +2622,13 @@ docker compose up -d --build</pre>
       }
     }
 
-    let claudeVerifier = '';
+    let claudeVerifier = localStorage.getItem('omni_claude_verifier') || '';
     async function loadClaudeUrl() {
       try {
         const r = await fetch('/v1/oauth/claude/url');
         const d = await r.json();
         claudeVerifier = d.code_verifier;
+        localStorage.setItem('omni_claude_verifier', d.code_verifier);
         document.getElementById('claudeOAuthUrlBox').textContent = d.auth_url;
         document.getElementById('claudeOpenBrowserBtn').href = d.auth_url;
       } catch (err) {
@@ -2623,21 +2639,26 @@ docker compose up -d --build</pre>
     async function connectClaude() {
       const code = document.getElementById('claudeCodeInput').value.trim();
       const direct = document.getElementById('claudeDirectInput').value.trim();
-      const label = document.getElementById('claudeLabelInput').value.trim() || 'claude-account';
+      const label = document.getElementById('claudeLabelInput').value.trim();
       const msg = document.getElementById('claudeMsg');
       const input = direct || code;
-      if (!input) { msg.innerHTML = '<span style="color:#f87171">Vui lòng nhập code hoặc token</span>'; return; }
+      if (!input) { msg.innerHTML = '<span style="color:#f87171">Vui lòng nhập code#state hoặc token</span>'; return; }
       msg.textContent = 'Đang kết nối Claude...';
       try {
+        const verifierToSend = claudeVerifier || localStorage.getItem('omni_claude_verifier') || '';
         const r = await fetch('/v1/oauth/claude/exchange', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({input: input, code_verifier: claudeVerifier, label: label})
+          body: JSON.stringify({input: input, code_verifier: verifierToSend, label: label})
         });
         const d = await r.json();
         if (r.ok) {
-          msg.innerHTML = '<span style="color:#10b981">✔ Kết nối Claude Code thành công!</span>';
+          msg.innerHTML = '<span style="color:#10b981">✔ Kết nối Claude Code thành công (' + htmlEscape(d.email || d.id || '') + ')!</span>';
+          document.getElementById('claudeCodeInput').value = '';
+          document.getElementById('claudeDirectInput').value = '';
+          loadClaudeUrl();
           loadQuotaSummary(true);
+          loadProvidersAndAccounts();
         } else {
           msg.innerHTML = '<span style="color:#f87171">❌ Lỗi: ' + (d.error ? d.error.message : d.message) + '</span>';
         }
@@ -2664,11 +2685,61 @@ docker compose up -d --build</pre>
         if (r.ok) {
           msg.innerHTML = '<span style="color:#10b981">✔ Đã lưu Alibaba Token Plan thành công!</span>';
           loadQuotaSummary(true);
+          loadProvidersAndAccounts();
         } else {
           msg.innerHTML = '<span style="color:#f87171">❌ Lỗi: ' + (d.error ? d.error.message : d.message) + '</span>';
         }
       } catch (err) {
         msg.innerHTML = '<span style="color:#f87171">Lỗi: ' + err.message + '</span>';
+      }
+    }
+
+    async function loadProvidersAndAccounts() {
+      const box = document.getElementById('providersAccountsListBox');
+      if (!box) return;
+      try {
+        const r = await fetch('/v1/providers');
+        const d = await r.json();
+        if (d.routing_strategy) {
+          const sb = document.getElementById('activeStrategyBadge');
+          const sel = document.getElementById('strategySelect');
+          if (sb) sb.textContent = d.routing_strategy;
+          if (sel) sel.value = d.routing_strategy;
+        }
+        const accs = d.accounts || [];
+        if (accs.length === 0) {
+          box.innerHTML = '<div style="color:var(--muted);padding:12px;">Chưa có tài khoản nào được kết nối.</div>';
+          return;
+        }
+        let html = '<div style="display:flex;flex-direction:column;gap:8px;">';
+        for (const a of accs) {
+          const provBadge = a.provider === 'antigravity' ? '<span class="badge badge-antigravity">Google Antigravity</span>'
+            : (a.provider === 'claude-code' ? '<span class="badge badge-purple">Claude Code</span>' : '<span class="badge badge-green">Alibaba Token Plan</span>');
+          html += '<div style="display:flex;justify-content:space-between;align-items:center;padding:10px 14px;background:var(--card-inner);border:1px solid var(--border);border-radius:8px;flex-wrap:wrap;gap:10px;">' +
+            '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">' +
+              provBadge +
+              '<strong style="color:#38bdf8;font-family:monospace;font-size:13px;">' + htmlEscape(a.email || a.label || a.id) + '</strong>' +
+              (a.project_id ? '<code style="font-size:11px;color:#94a3b8;background:#0b0f17;padding:2px 6px;border-radius:4px;">Project: ' + htmlEscape(a.project_id) + '</code>' : '') +
+              '<span style="font-size:11.5px;color:#34d399;">🟢 ' + (a.requests_ok || 0) + ' req (' + Number(a.total_tokens || 0).toLocaleString() + ' tokens)</span>' +
+            '</div>' +
+            '<button style="padding:4px 10px;font-size:11.5px;color:#f87171;" onclick="deleteConnectedAccount(\'' + htmlEscape(a.id) + '\', \'' + htmlEscape(a.email || a.id) + '\')">🗑️ Xoá tài khoản</button>' +
+          '</div>';
+        }
+        html += '</div>';
+        box.innerHTML = html;
+      } catch (err) {
+        box.innerHTML = '<div style="color:#f87171;">Lỗi tải danh sách: ' + err.message + '</div>';
+      }
+    }
+
+    async function deleteConnectedAccount(id, email) {
+      if (!confirm('Bạn có chắc chắn muốn xoá tài khoản ' + email + ' khỏi Gateway?')) return;
+      try {
+        await fetch('/v1/oauth/account?id=' + encodeURIComponent(id) + '&email=' + encodeURIComponent(email), {method: 'DELETE'});
+        loadQuotaSummary(true);
+        loadProvidersAndAccounts();
+      } catch (err) {
+        alert('Lỗi xoá tài khoản: ' + err.message);
       }
     }
 

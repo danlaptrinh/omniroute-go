@@ -536,6 +536,11 @@ func ExchangeOAuthInput(ctx context.Context, rawInput string, defaultRedirectURI
 	return acc, nil
 }
 
+var (
+	claudePKCEMu        sync.Mutex
+	claudePKCEVerifiers = make(map[string]string)
+)
+
 // BuildClaudeOAuthURL constructs the Anthropic Claude Code PKCE authorization URL.
 func BuildClaudeOAuthURL() (authURL string, verifier string, state string) {
 	b := make([]byte, 32)
@@ -548,11 +553,18 @@ func BuildClaudeOAuthURL() (authURL string, verifier string, state string) {
 	_, _ = rand.Read(sb)
 	state = hex.EncodeToString(sb)
 
+	claudePKCEMu.Lock()
+	if len(claudePKCEVerifiers) > 200 {
+		claudePKCEVerifiers = make(map[string]string)
+	}
+	claudePKCEVerifiers[state] = verifier
+	claudePKCEMu.Unlock()
+
 	q := url.Values{}
 	q.Set("client_id", ClaudeOAuthClientID)
 	q.Set("response_type", "code")
 	q.Set("redirect_uri", ClaudeOAuthRedirectURI)
-	q.Set("scope", "user:inference")
+	q.Set("scope", "user:inference user:profile")
 	q.Set("code_challenge", challenge)
 	q.Set("code_challenge_method", "S256")
 	q.Set("state", state)
@@ -610,27 +622,47 @@ func ExchangeClaudeInput(ctx context.Context, rawInput string, verifier string, 
 		return acc, nil
 	}
 
-	// 3. Authorization Code PKCE exchange
+	// 3. Authorization Code PKCE exchange (supports "code#state" or full callback URL)
 	code := raw
-	if strings.Contains(code, "#") {
-		parts := strings.SplitN(code, "#", 2)
-		code = parts[0]
-	}
-	if u, err := url.Parse(code); err == nil && u.Query().Get("code") != "" {
-		code = u.Query().Get("code")
-	} else if strings.Contains(code, "code=") {
-		if q, err := url.ParseQuery(code); err == nil && q.Get("code") != "" {
-			code = q.Get("code")
+	state := ""
+	if u, err := url.Parse(raw); err == nil && u.Query().Get("code") != "" {
+		code = strings.TrimSpace(u.Query().Get("code"))
+		state = strings.TrimSpace(u.Query().Get("state"))
+	} else if strings.Contains(raw, "#") {
+		parts := strings.SplitN(raw, "#", 2)
+		code = strings.TrimSpace(parts[0])
+		state = strings.TrimSpace(parts[1])
+	} else if strings.Contains(raw, "code=") {
+		if q, err := url.ParseQuery(raw); err == nil && q.Get("code") != "" {
+			code = strings.TrimSpace(q.Get("code"))
+			state = strings.TrimSpace(q.Get("state"))
 		}
 	}
-	code = strings.TrimSpace(code)
+	if strings.Contains(code, "#") {
+		parts := strings.SplitN(code, "#", 2)
+		code = strings.TrimSpace(parts[0])
+		if state == "" {
+			state = strings.TrimSpace(parts[1])
+		}
+	}
+
+	if state != "" {
+		claudePKCEMu.Lock()
+		if savedVerifier, ok := claudePKCEVerifiers[state]; ok && savedVerifier != "" {
+			verifier = savedVerifier
+		}
+		claudePKCEMu.Unlock()
+	}
 
 	reqPayload := map[string]string{
 		"grant_type":    "authorization_code",
 		"client_id":     ClaudeOAuthClientID,
 		"code":          code,
 		"redirect_uri":  ClaudeOAuthRedirectURI,
-		"code_verifier": verifier,
+		"code_verifier": strings.TrimSpace(verifier),
+	}
+	if state != "" {
+		reqPayload["state"] = state
 	}
 	payloadBytes, err := json.Marshal(reqPayload)
 	if err != nil {
@@ -666,6 +698,10 @@ func ExchangeClaudeInput(ctx context.Context, rawInput string, verifier string, 
 		TokenType    string `json:"token_type"`
 		Error        string `json:"error"`
 		ErrorDesc    string `json:"error_description"`
+		Account      struct {
+			UUID         string `json:"uuid"`
+			EmailAddress string `json:"email_address"`
+		} `json:"account"`
 	}
 	if err := json.Unmarshal(bodyBytes, &tokenResp); err != nil {
 		return nil, fmt.Errorf("failed to parse claude oauth response: %w", err)
@@ -675,9 +711,13 @@ func ExchangeClaudeInput(ctx context.Context, rawInput string, verifier string, 
 		return nil, fmt.Errorf("no access_token received: %s (%s)", tokenResp.Error, tokenResp.ErrorDesc)
 	}
 
-	email := "claude-code-account"
-	if label != "" {
-		email = label
+	email := strings.TrimSpace(tokenResp.Account.EmailAddress)
+	if email == "" {
+		if label != "" {
+			email = label
+		} else {
+			email = "claude-code-account"
+		}
 	}
 
 	expiresAt := int64(0)
