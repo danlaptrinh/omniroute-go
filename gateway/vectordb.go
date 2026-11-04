@@ -91,24 +91,73 @@ func vectorFallbackFilePath() string {
 	return filepath.Join(filepath.Dir(base), "omni_vector_memories.json")
 }
 
+func defaultSeededPinnedMemories() []VectorMemoryEntry {
+	sopTitle := "Quy Trình Deploy Phần Mềm Lên Server Chuẩn Công Nghiệp (4 Cải Tiến Tự Động Hóa Hoàn Toàn — Server 103.37.60.13)"
+	sopPrompt := "Quy trình chuẩn công nghiệp khi deploy phần mềm lên server sản xuất 103.37.60.13 (BuCloud): Single Source of Truth nhánh main, Auto-CD từ ci-gate, Atomic Symlink Release (/opt/bucloud/releases), bucloud-rollback và Post-Deploy Smoke Check tự động."
+	sopAnswer := `GIẢI PHÁP DEPLOY PHẦN MỀM CHUẨN CÔNG NGHIỆP (4 CẢI TIẾN TỰ ĐỘNG HÓA HOÀN TOÀN):
+
+1. Nguyên tắc "Single Source of Truth" — Chỉ nhánh main mới được phép Deploy:
+   - Cấm hoàn toàn việc đẩy trực tiếp dist hay binary từ máy cá nhân lên server 103.37.60.13.
+   - Mọi thay đổi bắt buộc đi theo 1 đường duy nhất:
+     Local Commit ➔ Máy CI (ci-gate) ➔ GitHub PR ➔ Merge vào main ➔ Server tự động Deploy.
+
+2. Tự động Deploy ngay khi Merge PR (Auto-CD bằng GitHub Webhook hoặc Máy CI đẩy sang Server):
+   - Ngay khi ci-gate kiểm tra xong hoặc khi PR được merge vào main, chính máy CI (nơi vừa build sẵn admin/dist và api đã pass 100% test) sẽ tự động đóng gói artifact đã kiểm chứng đó và đẩy sang 103.37.60.13.
+   - Lợi ích: Không tốn thời gian build lại lần 2, và đảm bảo 100% code trên server chính xác từng byte với code đã pass CI và nằm trên main.
+
+3. Atomic Symlink Release (Triển khai nguyên tử & Rollback trong 1 giây):
+   - Thay vì chép đè trực tiếp vào /opt/bucloud2/admin/dist, script deploy tự động sẽ giải nén vào thư mục theo mã commit (<commit-sha>):
+     • /opt/bucloud/releases/<commit-sha>/admin-dist
+     • /opt/bucloud/releases/<commit-sha>/bucloud
+   - Sau đó đổi symlink nguyên tử (ln -sfn):
+     • /opt/bucloud2/admin/dist -> /opt/bucloud/releases/<commit-sha>/admin-dist
+   - Giữ lại 5 bản release gần nhất. Nếu bản mới có bất kỳ sự cố gì, chỉ cần 1 lệnh bucloud-rollback là quay về bản trước đó trong < 1 giây.
+
+4. Post-Deploy Smoke Check tự động:
+   - Ngay sau khi đổi symlink nguyên tử và khởi động lại dịch vụ, hệ thống tự động thực thi Post-Deploy Smoke Check (kiểm tra HTTP health check, API status, và giao diện admin/dist). Nếu phát hiện lỗi, tự động chạy bucloud-rollback ngay lập tức.`
+
+	emb := ComputeSemanticEmbedding(sopTitle + "\n" + sopPrompt + "\n" + sopAnswer)
+	return []VectorMemoryEntry{
+		{
+			ID:           "mem-sop-deploy-bucloud-ci-cd",
+			CreatedAt:    "05/11/2026 01:20:00",
+			Title:        sopTitle,
+			Category:     "devops_sop",
+			EmployeeName: "System Admin",
+			Model:        "pinned-knowledge",
+			PromptText:   sopPrompt,
+			AnswerText:   sopAnswer,
+			Pinned:       true,
+			HitCount:     1,
+			Embedding:    emb,
+		},
+	}
+}
+
 func ensureVectorMemoriesLoadedLocked() {
 	if vectorLoadedLocal {
 		return
 	}
 	vectorLoadedLocal = true
 	data, err := os.ReadFile(vectorFallbackFilePath())
-	if err != nil {
-		return
-	}
 	var list []VectorMemoryEntry
-	if err := json.Unmarshal(data, &list); err == nil && len(list) > 0 {
-		for i := range list {
-			if len(list[i].Embedding) != VectorEmbeddingDim {
-				list[i].Embedding = ComputeSemanticEmbedding(list[i].Title + "\n" + list[i].PromptText + "\n" + list[i].AnswerText)
-			}
-		}
-		vectorMemories = list
+	if err == nil {
+		_ = json.Unmarshal(data, &list)
 	}
+	seenIDs := make(map[string]bool, len(list))
+	for i := range list {
+		seenIDs[list[i].ID] = true
+		if len(list[i].Embedding) != VectorEmbeddingDim {
+			list[i].Embedding = ComputeSemanticEmbedding(list[i].Title + "\n" + list[i].PromptText + "\n" + list[i].AnswerText)
+		}
+	}
+	for _, seed := range defaultSeededPinnedMemories() {
+		if !seenIDs[seed.ID] {
+			list = append([]VectorMemoryEntry{seed}, list...)
+			seenIDs[seed.ID] = true
+		}
+	}
+	vectorMemories = list
 }
 
 func saveVectorMemoriesLocalAsync() {
