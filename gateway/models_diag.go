@@ -40,8 +40,11 @@ var curatedDashboardModels = []struct {
 	ID       string
 	Provider ProviderID
 }{
-	// --- Combos (Smart Routing) ---
+	// --- Combos (Smart Routing & Collaborative Multi-Model Pipelines) ---
 	{"auto/best-coding", ProviderAutoCombo},
+	{"auto/team-coding", ProviderAutoCombo},
+	{"auto/council-pro", ProviderAutoCombo},
+	{"auto/night-coding", ProviderAutoCombo},
 	{"auto/fast", ProviderAutoCombo},
 	{"auto/reasoning", ProviderAutoCombo},
 
@@ -258,6 +261,14 @@ func buildModelBadge(id string) string {
 		return "BUILT-IN DeepSeek R1"
 	case strings.Contains(s, "qwq"):
 		return "BUILT-IN QwQ Plus"
+	case s == "auto/team-coding":
+		return "COMBO Pipeline (Opus 5.5 ➔ Argon 4 ➔ Qwen 3.8 Max)"
+	case s == "auto/council-pro":
+		return "COMBO Hội Đồng Đa Mô Hình (Mixture of Agents)"
+	case s == "auto/night-coding":
+		return "COMBO ⚡ Night 40-50% Off (Alibaba ➔ Argon 4)"
+	case s == "auto/reasoning":
+		return "COMBO Suy Luận Đa Tầng (Pipeline)"
 	case strings.HasPrefix(s, "auto/"):
 		return "COMBO OmniRoute Smart Routing"
 	default:

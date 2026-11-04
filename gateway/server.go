@@ -79,6 +79,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/cache", s.handleCacheStats)
 	mux.HandleFunc("/v1/aliases", s.handleAliases)
 	mux.HandleFunc("/v1/hedging", s.handleHedgingConfig)
+	mux.HandleFunc("/v1/combos", s.handleCombos)
 	mux.HandleFunc("/v1/images/generations", s.handleImageGenerations)
 	mux.HandleFunc("/v1/chat/completions", s.handleChatCompletions)
 	mux.HandleFunc("/chat/completions", s.handleChatCompletions)

@@ -385,6 +385,10 @@ const gatewayUIHTML = `<!DOCTYPE html>
           <span class="nav-icon">🤖</span>
           <span class="nav-text">Mô Hình Có Sẵn</span>
         </button>
+        <button class="nav-btn" onclick="switchNav('view-combos')">
+          <span class="nav-icon">🔗</span>
+          <span class="nav-text">Combo Đa Mô Hình</span>
+        </button>
         <button class="nav-btn" onclick="switchNav('view-providers')">
           <span class="nav-icon">🔌</span>
           <span class="nav-text">Kết Nối Nhà Cung Cấp</span>
@@ -819,10 +823,13 @@ const gatewayUIHTML = `<!DOCTYPE html>
               <option value="gemini-3.8-flash-high">gemini-3.8-flash-high</option>
               <option value="antigravity/claude-opus-4-6-thinking">antigravity/claude-opus-4-6-thinking</option>
             </optgroup>
-            <optgroup label="Auto Combos (OmniRoute Failover)">
-              <option value="auto/best-coding">auto/best-coding (Antigravity Argon ➔ Claude ➔ Qwen3 Coder)</option>
-              <option value="auto/fast">auto/fast (Gemini 3.8 Flash ➔ Haiku 4.5)</option>
-              <option value="auto/reasoning">auto/reasoning (Argon High ➔ Claude Opus Thinking ➔ DeepSeek R1)</option>
+            <optgroup label="🔗 Combo Đa Mô Hình (Pipeline, Hội Đồng MoA &amp; Night Discount)">
+              <option value="auto/team-coding">auto/team-coding (🔗 Pipeline: Opus 5.5 Kiến trúc ➔ Argon 4 Code ➔ Qwen 3.8 Max)</option>
+              <option value="auto/council-pro">auto/council-pro (🧠 Hội Đồng Song Song: Argon 4 + Opus 5.5 + Qwen 3.8 Max)</option>
+              <option value="auto/night-coding">auto/night-coding (⚡ Night 40-50% Off: Qwen 3.8 Max ➔ DeepSeek V4 Pro ➔ Argon 4)</option>
+              <option value="auto/best-coding">auto/best-coding (🛡️ Failover: Antigravity Argon 4 ➔ Claude Opus ➔ Qwen3 Coder)</option>
+              <option value="auto/reasoning">auto/reasoning (🔗 Suy Luận Đa Tầng: Argon 4 ➔ Claude Opus Thinking ➔ DeepSeek R1)</option>
+              <option value="auto/fast">auto/fast (⚡ Tốc Độ Nhanh: Gemini 3.8 Flash ➔ Qwen 3.8 Flash ➔ Haiku 5.5)</option>
             </optgroup>
             <optgroup label="Claude Code (Anthropic CLI &amp; Pro/Max)">
               <option value="claude-code/claude-opus-5-5">claude-code/claude-opus-5-5 (Opus 5.5 Default)</option>
@@ -1354,6 +1361,128 @@ docker compose up -d --build</pre>
       </div>
 
       <div id="vectorMemoriesListBox" style="margin-top:14px;">Đang tải dữ liệu Vector Database...</div>
+    </div>
+  </div>
+
+  <!-- VIEW 11: MULTI-MODEL COMBOS & COLLABORATIVE PIPELINE BUILDER -->
+  <div id="view-combos" class="view-content">
+    <div class="card" style="border:1px solid #2b354f;background:#121723;">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;">
+        <div>
+          <h2>🔗 Combo Đa Mô Hình &amp; Phối Hợp Làm Việc (Multi-Model Collaborative Engine)</h2>
+          <div style="font-size:12.5px;color:var(--muted);">
+            Kết nối nhiều model từ <strong>Google Antigravity</strong>, <strong>Claude Code (Opus 5.5 / Fable 5.1)</strong> và <strong>Alibaba Cloud Token Plan (⚡ Night Discount)</strong> để phối hợp làm việc cùng nhau theo dây chuyền (Pipeline), Hội đồng song song (Mixture of Agents), hoặc Tối ưu giảm phí ban đêm.
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <span class="badge badge-green">🟢 4 Chế Độ Phối Hợp</span>
+          <button onclick="loadCombosView()">🔄 Làm mới</button>
+        </div>
+      </div>
+
+      <!-- 4 Modes Explanation Cards -->
+      <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));gap:12px;margin-top:16px;">
+        <div class="setting-card" style="padding:13px;border-left:3px solid #a855f7;">
+          <div style="font-weight:700;font-size:13px;color:#c084fc;">🔗 1. Pipeline Nối Tiếp (Kiến Trúc ➔ Code)</div>
+          <div style="font-size:11.5px;color:var(--muted);margin-top:4px;">Model Bước 1 (vd: <code>Claude Opus 5.5</code>) lập kiến trúc &amp; thuật toán ➔ truyền kết quả sang Model Bước 2 (vd: <code>Gemini 4 Argon</code> / <code>Qwen 3.8 Max</code>) viết code hoàn chỉnh.</div>
+        </div>
+        <div class="setting-card" style="padding:13px;border-left:3px solid #38bdf8;">
+          <div style="font-weight:700;font-size:13px;color:#38bdf8;">🧠 2. Hội Đồng Song Song (Mixture of Agents)</div>
+          <div style="font-size:11.5px;color:var(--muted);margin-top:4px;">Chạy đồng thời 2-3 model bằng Goroutines (<code>Argon 4</code> + <code>Opus 5.5</code> + <code>Qwen 3.8 Max</code>) ➔ Model Chủ tịch tổng hợp câu trả lời xuất sắc nhất.</div>
+        </div>
+        <div class="setting-card" style="padding:13px;border-left:3px solid #10b981;">
+          <div style="font-weight:700;font-size:13px;color:#34d399;">⚡ 3. Tối Ưu Ban Đêm (Night 40-50% Off)</div>
+          <div style="font-size:11.5px;color:var(--muted);margin-top:4px;">Ưu tiên các model giảm giá mạnh ban đêm của Alibaba (<code>Qwen 3.8 Max</code> ⚡40%, <code>DeepSeek V4.1 Flash</code> ⚡50%, <code>DeepSeek V4 Pro</code> ⚡50%) + dự phòng Argon 4.</div>
+        </div>
+        <div class="setting-card" style="padding:13px;border-left:3px solid #f59e0b;">
+          <div style="font-weight:700;font-size:13px;color:#fbbf24;">🛡️ 4. Failover Chuyển Tiếp Tức Thì</div>
+          <div style="font-size:11.5px;color:var(--muted);margin-top:4px;">Chạy Model số 1 ưu tiên; ngay khi hết hạn mức hoặc quá tải sẽ tự động chuyển sang Model 2 ➔ Model 3 xuyên suốt 3 nhà cung cấp.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Active Combos Grid -->
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;flex-wrap:wrap;gap:10px;">
+        <div>
+          <h2>📦 Danh Sách Các Combo Đa Mô Hình Đang Hoạt Động</h2>
+          <div style="font-size:12px;color:var(--muted);">Sử dụng trực tiếp tên ID Combo (ví dụ: <code>auto/team-coding</code>, <code>auto/council-pro</code>, <code>auto/night-coding</code>) trong IDE (Cursor, Claude Code, Antigravity, Cline) như một model thông thường.</div>
+        </div>
+      </div>
+      <div id="combosGridBox" style="display:grid;grid-template-columns:repeat(auto-fill, minmax(360px, 1fr));gap:14px;">
+        Đang tải danh sách Combo...
+      </div>
+    </div>
+
+    <!-- Combo Builder Form -->
+    <div class="card" style="border:1px solid #2b354f;">
+      <h2>🛠️ Tạo Mới / Tuỳ Chỉnh Combo Kết Nối Nhiều Model</h2>
+      <div style="font-size:12.5px;color:var(--muted);margin-bottom:14px;">
+        Thiết kế quy trình làm việc giữa nhiều mô hình hoặc sửa lại bất kỳ Combo nào hiện có:
+      </div>
+
+      <div class="grid-2">
+        <div>
+          <label class="form-label">Mã ID Combo (dùng để gọi API trong IDE)</label>
+          <input id="comboIdInput" type="text" placeholder="ví dụ: auto/my-super-coder hoặc auto/team-coding" />
+        </div>
+        <div>
+          <label class="form-label">Chế độ phối hợp giữa các Model (Combo Mode)</label>
+          <select id="comboModeSelect">
+            <option value="pipeline">🔗 Pipeline Nối Tiếp: Bước 1 (Kiến trúc/Phân tích) ➔ Bước 2 (Viết Code/Hoàn thiện)</option>
+            <option value="consensus">🧠 Hội Đồng Song Song (Mixture of Agents): Chạy đồng thời &amp; Tổng hợp</option>
+            <option value="night-saver">⚡ Tối Ưu Giảm Giá Ban Đêm (Night 40%-50% Off + Dự phòng)</option>
+            <option value="failover">🛡️ Failover Chuyển Tiếp Tức Thì (Model 1 ➔ Model 2 ➔ Model 3)</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="grid-2" style="margin-top:10px;">
+        <div>
+          <label class="form-label">Tên hiển thị Combo</label>
+          <input id="comboNameInput" type="text" placeholder="Ví dụ: Combo Kiến Trúc Opus 5.5 ➔ Code Qwen 3.8 Max" />
+        </div>
+        <div>
+          <label class="form-label">Mô tả nhiệm vụ</label>
+          <input id="comboDescInput" type="text" placeholder="Ví dụ: Kết hợp Claude Opus 5.5 thiết kế hệ thống và Qwen 3.8 Max (⚡40% Off) viết code" />
+        </div>
+      </div>
+
+      <!-- 4 Model Steps Selector -->
+      <div style="margin-top:14px;padding:14px;background:#0b0f17;border:1px solid #242c3d;border-radius:10px;">
+        <div style="font-weight:700;font-size:13px;color:#e2e8f0;margin-bottom:10px;">🔗 Cấu Hình Chuỗi Model Tham Gia Làm Việc:</div>
+        <div class="grid-2">
+          <div>
+            <label class="form-label" style="color:#c084fc;">Bước 1: Model Chủ Đạo / Kiến Trúc Sư (Architect / Primary)</label>
+            <select id="comboStep1Select" class="combo-model-select"></select>
+          </div>
+          <div>
+            <label class="form-label" style="color:#38bdf8;">Bước 2: Model Thực Thi / Lập Trình Viên (Executor / Chuyên gia 2)</label>
+            <select id="comboStep2Select" class="combo-model-select"></select>
+          </div>
+        </div>
+        <div class="grid-2" style="margin-top:10px;">
+          <div>
+            <label class="form-label" style="color:#34d399;">Bước 3: Model Tổng Hợp / Chuyên gia 3 (Synthesizer / Fallback)</label>
+            <select id="comboStep3Select" class="combo-model-select"></select>
+          </div>
+          <div>
+            <label class="form-label" style="color:#fbbf24;">Bước 4: Model Dự Phòng Cuối (Backup Model — Tuỳ chọn)</label>
+            <select id="comboStep4Select" class="combo-model-select"></select>
+          </div>
+        </div>
+
+        <div style="margin-top:12px;">
+          <label class="form-label">Lời nhắc phối hợp giữa các Model (Handoff / Synthesis Prompt — Dùng cho Pipeline &amp; Hội Đồng MoA)</label>
+          <textarea id="comboHandoffInput" rows="2" placeholder="Ví dụ: Dựa trên bản phân tích kiến trúc từ Model Bước 1 ở trên, hãy viết code chi tiết, đầy đủ và tối ưu hiệu năng nhất..."></textarea>
+        </div>
+      </div>
+
+      <div class="btn-row" style="justify-content:flex-end;margin-top:14px;">
+        <button onclick="resetComboBuilderForm()">Đặt lại Form</button>
+        <button class="btn-purple" onclick="saveComboFromUI()">💾 Lưu Combo Đa Mô Hình</button>
+      </div>
+      <div id="comboSaveMsg" class="hint"></div>
     </div>
   </div>
     </main>
@@ -2045,6 +2174,7 @@ docker compose up -d --build</pre>
       if (viewId === 'view-endpoint') loadEndpointStatus();
       if (viewId === 'view-quota') loadQuotaSummary();
       if (viewId === 'view-models') loadModelsDiagnostics();
+      if (viewId === 'view-combos') loadCombosView();
       if (viewId === 'view-keys') loadApiKeys();
       if (viewId === 'view-logs') loadLogs();
       if (viewId === 'view-providers') loadProvidersAndAccounts();
@@ -3468,6 +3598,287 @@ docker compose up -d --build</pre>
       if (!confirm('Xoá toàn bộ các Vector tự học (nhưng vẫn giữ nguyên các Tri thức Cốt lõi đã ghim)?')) return;
       await fetch('/v1/vector?id=all_auto', {method: 'DELETE'});
       loadVectorDB();
+    }
+
+    // --- MULTI-MODEL COMBOS & COLLABORATIVE PIPELINE FLOW ---
+    let currentCombosList = [];
+
+    const comboSelectModelGroups = [
+      {
+        label: 'Google Antigravity (Gen 4 Argon & Gen 3)',
+        models: [
+          {id: 'antigravity/gemini-4-argon-high', name: 'antigravity/gemini-4-argon-high (Argon 4 High Thinking)'},
+          {id: 'antigravity/gemini-4-argon-medium', name: 'antigravity/gemini-4-argon-medium'},
+          {id: 'antigravity/gemini-3.1-pro-high', name: 'antigravity/gemini-3.1-pro-high'},
+          {id: 'antigravity/gemini-3.8-flash-high', name: 'antigravity/gemini-3.8-flash-high'},
+          {id: 'antigravity/claude-opus-4-6-thinking', name: 'antigravity/claude-opus-4-6-thinking'}
+        ]
+      },
+      {
+        label: 'Claude Code CLI (Opus 5.5, Fable 5.1, Sonnet 5.5)',
+        models: [
+          {id: 'claude-code/claude-opus-5-5', name: 'claude-code/claude-opus-5-5 (Opus 5.5 Default)'},
+          {id: 'claude-code/claude-opus-5-5-thinking', name: 'claude-code/claude-opus-5-5-thinking (Opus 5.5 Extra Effort)'},
+          {id: 'claude-code/claude-fable-5-1', name: 'claude-code/claude-fable-5-1 (Fable 5.1)'},
+          {id: 'claude-code/claude-sonnet-5-5', name: 'claude-code/claude-sonnet-5-5 (Sonnet 5.5)'},
+          {id: 'claude-code/claude-haiku-5-5', name: 'claude-code/claude-haiku-5-5 (Haiku 5.5)'},
+          {id: 'claude-code/claude-sonnet-5', name: 'claude-code/claude-sonnet-5 (Sonnet 5)'},
+          {id: 'claude-code/claude-opus-5', name: 'claude-code/claude-opus-5 (Opus 5)'},
+          {id: 'claude-code/claude-fable-5', name: 'claude-code/claude-fable-5 (Fable 5)'},
+          {id: 'claude-code/claude-opus-4-8', name: 'claude-code/claude-opus-4-8 (Opus 4.8)'},
+          {id: 'claude-code/claude-opus-4-7', name: 'claude-code/claude-opus-4-7 (Opus 4.7)'},
+          {id: 'claude-code/claude-opus-4-6-thinking', name: 'claude-code/claude-opus-4-6-thinking (Opus 4.6 Thinking)'},
+          {id: 'claude-code/claude-sonnet-4-6', name: 'claude-code/claude-sonnet-4-6 (Sonnet 4.6)'},
+          {id: 'claude-code/claude-haiku-4-5', name: 'claude-code/claude-haiku-4-5 (Haiku 4.5)'}
+        ]
+      },
+      {
+        label: 'Alibaba Cloud Token Plan (⚡ Night Discount 40%-50% Off)',
+        models: [
+          {id: 'alibaba/qwen3.8-max', name: 'alibaba/qwen3.8-max (⚡ 40% Off Nights)'},
+          {id: 'alibaba/qwen3.8-flash', name: 'alibaba/qwen3.8-flash (⚡ 40% Off Nights)'},
+          {id: 'alibaba/deepseek-v4.1-flash-1017', name: 'alibaba/deepseek-v4.1-flash-1017 (⚡ 50% Off Nights)'},
+          {id: 'alibaba/deepseek-v4.1-flash', name: 'alibaba/deepseek-v4.1-flash (⚡ 50% Off Nights)'},
+          {id: 'alibaba/deepseek-v4-pro-0813', name: 'alibaba/deepseek-v4-pro-0813 (⚡ Night 50% Off)'},
+          {id: 'alibaba/deepseek-v4-flash-0731', name: 'alibaba/deepseek-v4-flash-0731 (⚡ Night 50% Off)'},
+          {id: 'alibaba/deepseek-v4-pro', name: 'alibaba/deepseek-v4-pro'},
+          {id: 'alibaba/auto', name: 'alibaba/auto (Qwen Auto Reasoning)'},
+          {id: 'alibaba/qwen3.7-max', name: 'alibaba/qwen3.7-max'},
+          {id: 'alibaba/qwen3.7-plus', name: 'alibaba/qwen3.7-plus'},
+          {id: 'alibaba/qwen3.6-flash', name: 'alibaba/qwen3.6-flash'},
+          {id: 'alibaba/glm-5.3', name: 'alibaba/glm-5.3'},
+          {id: 'alibaba/glm-5.2', name: 'alibaba/glm-5.2'},
+          {id: 'alibaba/qwen3-coder-plus', name: 'alibaba/qwen3-coder-plus'}
+        ]
+      }
+    ];
+
+    function populateComboSelects() {
+      const selects = ['comboStep1Select', 'comboStep2Select', 'comboStep3Select', 'comboStep4Select'];
+      selects.forEach((selId, idx) => {
+        const el = document.getElementById(selId);
+        if (!el || el.options.length > 0) return;
+        if (idx >= 2) {
+          const emptyOpt = document.createElement('option');
+          emptyOpt.value = '';
+          emptyOpt.textContent = '-- Không dùng / Bỏ qua bước này --';
+          el.appendChild(emptyOpt);
+        }
+        comboSelectModelGroups.forEach(group => {
+          const og = document.createElement('optgroup');
+          og.label = group.label;
+          group.models.forEach(m => {
+            const opt = document.createElement('option');
+            opt.value = m.id;
+            opt.textContent = m.name;
+            og.appendChild(opt);
+          });
+          el.appendChild(og);
+        });
+      });
+      // Default selections
+      const s1 = document.getElementById('comboStep1Select');
+      const s2 = document.getElementById('comboStep2Select');
+      const s3 = document.getElementById('comboStep3Select');
+      if (s1 && !s1.value) s1.value = 'claude-code/claude-opus-5-5';
+      if (s2 && !s2.value) s2.value = 'antigravity/gemini-4-argon-high';
+      if (s3 && !s3.value) s3.value = 'alibaba/qwen3.8-max';
+    }
+
+    async function loadCombosView() {
+      populateComboSelects();
+      const box = document.getElementById('combosGridBox');
+      try {
+        const r = await fetch('/v1/combos');
+        const d = await r.json();
+        currentCombosList = d.combos || [];
+        renderCombosGrid(currentCombosList);
+      } catch (err) {
+        if (box) box.innerHTML = '<div style="color:#f87171;">Lỗi tải danh sách Combo: ' + htmlEscape(err.message) + '</div>';
+      }
+    }
+
+    function renderCombosGrid(combos) {
+      const box = document.getElementById('combosGridBox');
+      if (!box) return;
+      if (!combos || combos.length === 0) {
+        box.innerHTML = '<div style="color:var(--muted);">Chưa có Combo nào.</div>';
+        return;
+      }
+
+      let html = '';
+      combos.forEach((c, idx) => {
+        const mode = c.mode || 'failover';
+        let modeBadge = '<span class="badge" style="background:rgba(245,158,11,0.16);color:#fbbf24;border:1px solid rgba(245,158,11,0.35);">🛡️ Failover Tức Thì</span>';
+        if (mode === 'pipeline') {
+          modeBadge = '<span class="badge" style="background:rgba(168,85,247,0.18);color:#c084fc;border:1px solid rgba(168,85,247,0.4);">🔗 Pipeline Nối Tiếp (Kiến trúc ➔ Code)</span>';
+        } else if (mode === 'consensus') {
+          modeBadge = '<span class="badge" style="background:rgba(56,189,248,0.18);color:#38bdf8;border:1px solid rgba(56,189,248,0.4);">🧠 Hội Đồng Song Song (Mixture of Agents)</span>';
+        } else if (mode === 'night-saver') {
+          modeBadge = '<span class="badge" style="background:rgba(16,185,129,0.18);color:#34d399;border:1px solid rgba(16,185,129,0.4);">⚡ Night Discount 40-50% Off</span>';
+        }
+
+        const models = c.models || [];
+        const roles = c.roles || [];
+        let stepsHTML = '<div style="display:flex;flex-direction:column;gap:6px;margin-top:10px;background:#0a0e17;padding:10px;border-radius:8px;border:1px solid #1e293b;">';
+        models.forEach((m, mIdx) => {
+          const lowerM = m.toLowerCase();
+          let provColor = '#fb923c';
+          let provLabel = 'Antigravity';
+          if (lowerM.startsWith('claude-code/')) {
+            provColor = '#c084fc';
+            provLabel = 'Claude Code';
+          } else if (lowerM.startsWith('alibaba/')) {
+            provColor = '#38bdf8';
+            provLabel = 'Alibaba';
+          }
+          const roleLabel = roles[mIdx] || ('Bước ' + (mIdx + 1));
+          const nightTag = (lowerM.includes('qwen3.8-max') || lowerM.includes('qwen3.8-flash'))
+            ? ' <span style="color:#34d399;font-size:10.5px;font-weight:700;">⚡40% Off</span>'
+            : ((lowerM.includes('deepseek-v4.1-flash') || lowerM.includes('0813') || lowerM.includes('0731'))
+                ? ' <span style="color:#34d399;font-size:10.5px;font-weight:700;">⚡50% Off</span>' : '');
+          stepsHTML += '<div style="display:flex;justify-content:space-between;align-items:center;font-size:11.5px;gap:6px;">' +
+            '<span style="color:var(--muted);">' + htmlEscape(roleLabel) + ':</span>' +
+            '<span style="font-family:monospace;font-weight:700;color:' + provColor + ';">' + htmlEscape(m) + nightTag + '</span>' +
+          '</div>';
+        });
+        stepsHTML += '</div>';
+
+        const handoffHTML = c.handoff_prompt
+          ? '<div style="margin-top:8px;font-size:11px;color:#94a3b8;background:rgba(168,85,247,0.07);border:1px dashed rgba(168,85,247,0.28);padding:7px 9px;border-radius:6px;">💬 <strong>Chỉ dẫn phối hợp:</strong> ' + htmlEscape(c.handoff_prompt) + '</div>'
+          : '';
+
+        html += '<div style="background:#121722;border:1px solid #242c3d;border-radius:12px;padding:15px;display:flex;flex-direction:column;justify-content:space-between;">' +
+          '<div>' +
+            '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px;">' +
+              modeBadge +
+              '<code style="font-size:12.5px;font-weight:700;color:#fff;background:#1e293b;padding:3px 8px;border-radius:6px;">' + htmlEscape(c.id) + '</code>' +
+            '</div>' +
+            '<div style="font-weight:700;font-size:14px;color:#f1f5f9;margin-bottom:4px;">' + htmlEscape(c.name || c.id) + '</div>' +
+            '<div style="font-size:12px;color:var(--muted);line-height:1.4;">' + htmlEscape(c.description || '') + '</div>' +
+            stepsHTML +
+            handoffHTML +
+          '</div>' +
+          '<div style="display:flex;justify-content:space-between;align-items:center;margin-top:12px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.06);gap:6px;flex-wrap:wrap;">' +
+            '<div style="display:flex;gap:6px;">' +
+              '<button style="padding:5px 10px;font-size:11.5px;" onclick="testComboInPlayground(\'' + htmlEscape(c.id) + '\')">🧪 Chạy thử</button>' +
+              '<button style="padding:5px 10px;font-size:11.5px;" onclick="editComboInBuilder(' + idx + ')">✏️ Tuỳ chỉnh</button>' +
+            '</div>' +
+            '<div style="display:flex;gap:6px;">' +
+              '<button style="padding:5px 10px;font-size:11.5px;" onclick="navigator.clipboard.writeText(\'' + htmlEscape(c.id) + '\')">📋 Copy ID</button>' +
+              (!c.built_in ? '<button style="padding:5px 9px;font-size:11.5px;color:#f87171;" onclick="deleteComboFromUI(\'' + htmlEscape(c.id) + '\')">🗑️</button>' : '') +
+            '</div>' +
+          '</div>' +
+        '</div>';
+      });
+      box.innerHTML = html;
+    }
+
+    function editComboInBuilder(idx) {
+      const c = currentCombosList[idx];
+      if (!c) return;
+      populateComboSelects();
+      document.getElementById('comboIdInput').value = c.id || '';
+      document.getElementById('comboModeSelect').value = c.mode || 'failover';
+      document.getElementById('comboNameInput').value = c.name || '';
+      document.getElementById('comboDescInput').value = c.description || '';
+      document.getElementById('comboHandoffInput').value = c.handoff_prompt || '';
+
+      const models = c.models || [];
+      ['comboStep1Select', 'comboStep2Select', 'comboStep3Select', 'comboStep4Select'].forEach((selId, i) => {
+        const el = document.getElementById(selId);
+        if (el) el.value = models[i] || '';
+      });
+      document.getElementById('comboIdInput').scrollIntoView({behavior: 'smooth', block: 'center'});
+    }
+
+    function resetComboBuilderForm() {
+      document.getElementById('comboIdInput').value = '';
+      document.getElementById('comboModeSelect').value = 'pipeline';
+      document.getElementById('comboNameInput').value = '';
+      document.getElementById('comboDescInput').value = '';
+      document.getElementById('comboHandoffInput').value = '';
+      document.getElementById('comboSaveMsg').textContent = '';
+    }
+
+    async function saveComboFromUI() {
+      const id = document.getElementById('comboIdInput').value.trim();
+      const mode = document.getElementById('comboModeSelect').value;
+      const name = document.getElementById('comboNameInput').value.trim();
+      const desc = document.getElementById('comboDescInput').value.trim();
+      const handoff = document.getElementById('comboHandoffInput').value.trim();
+      const msg = document.getElementById('comboSaveMsg');
+
+      if (!id) {
+        if (msg) msg.innerHTML = '<span style="color:#f87171;">❌ Vui lòng nhập Mã ID Combo (ví dụ: auto/my-combo)</span>';
+        return;
+      }
+
+      const models = [
+        document.getElementById('comboStep1Select').value,
+        document.getElementById('comboStep2Select').value,
+        document.getElementById('comboStep3Select').value,
+        document.getElementById('comboStep4Select').value
+      ].filter(Boolean);
+
+      if (models.length === 0) {
+        if (msg) msg.innerHTML = '<span style="color:#f87171;">❌ Vui lòng chọn ít nhất 1 Model</span>';
+        return;
+      }
+
+      try {
+        const r = await fetch('/v1/combos', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            id: id,
+            name: name || id,
+            mode: mode,
+            description: desc || ('Combo ' + mode + ' kết hợp ' + models.join(' ➔ ')),
+            models: models,
+            handoff_prompt: handoff
+          })
+        });
+        const d = await r.json();
+        if (r.ok) {
+          if (msg) msg.innerHTML = '<span style="color:#34d399;">✔ Đã lưu Combo <strong>' + htmlEscape(id) + '</strong> thành công!</span>';
+          currentCombosList = d.combos || [];
+          renderCombosGrid(currentCombosList);
+          loadModelsDiagnostics();
+        } else {
+          if (msg) msg.innerHTML = '<span style="color:#f87171;">❌ ' + htmlEscape(d.error ? d.error.message : 'Lỗi lưu Combo') + '</span>';
+        }
+      } catch (err) {
+        if (msg) msg.innerHTML = '<span style="color:#f87171;">❌ Lỗi kết nối: ' + htmlEscape(err.message) + '</span>';
+      }
+    }
+
+    async function deleteComboFromUI(id) {
+      if (!confirm('Bạn có muốn xoá / đặt lại Combo ' + id + ' không?')) return;
+      await fetch('/v1/combos?id=' + encodeURIComponent(id), {method: 'DELETE'});
+      loadCombosView();
+    }
+
+    function testComboInPlayground(comboId) {
+      switchNav('view-playground');
+      const sel = document.getElementById('testModelSelect');
+      if (sel) {
+        let found = false;
+        for (let i = 0; i < sel.options.length; i++) {
+          if (sel.options[i].value === comboId) {
+            sel.selectedIndex = i;
+            found = true;
+            break;
+          }
+        }
+        if (!found) {
+          const opt = document.createElement('option');
+          opt.value = comboId;
+          opt.textContent = comboId + ' (Custom Combo)';
+          sel.appendChild(opt);
+          sel.value = comboId;
+        }
+      }
     }
 
     // Initialize on load

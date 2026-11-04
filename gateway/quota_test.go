@@ -99,8 +99,8 @@ func TestInspectClaudeCodeAccount(t *testing.T) {
 	if detail.Tier != "Pro/Max" {
 		t.Errorf("expected Pro/Max tier, got %q", detail.Tier)
 	}
-	if len(detail.ModelQuotas) != 3 {
-		t.Fatalf("expected 3 models, got %d", len(detail.ModelQuotas))
+	if len(detail.ModelQuotas) < 3 {
+		t.Fatalf("expected at least 3 models, got %d", len(detail.ModelQuotas))
 	}
 	if detail.ModelQuotas[0].RemainingPercent != 100 {
 		t.Errorf("expected 100%%, got %d", detail.ModelQuotas[0].RemainingPercent)

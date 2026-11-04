@@ -534,13 +534,13 @@ func TestListCombos(t *testing.T) {
 	r := NewResolver()
 
 	defaultCombos := DefaultCombos()
-	if len(defaultCombos) != 3 {
-		t.Fatalf("DefaultCombos() length = %d, want 3", len(defaultCombos))
+	if len(defaultCombos) < 6 {
+		t.Fatalf("DefaultCombos() length = %d, want at least 6", len(defaultCombos))
 	}
 
 	resolverCombos := r.ListCombos()
-	if len(resolverCombos) < 3 {
-		t.Fatalf("ListCombos() returned %d combos, want at least 3", len(resolverCombos))
+	if len(resolverCombos) < 6 {
+		t.Fatalf("ListCombos() returned %d combos, want at least 6", len(resolverCombos))
 	}
 
 	comboMap := make(map[string]ComboModel)
@@ -562,6 +562,9 @@ func TestListCombos(t *testing.T) {
 
 	requiredCombos := []string{
 		"auto/best-coding",
+		"auto/team-coding",
+		"auto/council-pro",
+		"auto/night-coding",
 		"auto/fast",
 		"auto/reasoning",
 	}

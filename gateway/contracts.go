@@ -37,12 +37,26 @@ const (
 	ThinkingLevelHigh   ThinkingLevel = "HIGH"
 )
 
-// ComboModel defines an OmniRoute multi-provider fallback chain (e.g. "auto/best-coding").
+// ComboMode defines how multiple models inside a ComboModel work together.
+type ComboMode string
+
+const (
+	ComboModeFailover   ComboMode = "failover"    // Try Model 1 -> if fails -> Model 2 -> Model 3
+	ComboModePipeline   ComboMode = "pipeline"    // Step 1 (Architect/Planner) -> Step 2 (Coder/Synthesizer)
+	ComboModeConsensus  ComboMode = "consensus"   // Run models in parallel (Mixture-of-Agents) -> Synthesizer merges best answer
+	ComboModeNightSaver ComboMode = "night-saver" // Prioritize Night-Discount models (40-50% Off Nights) + multi-provider fallback
+)
+
+// ComboModel defines an OmniRoute multi-provider fallback chain or collaborative multi-model pipeline (e.g. "auto/team-coding").
 type ComboModel struct {
-	ID          string   `json:"id"`          // e.g. "auto/best-coding"
-	Name        string   `json:"name"`        // e.g. "Best Coding (Argon 4 -> Claude Code -> Qwen3 Coder)"
-	Description string   `json:"description"` // Human-readable summary
-	Models      []string `json:"models"`      // Ordered list of provider/model targets
+	ID            string    `json:"id"`                       // e.g. "auto/best-coding", "auto/team-coding"
+	Name          string    `json:"name"`                     // e.g. "Best Coding (Argon 4 -> Claude Opus 5.5 -> Qwen 3.8 Max)"
+	Mode          ComboMode `json:"mode,omitempty"`           // "failover", "pipeline", "consensus", "night-saver"
+	Description   string    `json:"description"`              // Human-readable summary
+	Models        []string  `json:"models"`                   // Ordered list of provider/model targets
+	Roles         []string  `json:"roles,omitempty"`          // Optional role label per model step
+	HandoffPrompt string    `json:"handoff_prompt,omitempty"` // Optional instructions passed between steps
+	BuiltIn       bool      `json:"built_in,omitempty"`       // True if built-in preset
 }
 
 // ResolvedModel holds the canonical translation of an incoming model ID.
@@ -60,6 +74,8 @@ type ResolvedModel struct {
 	FallbackChain   []string      `json:"fallback_chain"`    // Ordered fallback models across the 3 providers
 	IsArgonFamily   bool          `json:"is_argon_family"`
 	IsCombo         bool          `json:"is_combo"`
+	ComboMode       ComboMode     `json:"combo_mode,omitempty"`
+	ComboHandoff    string        `json:"combo_handoff,omitempty"`
 }
 
 // OpenAIChatRequest represents an OpenAI-compatible /v1/chat/completions request.

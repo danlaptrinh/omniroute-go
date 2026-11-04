@@ -15,40 +15,126 @@ var defaultFallbackModels = []string{
 	"alibaba/qwen3.8-flash",
 }
 
-// DefaultCombos returns the built-in OmniRoute-Go multi-provider combo stacks.
+// DefaultCombos returns the built-in OmniRoute-Go multi-provider combo stacks and collaborative multi-model pipelines.
 func DefaultCombos() []ComboModel {
 	return []ComboModel{
 		{
 			ID:          "auto/best-coding",
-			Name:        "Best Coding (Gemini 4 Argon -> Claude Code Opus 4.6 -> Alibaba Qwen3 Coder)",
-			Description: "Ưu tiên Gemini 4 Argon High trên Antigravity, tự động failover sang Claude Code Opus 4.6 và Alibaba Token Plan Qwen3 Coder Plus",
+			Name:        "Best Coding Failover (Gemini 4 Argon ➔ Claude Opus ➔ Qwen3 Coder)",
+			Mode:        ComboModeFailover,
+			Description: "Ưu tiên Gemini 4 Argon High trên Antigravity, tự động failover sang Claude Code Opus và Alibaba Token Plan Qwen3 Coder Plus",
 			Models: []string{
 				"antigravity/gemini-4-argon-high",
 				"claude-code/claude-opus-4-6-thinking",
 				"alibaba/qwen3-coder-plus",
+				"claude-code/claude-opus-5-5",
+				"alibaba/qwen3.8-max",
 				"antigravity/claude-opus-4-6-thinking",
 			},
+			Roles:   []string{"Primary Coder", "Fallback 1 (Claude Code)", "Fallback 2 (Alibaba)", "Fallback 3 (Opus 5.5)", "Fallback 4 (Qwen 3.8 Max)", "Fallback 5 (Antigravity Claude)"},
+			BuiltIn: true,
+		},
+		{
+			ID:          "auto/team-coding",
+			Name:        "Team Coding Pipeline: Kiến Trúc Sư ➔ Lập Trình Viên (Opus 5.5 ➔ Argon 4 ➔ Qwen 3.8 Max)",
+			Mode:        ComboModePipeline,
+			Description: "Kết nối nhiều model cùng làm việc nối tiếp: Model 1 (Claude Opus 5.5 / DeepSeek V4 Pro) lập kiến trúc & phân tích thuật toán ➔ Model 2 (Gemini 4 Argon High / Qwen 3.8 Max) triển khai code hoàn chỉnh.",
+			Models: []string{
+				"claude-code/claude-opus-5-5",
+				"antigravity/gemini-4-argon-high",
+				"alibaba/qwen3.8-max",
+				"alibaba/deepseek-v4-pro-0813",
+			},
+			Roles: []string{
+				"Bước 1: Kiến trúc sư & Phân tích (Architect)",
+				"Bước 2: Lập trình viên triển khai (Executor)",
+				"Bước 3: Chuyên gia tối ưu & Dự phòng (Synthesizer)",
+				"Bước 4: Suy luận dự phòng (DeepSeek V4 Pro)",
+			},
+			HandoffPrompt: "Dựa trên bản thiết kế kiến trúc và phân tích kỹ thuật từ Model Bước 1 ở trên, hãy viết mã nguồn hoàn chỉnh, sạch, tối ưu hiệu năng và trả lời đầy đủ yêu cầu của người dùng.",
+			BuiltIn:       true,
+		},
+		{
+			ID:          "auto/council-pro",
+			Name:        "Hội Đồng Đa Mô Hình Song Song (Mixture of Agents: Argon 4 + Opus 5.5 + Qwen 3.8 Max)",
+			Mode:        ComboModeConsensus,
+			Description: "Chạy song song 100% bằng Goroutines qua cả 3 nhà cung cấp (Antigravity Argon 4 + Claude Opus 5.5 + Alibaba Qwen 3.8 Max), sau đó tổng hợp câu trả lời thông minh và chính xác nhất.",
+			Models: []string{
+				"antigravity/gemini-4-argon-high",
+				"claude-code/claude-opus-5-5",
+				"alibaba/qwen3.8-max",
+				"alibaba/deepseek-v4-pro-0813",
+			},
+			Roles: []string{
+				"Chuyên gia 1 & Tổng hợp (Antigravity Argon 4)",
+				"Chuyên gia 2 (Claude Opus 5.5)",
+				"Chuyên gia 3 (Alibaba Qwen 3.8 Max)",
+				"Chuyên gia 4 (DeepSeek V4 Pro)",
+			},
+			HandoffPrompt: "Bạn là Chủ tịch Hội đồng AI (Synthesizer). Hãy tổng hợp các góc nhìn và lời giải từ các mô hình chuyên gia ở trên để đưa ra câu trả lời cuối cùng chính xác, toàn diện và tối ưu nhất.",
+			BuiltIn:       true,
+		},
+		{
+			ID:          "auto/night-coding",
+			Name:        "Combo Tối Ưu Giảm Giá Ban Đêm (⚡ 40%-50% Off Nights: Qwen 3.8 Max ➔ DeepSeek V4.1 ➔ Argon 4)",
+			Mode:        ComboModeNightSaver,
+			Description: "Ưu tiên các model giảm 40%-50% token ban đêm của Alibaba Cloud (Qwen 3.8 Max, DeepSeek V4.1 Flash 1017, DeepSeek V4 Pro 0813) kết hợp dự phòng sang Gemini 4 Argon High và Claude Opus 5.5.",
+			Models: []string{
+				"alibaba/qwen3.8-max",
+				"alibaba/deepseek-v4-pro-0813",
+				"alibaba/deepseek-v4.1-flash-1017",
+				"alibaba/qwen3.8-flash",
+				"antigravity/gemini-4-argon-high",
+				"claude-code/claude-opus-5-5",
+			},
+			Roles: []string{
+				"Ưu tiên 1 (⚡ 40% Off Nights)",
+				"Ưu tiên 2 (⚡ Night 50% Off)",
+				"Ưu tiên 3 (⚡ 50% Off Nights)",
+				"Ưu tiên 4 (⚡ 40% Off Nights)",
+				"Dự phòng 5 (Antigravity Argon 4)",
+				"Dự phòng 6 (Claude Opus 5.5)",
+			},
+			BuiltIn: true,
 		},
 		{
 			ID:          "auto/fast",
-			Name:        "Fast Coding (Gemini 3.8 Flash -> Qwen3 Coder -> Claude Haiku 4.5)",
-			Description: "Tốc độ phản hồi cực nhanh qua Gemini 3.8 Flash, Qwen3 Coder Plus và Claude Haiku 4.5",
+			Name:        "Fast Coding (Gemini 3.8 Flash ➔ Qwen3 Coder / 3.8 Flash ➔ Claude Haiku 5.5/4.5)",
+			Mode:        ComboModeFailover,
+			Description: "Tốc độ phản hồi cực nhanh qua Gemini 3.8 Flash, Qwen 3.8 Flash / Coder Plus và Claude Haiku",
 			Models: []string{
 				"antigravity/gemini-3.8-flash-high",
 				"alibaba/qwen3-coder-plus",
 				"claude-code/claude-haiku-4-5",
+				"alibaba/qwen3.8-flash",
+				"claude-code/claude-haiku-5-5",
 			},
+			Roles:   []string{"Tốc độ cao 1", "Tốc độ cao 2", "Tốc độ cao 3", "Night 40% Off", "Haiku 5.5"},
+			BuiltIn: true,
 		},
 		{
 			ID:          "auto/reasoning",
-			Name:        "Deep Reasoning (Gemini 4 Argon High -> Claude Opus -> Alibaba QwQ/DeepSeek-R1)",
-			Description: "Chuyên suy luận sâu đa tầng qua 3 nhà cung cấp",
+			Name:        "Deep Reasoning Pipeline (Argon 4 High ➔ Claude Opus Thinking ➔ DeepSeek V4 Pro / R1)",
+			Mode:        ComboModePipeline,
+			Description: "Chuyên suy luận sâu đa tầng nối tiếp qua 3 nhà cung cấp",
 			Models: []string{
 				"antigravity/gemini-4-argon-high",
 				"claude-code/claude-opus-4-6-thinking",
 				"alibaba/qwq-plus",
 				"alibaba/deepseek-r1",
+				"alibaba/deepseek-v4-pro-0813",
+				"claude-code/claude-opus-5-5-thinking",
 			},
+			Roles: []string{
+				"Bước 1: Suy luận Toán & Logic (Argon 4)",
+				"Bước 2: Phản biện & Tổng hợp (Claude Opus Thinking)",
+				"Bước 3: Kiểm chứng (Alibaba QwQ)",
+				"Bước 4: DeepSeek R1",
+				"Bước 5: DeepSeek V4 Pro (0813)",
+				"Bước 6: Claude Opus 5.5 Thinking",
+			},
+			HandoffPrompt: "Hãy kiểm chứng, bổ sung lập luận chặt chẽ và hoàn thiện câu trả lời dựa trên phân tích suy luận của Model Bước 1.",
+			BuiltIn:       true,
 		},
 	}
 }
@@ -140,28 +226,36 @@ func (r *DefaultResolver) Resolve(modelID string, defaultFallbacks []string) Res
 		Provider:    provHint,
 	}
 
-	// 1. Check Combos first
-	if provHint == ProviderAutoCombo || norm == "auto/best-coding" || norm == "best-coding" || norm == "auto/fast" || norm == "auto/reasoning" {
-		for _, combo := range r.ListCombos() {
-			if strings.EqualFold(combo.ID, norm) || strings.EqualFold(strings.TrimPrefix(combo.ID, "auto/"), norm) {
-				res.Provider = ProviderAutoCombo
-				res.IsCombo = true
-				res.CanonicalID = combo.ID
-				res.UpstreamModelID = "gemini-4-argon"
-				res.CCPAModelID = "gemini-4-argon"
-				res.OmniBaseModelID = combo.Models[0]
-				if norm == "auto/fast" || norm == "fast" {
-					res.ThinkingLevel = ""
-					res.ReasoningEffort = ""
-					res.IncludeThoughts = false
-				} else {
-					res.ThinkingLevel = ThinkingLevelHigh
-					res.ReasoningEffort = "high"
-					res.IncludeThoughts = true
-				}
-				res.FallbackChain = buildFallbackChain(combo.Models, defaultFallbacks)
-				return res
+	// 1. Check Combos first (both built-in and custom user-created combos)
+	for _, combo := range r.ListCombos() {
+		if strings.EqualFold(combo.ID, norm) ||
+			strings.EqualFold(combo.ID, aliased) ||
+			strings.EqualFold(strings.TrimPrefix(combo.ID, "auto/"), norm) {
+			res.Provider = ProviderAutoCombo
+			res.IsCombo = true
+			res.CanonicalID = combo.ID
+			mode := combo.Mode
+			if mode == "" {
+				mode = ComboModeFailover
 			}
+			res.ComboMode = mode
+			res.ComboHandoff = combo.HandoffPrompt
+			res.UpstreamModelID = "gemini-4-argon"
+			res.CCPAModelID = "gemini-4-argon"
+			if len(combo.Models) > 0 {
+				res.OmniBaseModelID = combo.Models[0]
+			}
+			if norm == "auto/fast" || norm == "fast" {
+				res.ThinkingLevel = ""
+				res.ReasoningEffort = ""
+				res.IncludeThoughts = false
+			} else {
+				res.ThinkingLevel = ThinkingLevelHigh
+				res.ReasoningEffort = "high"
+				res.IncludeThoughts = true
+			}
+			res.FallbackChain = buildFallbackChain(combo.Models, defaultFallbacks)
+			return res
 		}
 	}
 
@@ -629,20 +723,51 @@ func (r *DefaultResolver) Resolve(modelID string, defaultFallbacks []string) Res
 	return res
 }
 
-// ListCombos returns all configured OmniRoute-Go combo models.
+// ListCombos returns all configured OmniRoute-Go combo models (built-in presets merged with user custom combos).
 func (r *DefaultResolver) ListCombos() []ComboModel {
+	defaults := DefaultCombos()
 	saved := LoadSavedAuthConfig()
-	if len(saved.CustomCombos) > 0 {
-		return saved.CustomCombos
+	if len(saved.CustomCombos) == 0 {
+		return defaults
 	}
-	return DefaultCombos()
+
+	customMap := make(map[string]ComboModel, len(saved.CustomCombos))
+	for _, c := range saved.CustomCombos {
+		customMap[strings.ToLower(strings.TrimSpace(c.ID))] = c
+	}
+
+	out := make([]ComboModel, 0, len(defaults)+len(saved.CustomCombos))
+	seen := make(map[string]bool)
+	for _, d := range defaults {
+		key := strings.ToLower(strings.TrimSpace(d.ID))
+		if override, ok := customMap[key]; ok {
+			if override.Mode == "" {
+				override.Mode = d.Mode
+			}
+			out = append(out, override)
+		} else {
+			out = append(out, d)
+		}
+		seen[key] = true
+	}
+	for _, c := range saved.CustomCombos {
+		key := strings.ToLower(strings.TrimSpace(c.ID))
+		if !seen[key] {
+			if c.Mode == "" {
+				c.Mode = ComboModeFailover
+			}
+			out = append(out, c)
+			seen[key] = true
+		}
+	}
+	return out
 }
 
 // ListModels returns OpenAI-compatible model cards strictly for the 3 providers:
 //  1. antigravity (Gemini 4 Argon, Gemini 3 Series, Antigravity Claude — NO legacy 1.5/2.0/2.5)
 //  2. claude-code (Anthropic Claude Code Pro/Max & API)
 //  3. alibaba (Alibaba Token Plan / Bailian Coding Plan)
-//     + Combos (auto/best-coding, auto/fast, auto/reasoning)
+//     + Combos (auto/best-coding, auto/team-coding, auto/council-pro, auto/night-coding, auto/fast, auto/reasoning)
 func (r *DefaultResolver) ListModels() []OpenAIModelCard {
 	const createdTimestamp int64 = 1740000000
 
@@ -654,6 +779,9 @@ func (r *DefaultResolver) ListModels() []OpenAIModelCard {
 	}{
 		// --- Combos ---
 		{"auto/best-coding", "omniroute-go", "auto", "combo"},
+		{"auto/team-coding", "omniroute-go", "auto", "combo"},
+		{"auto/council-pro", "omniroute-go", "auto", "combo"},
+		{"auto/night-coding", "omniroute-go", "auto", "combo"},
 		{"auto/fast", "omniroute-go", "auto", "combo"},
 		{"auto/reasoning", "omniroute-go", "auto", "combo"},
 

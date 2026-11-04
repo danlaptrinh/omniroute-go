@@ -97,8 +97,8 @@ func (u *GatewayUpstream) HandleChatCompletion(
 	req = compressedReq
 
 	// Build ordered list of ResolvedModel targets to try (primary + cross-provider combo fallbacks)
-	targets := []ResolvedModel{resolved}
-	if resolved.IsCombo || len(resolved.FallbackChain) > 0 {
+	var targets []ResolvedModel
+	if resolved.IsCombo && len(resolved.FallbackChain) > 0 {
 		resolver := NewResolver()
 		for _, fbModelID := range resolved.FallbackChain {
 			if strings.EqualFold(fbModelID, resolved.RequestedID) || strings.EqualFold(fbModelID, resolved.CanonicalID) {
@@ -107,6 +107,36 @@ func (u *GatewayUpstream) HandleChatCompletion(
 			fbResolved := resolver.Resolve(fbModelID, nil)
 			fbResolved.RequestedID = resolved.RequestedID
 			targets = append(targets, fbResolved)
+		}
+	}
+	if len(targets) == 0 {
+		targets = append(targets, resolved)
+		if len(resolved.FallbackChain) > 0 {
+			resolver := NewResolver()
+			for _, fbModelID := range resolved.FallbackChain {
+				if strings.EqualFold(fbModelID, resolved.RequestedID) || strings.EqualFold(fbModelID, resolved.CanonicalID) {
+					continue
+				}
+				fbResolved := resolver.Resolve(fbModelID, nil)
+				fbResolved.RequestedID = resolved.RequestedID
+				targets = append(targets, fbResolved)
+			}
+		}
+	}
+
+	// Execute Multi-Model Collaborative Pipeline or Mixture-of-Agents Consensus if configured on Combo
+	if resolved.IsCombo {
+		switch resolved.ComboMode {
+		case ComboModePipeline:
+			if err := u.executeComboPipeline(ctx, w, req, resolved, targets, cleanAuth); err == nil {
+				return nil
+			}
+		case ComboModeConsensus:
+			if err := u.executeComboConsensus(ctx, w, req, resolved, targets, cleanAuth); err == nil {
+				return nil
+			}
+		case ComboModeNightSaver:
+			w.Header().Set("X-Omni-Gateway-Combo-Mode", string(ComboModeNightSaver))
 		}
 	}
 
