@@ -824,13 +824,35 @@ const gatewayUIHTML = `<!DOCTYPE html>
               <option value="auto/fast">auto/fast (Gemini 3.8 Flash ➔ Haiku 4.5)</option>
               <option value="auto/reasoning">auto/reasoning (Argon High ➔ Claude Opus Thinking ➔ DeepSeek R1)</option>
             </optgroup>
-            <optgroup label="Claude Code (Anthropic)">
-              <option value="claude-code/claude-opus-4-6-thinking">claude-code/claude-opus-4-6-thinking</option>
-              <option value="claude-code/claude-sonnet-4-6">claude-code/claude-sonnet-4-6</option>
+            <optgroup label="Claude Code (Anthropic CLI &amp; Pro/Max)">
+              <option value="claude-code/claude-opus-5-5">claude-code/claude-opus-5-5 (Opus 5.5 Default)</option>
+              <option value="claude-code/claude-fable-5-1">claude-code/claude-fable-5-1 (Fable 5.1)</option>
+              <option value="claude-code/claude-sonnet-5-5">claude-code/claude-sonnet-5-5 (Sonnet 5.5)</option>
+              <option value="claude-code/claude-haiku-5-5">claude-code/claude-haiku-5-5 (Haiku 5.5)</option>
+              <option value="claude-code/claude-sonnet-5">claude-code/claude-sonnet-5 (Sonnet 5)</option>
+              <option value="claude-code/claude-opus-5">claude-code/claude-opus-5 (Opus 5)</option>
+              <option value="claude-code/claude-fable-5">claude-code/claude-fable-5 (Fable 5)</option>
+              <option value="claude-code/claude-opus-4-8">claude-code/claude-opus-4-8 (Opus 4.8)</option>
+              <option value="claude-code/claude-opus-4-7">claude-code/claude-opus-4-7 (Opus 4.7)</option>
+              <option value="claude-code/claude-opus-4-6-thinking">claude-code/claude-opus-4-6-thinking (Opus 4.6 Thinking)</option>
+              <option value="claude-code/claude-sonnet-4-6">claude-code/claude-sonnet-4-6 (Sonnet 4.6)</option>
+              <option value="claude-code/claude-haiku-4-5">claude-code/claude-haiku-4-5 (Haiku 4.5)</option>
             </optgroup>
-            <optgroup label="Alibaba Token Plan">
+            <optgroup label="Alibaba Cloud Token Plan (⚡ Night Discount)">
+              <option value="alibaba/auto">alibaba/auto (Qwen Auto Reasoning)</option>
+              <option value="alibaba/qwen3.8-max">alibaba/qwen3.8-max (⚡ 40% Off Nights)</option>
+              <option value="alibaba/qwen3.8-flash">alibaba/qwen3.8-flash (⚡ 40% Off Nights)</option>
+              <option value="alibaba/qwen3.7-plus">alibaba/qwen3.7-plus</option>
+              <option value="alibaba/qwen3.7-max">alibaba/qwen3.7-max</option>
+              <option value="alibaba/qwen3.6-flash">alibaba/qwen3.6-flash</option>
+              <option value="alibaba/deepseek-v4.1-flash-1017">alibaba/deepseek-v4.1-flash-1017 (⚡ 50% Off Nights)</option>
+              <option value="alibaba/deepseek-v4.1-flash">alibaba/deepseek-v4.1-flash (⚡ 50% Off Nights)</option>
+              <option value="alibaba/deepseek-v4-pro-0813">alibaba/deepseek-v4-pro-0813 (⚡ Night 50% Off)</option>
+              <option value="alibaba/deepseek-v4-pro">alibaba/deepseek-v4-pro</option>
+              <option value="alibaba/deepseek-v4-flash-0731">alibaba/deepseek-v4-flash-0731 (⚡ Night 50% Off)</option>
+              <option value="alibaba/glm-5.3">alibaba/glm-5.3</option>
+              <option value="alibaba/glm-5.2">alibaba/glm-5.2</option>
               <option value="alibaba/qwen3-coder-plus">alibaba/qwen3-coder-plus</option>
-              <option value="alibaba/deepseek-r1">alibaba/deepseek-r1</option>
             </optgroup>
           </select>
         </div>
@@ -1928,7 +1950,7 @@ docker compose up -d --build</pre>
             '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">' +
               '<div style="display:flex;align-items:center;gap:6px;">' +
                 '<span style="font-size:16px;">' + (m.is_image_model ? '🎨' : '🤖') + '</span>' +
-                '<span class="badge" style="font-size:10.5px;background:rgba(255,255,255,0.06);color:#cbd5e1;">' + m.badge + '</span>' +
+                '<span class="badge" style="font-size:10.5px;' + ((m.badge && m.badge.includes('Off')) ? 'background:rgba(16,185,129,0.18);color:#34d399;border:1px solid rgba(16,185,129,0.35);' : 'background:rgba(255,255,255,0.06);color:#cbd5e1;') + '">' + m.badge + '</span>' +
               '</div>' +
               statusBadge +
             '</div>' +

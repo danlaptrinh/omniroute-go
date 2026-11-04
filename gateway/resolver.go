@@ -170,9 +170,16 @@ func (r *DefaultResolver) Resolve(modelID string, defaultFallbacks []string) Res
 		strings.HasPrefix(norm, "qwen") ||
 		strings.HasPrefix(norm, "qwq") ||
 		strings.HasPrefix(norm, "deepseek-") ||
-		strings.HasPrefix(norm, "glm-") {
+		strings.HasPrefix(norm, "glm-") ||
+		strings.HasPrefix(norm, "wan") ||
+		strings.HasPrefix(norm, "happyhorse-") {
 		res.Provider = ProviderAlibaba
 		switch norm {
+		case "auto":
+			res.CanonicalID = "alibaba/auto"
+			res.UpstreamModelID = "auto"
+			res.ThinkingLevel = ThinkingLevelHigh
+			res.ReasoningEffort = "high"
 		case "qwen3.8-max":
 			res.CanonicalID = "alibaba/qwen3.8-max"
 			res.UpstreamModelID = "qwen3.8-max"
@@ -181,18 +188,44 @@ func (r *DefaultResolver) Resolve(modelID string, defaultFallbacks []string) Res
 		case "qwen3.8-flash":
 			res.CanonicalID = "alibaba/qwen3.8-flash"
 			res.UpstreamModelID = "qwen3.8-flash"
+		case "qwen3.7-plus":
+			res.CanonicalID = "alibaba/qwen3.7-plus"
+			res.UpstreamModelID = "qwen3.7-plus"
+		case "qwen3.7-max":
+			res.CanonicalID = "alibaba/qwen3.7-max"
+			res.UpstreamModelID = "qwen3.7-max"
+			res.ThinkingLevel = ThinkingLevelHigh
+			res.ReasoningEffort = "high"
+		case "qwen3.6-flash":
+			res.CanonicalID = "alibaba/qwen3.6-flash"
+			res.UpstreamModelID = "qwen3.6-flash"
+		case "deepseek-v4.1-flash-1017":
+			res.CanonicalID = "alibaba/deepseek-v4.1-flash-1017"
+			res.UpstreamModelID = "deepseek-v4.1-flash-1017"
+		case "deepseek-v4.1-flash":
+			res.CanonicalID = "alibaba/deepseek-v4.1-flash"
+			res.UpstreamModelID = "deepseek-v4.1-flash"
+		case "deepseek-v4-pro-0813":
+			res.CanonicalID = "alibaba/deepseek-v4-pro-0813"
+			res.UpstreamModelID = "deepseek-v4-pro-0813"
+			res.ThinkingLevel = ThinkingLevelHigh
+			res.ReasoningEffort = "high"
+			res.IncludeThoughts = true
 		case "deepseek-v4-pro":
 			res.CanonicalID = "alibaba/deepseek-v4-pro"
 			res.UpstreamModelID = "deepseek-v4-pro"
 			res.ThinkingLevel = ThinkingLevelHigh
 			res.ReasoningEffort = "high"
 			res.IncludeThoughts = true
-		case "deepseek-v4.1-flash":
-			res.CanonicalID = "alibaba/deepseek-v4.1-flash"
-			res.UpstreamModelID = "deepseek-v4.1-flash"
+		case "deepseek-v4-flash-0731":
+			res.CanonicalID = "alibaba/deepseek-v4-flash-0731"
+			res.UpstreamModelID = "deepseek-v4-flash-0731"
 		case "glm-5.3":
 			res.CanonicalID = "alibaba/glm-5.3"
 			res.UpstreamModelID = "glm-5.3"
+		case "glm-5.2":
+			res.CanonicalID = "alibaba/glm-5.2"
+			res.UpstreamModelID = "glm-5.2"
 		case "qwen3-coder-plus", "qwen3-coder", "qwen-coder-plus":
 			res.CanonicalID = "alibaba/qwen3-coder-plus"
 			res.UpstreamModelID = "qwen3-coder-plus"
@@ -244,13 +277,79 @@ func (r *DefaultResolver) Resolve(modelID string, defaultFallbacks []string) Res
 		return res
 	}
 
-	// 3. Provider: Claude Code (when explicitly prefixed with claude-code/, cc/, anthropic/, or bare claude-haiku-4-5 / claude-opus-4-6)
+	// 3. Provider: Claude Code (when explicitly prefixed with claude-code/, cc/, anthropic/, or bare claude-code models)
 	if provHint == ProviderClaudeCode ||
 		norm == "claude-haiku-4-5" ||
+		norm == "claude-haiku-5-5" ||
 		norm == "claude-opus-4-6" ||
+		norm == "claude-opus-4-7" ||
+		norm == "claude-opus-4-8" ||
+		norm == "claude-opus-5" ||
+		norm == "claude-opus-5-5" ||
+		norm == "claude-sonnet-5" ||
+		norm == "claude-sonnet-5-5" ||
+		strings.HasPrefix(norm, "claude-fable-") ||
+		strings.HasPrefix(norm, "fable-") ||
 		norm == "claude-sonnet-4-6-thinking" {
 		res.Provider = ProviderClaudeCode
 		switch norm {
+		case "claude-opus-5-5", "claude-opus-5.5", "opus-5.5":
+			res.CanonicalID = "claude-code/claude-opus-5-5"
+			res.UpstreamModelID = "claude-opus-5-5"
+			res.ThinkingLevel = ThinkingLevelHigh
+			res.ReasoningEffort = "high"
+			res.IncludeThoughts = true
+		case "claude-opus-5-5-thinking":
+			res.CanonicalID = "claude-code/claude-opus-5-5-thinking"
+			res.UpstreamModelID = "claude-opus-5-5"
+			res.ThinkingLevel = ThinkingLevelHigh
+			res.ReasoningEffort = "high"
+			res.IncludeThoughts = true
+		case "claude-fable-5-1", "claude-fable-5.1", "fable-5.1", "fable-5-1":
+			res.CanonicalID = "claude-code/claude-fable-5-1"
+			res.UpstreamModelID = "claude-fable-5-1"
+			res.ThinkingLevel = ThinkingLevelHigh
+			res.ReasoningEffort = "high"
+			res.IncludeThoughts = true
+		case "claude-sonnet-5-5", "claude-sonnet-5.5", "sonnet-5.5":
+			res.CanonicalID = "claude-code/claude-sonnet-5-5"
+			res.UpstreamModelID = "claude-sonnet-5-5"
+		case "claude-sonnet-5-5-thinking":
+			res.CanonicalID = "claude-code/claude-sonnet-5-5-thinking"
+			res.UpstreamModelID = "claude-sonnet-5-5"
+			res.ThinkingLevel = ThinkingLevelHigh
+			res.ReasoningEffort = "high"
+			res.IncludeThoughts = true
+		case "claude-haiku-5-5", "claude-haiku-5.5", "haiku-5.5":
+			res.CanonicalID = "claude-code/claude-haiku-5-5"
+			res.UpstreamModelID = "claude-haiku-5-5"
+		case "claude-sonnet-5", "sonnet-5":
+			res.CanonicalID = "claude-code/claude-sonnet-5"
+			res.UpstreamModelID = "claude-sonnet-5"
+		case "claude-opus-5", "opus-5":
+			res.CanonicalID = "claude-code/claude-opus-5"
+			res.UpstreamModelID = "claude-opus-5"
+			res.ThinkingLevel = ThinkingLevelHigh
+			res.ReasoningEffort = "high"
+			res.IncludeThoughts = true
+		case "claude-fable-5", "fable-5":
+			res.CanonicalID = "claude-code/claude-fable-5"
+			res.UpstreamModelID = "claude-fable-5"
+			res.ThinkingLevel = ThinkingLevelHigh
+			res.ReasoningEffort = "high"
+			res.IncludeThoughts = true
+		case "claude-opus-4-8", "claude-opus-4.8", "opus-4.8":
+			res.CanonicalID = "claude-code/claude-opus-4-8"
+			res.UpstreamModelID = "claude-opus-4-8"
+			res.ThinkingLevel = ThinkingLevelHigh
+			res.ReasoningEffort = "high"
+			res.IncludeThoughts = true
+		case "claude-opus-4-7", "claude-opus-4.7", "opus-4.7":
+			res.CanonicalID = "claude-code/claude-opus-4-7"
+			res.UpstreamModelID = "claude-opus-4-7"
+			res.ThinkingLevel = ThinkingLevelHigh
+			res.ReasoningEffort = "high"
+			res.IncludeThoughts = true
 		case "claude-opus-4-6-thinking", "claude-opus-4-6-high":
 			res.CanonicalID = "claude-code/claude-opus-4-6-thinking"
 			res.UpstreamModelID = "claude-opus-4-6"
@@ -269,18 +368,6 @@ func (r *DefaultResolver) Resolve(modelID string, defaultFallbacks []string) Res
 		case "claude-sonnet-4-6":
 			res.CanonicalID = "claude-code/claude-sonnet-4-6"
 			res.UpstreamModelID = "claude-sonnet-4-6"
-		case "claude-opus-5-5-thinking", "claude-opus-5-5", "claude-opus-5.5":
-			res.CanonicalID = "claude-code/claude-opus-5-5-thinking"
-			res.UpstreamModelID = "claude-opus-5-5-20261001"
-			res.ThinkingLevel = ThinkingLevelHigh
-			res.ReasoningEffort = "high"
-			res.IncludeThoughts = true
-		case "claude-sonnet-5-5-thinking", "claude-sonnet-5-5", "claude-sonnet-5.5":
-			res.CanonicalID = "claude-code/claude-sonnet-5-5-thinking"
-			res.UpstreamModelID = "claude-sonnet-5-5-20261001"
-			res.ThinkingLevel = ThinkingLevelHigh
-			res.ReasoningEffort = "high"
-			res.IncludeThoughts = true
 		case "claude-haiku-4-5", "claude-haiku-4-5-20251001":
 			res.CanonicalID = "claude-code/claude-haiku-4-5"
 			res.UpstreamModelID = "claude-haiku-4-5-20251001"
@@ -607,20 +694,47 @@ func (r *DefaultResolver) ListModels() []OpenAIModelCard {
 		{"antigravity/imagen-3", "antigravity", "antigravity", "image-generation"},
 
 		// --- Provider 2: Claude Code (Anthropic Pro/Max OAuth & API) ---
+		{"claude-code/claude-opus-5-5", "claude-code", "claude-code", "claude-code"},
+		{"claude-code/claude-opus-5-5-thinking", "claude-code", "claude-code", "claude-code"},
+		{"claude-code/claude-fable-5-1", "claude-code", "claude-code", "claude-code"},
+		{"claude-code/claude-sonnet-5-5", "claude-code", "claude-code", "claude-code"},
+		{"claude-code/claude-sonnet-5-5-thinking", "claude-code", "claude-code", "claude-code"},
+		{"claude-code/claude-haiku-5-5", "claude-code", "claude-code", "claude-code"},
+		{"claude-code/claude-sonnet-5", "claude-code", "claude-code", "claude-code"},
+		{"claude-code/claude-opus-5", "claude-code", "claude-code", "claude-code"},
+		{"claude-code/claude-fable-5", "claude-code", "claude-code", "claude-code"},
+		{"claude-code/claude-opus-4-8", "claude-code", "claude-code", "claude-code"},
+		{"claude-code/claude-opus-4-7", "claude-code", "claude-code", "claude-code"},
 		{"claude-code/claude-opus-4-6-thinking", "claude-code", "claude-code", "claude-code"},
 		{"claude-code/claude-opus-4-6", "claude-code", "claude-code", "claude-code"},
 		{"claude-code/claude-sonnet-4-6-thinking", "claude-code", "claude-code", "claude-code"},
 		{"claude-code/claude-sonnet-4-6", "claude-code", "claude-code", "claude-code"},
-		{"claude-code/claude-opus-5-5-thinking", "claude-code", "claude-code", "claude-code"},
-		{"claude-code/claude-sonnet-5-5-thinking", "claude-code", "claude-code", "claude-code"},
 		{"claude-code/claude-haiku-4-5", "claude-code", "claude-code", "claude-code"},
 
 		// --- Provider 3: Alibaba Token Plan (Bailian Coding Plan / DashScope) ---
+		{"alibaba/auto", "alibaba", "alibaba", "token-plan"},
 		{"alibaba/qwen3.8-max", "alibaba", "alibaba", "token-plan"},
 		{"alibaba/qwen3.8-flash", "alibaba", "alibaba", "token-plan"},
-		{"alibaba/deepseek-v4-pro", "alibaba", "alibaba", "token-plan"},
+		{"alibaba/qwen3.7-plus", "alibaba", "alibaba", "token-plan"},
+		{"alibaba/qwen3.7-max", "alibaba", "alibaba", "token-plan"},
+		{"alibaba/qwen3.6-flash", "alibaba", "alibaba", "token-plan"},
+		{"alibaba/deepseek-v4.1-flash-1017", "alibaba", "alibaba", "token-plan"},
 		{"alibaba/deepseek-v4.1-flash", "alibaba", "alibaba", "token-plan"},
+		{"alibaba/deepseek-v4-pro-0813", "alibaba", "alibaba", "token-plan"},
+		{"alibaba/deepseek-v4-pro", "alibaba", "alibaba", "token-plan"},
+		{"alibaba/deepseek-v4-flash-0731", "alibaba", "alibaba", "token-plan"},
 		{"alibaba/glm-5.3", "alibaba", "alibaba", "token-plan"},
+		{"alibaba/glm-5.2", "alibaba", "alibaba", "token-plan"},
+		{"alibaba/qwen-image-3.0-pro", "alibaba", "alibaba", "token-plan"},
+		{"alibaba/wan2.7-image", "alibaba", "alibaba", "token-plan"},
+		{"alibaba/wan2.7-image-pro", "alibaba", "alibaba", "token-plan"},
+		{"alibaba/wan3.0-video", "alibaba", "alibaba", "token-plan"},
+		{"alibaba/happyhorse-1.1-r2v", "alibaba", "alibaba", "token-plan"},
+		{"alibaba/happyhorse-1.1-t2v", "alibaba", "alibaba", "token-plan"},
+		{"alibaba/happyhorse-1.1-i2v", "alibaba", "alibaba", "token-plan"},
+		{"alibaba/qwen-audio-3.0-asr-flash", "alibaba", "alibaba", "token-plan"},
+		{"alibaba/qwen-audio-3.0-realtime-plus", "alibaba", "alibaba", "token-plan"},
+		{"alibaba/qwen-audio-3.0-tts-plus", "alibaba", "alibaba", "token-plan"},
 		{"alibaba/qwen3-coder-plus", "alibaba", "alibaba", "token-plan"},
 		{"alibaba/qwen3-coder-turbo", "alibaba", "alibaba", "token-plan"},
 		{"alibaba/qwen3-max", "alibaba", "alibaba", "token-plan"},

@@ -63,15 +63,45 @@ var curatedDashboardModels = []struct {
 	{"gemini-3-pro-image", ProviderAntigravity},
 
 	// --- Provider 2: Alibaba Token Plan (sk-sp-* MaaS & Coding Plan) ---
+	{"alibaba/auto", ProviderAlibaba},
 	{"alibaba/qwen3.8-max", ProviderAlibaba},
 	{"alibaba/qwen3.8-flash", ProviderAlibaba},
-	{"alibaba/deepseek-v4-pro", ProviderAlibaba},
+	{"alibaba/qwen3.7-plus", ProviderAlibaba},
+	{"alibaba/qwen3.7-max", ProviderAlibaba},
+	{"alibaba/qwen3.6-flash", ProviderAlibaba},
+	{"alibaba/deepseek-v4.1-flash-1017", ProviderAlibaba},
 	{"alibaba/deepseek-v4.1-flash", ProviderAlibaba},
+	{"alibaba/deepseek-v4-pro-0813", ProviderAlibaba},
+	{"alibaba/deepseek-v4-pro", ProviderAlibaba},
+	{"alibaba/deepseek-v4-flash-0731", ProviderAlibaba},
 	{"alibaba/glm-5.3", ProviderAlibaba},
+	{"alibaba/glm-5.2", ProviderAlibaba},
+	{"alibaba/qwen-image-3.0-pro", ProviderAlibaba},
+	{"alibaba/wan2.7-image", ProviderAlibaba},
+	{"alibaba/wan2.7-image-pro", ProviderAlibaba},
+	{"alibaba/wan3.0-video", ProviderAlibaba},
+	{"alibaba/happyhorse-1.1-r2v", ProviderAlibaba},
+	{"alibaba/happyhorse-1.1-t2v", ProviderAlibaba},
+	{"alibaba/happyhorse-1.1-i2v", ProviderAlibaba},
+	{"alibaba/qwen-audio-3.0-asr-flash", ProviderAlibaba},
+	{"alibaba/qwen-audio-3.0-realtime-plus", ProviderAlibaba},
+	{"alibaba/qwen-audio-3.0-tts-plus", ProviderAlibaba},
 	{"alibaba/qwen3-coder-plus", ProviderAlibaba},
 
 	// --- Provider 3: Anthropic Claude Code ---
+	{"claude-code/claude-opus-5-5", ProviderClaudeCode},
+	{"claude-code/claude-opus-5-5-thinking", ProviderClaudeCode},
+	{"claude-code/claude-fable-5-1", ProviderClaudeCode},
+	{"claude-code/claude-sonnet-5-5", ProviderClaudeCode},
+	{"claude-code/claude-sonnet-5-5-thinking", ProviderClaudeCode},
+	{"claude-code/claude-haiku-5-5", ProviderClaudeCode},
+	{"claude-code/claude-sonnet-5", ProviderClaudeCode},
+	{"claude-code/claude-opus-5", ProviderClaudeCode},
+	{"claude-code/claude-fable-5", ProviderClaudeCode},
+	{"claude-code/claude-opus-4-8", ProviderClaudeCode},
+	{"claude-code/claude-opus-4-7", ProviderClaudeCode},
 	{"claude-code/claude-opus-4-6-thinking", ProviderClaudeCode},
+	{"claude-code/claude-opus-4-6", ProviderClaudeCode},
 	{"claude-code/claude-sonnet-4-6", ProviderClaudeCode},
 	{"claude-code/claude-haiku-4-5", ProviderClaudeCode},
 }
@@ -133,6 +163,7 @@ func GetModelDiagnosticsList(ctx context.Context) []ModelDiagnosticCard {
 		} else {
 			card.SupportedAccounts = fallbackSupp
 		}
+		card.Badge = buildModelBadge(m.ID)
 		card.IsHidden = hiddenModels[m.ID]
 		result = append(result, *card)
 	}
@@ -145,6 +176,16 @@ func buildModelBadge(id string) string {
 	switch {
 	case strings.Contains(s, "gemini-4-argon"):
 		return "BUILT-IN Gemini 4 Argon"
+	case strings.Contains(s, "qwen-image"):
+		return "BUILT-IN Qwen Image 3.0 Pro"
+	case strings.Contains(s, "wan2.7-image"):
+		return "BUILT-IN Wan 2.7 Image"
+	case strings.Contains(s, "wan3.0-video"):
+		return "BUILT-IN Wan 3.0 Video (New)"
+	case strings.Contains(s, "happyhorse"):
+		return "BUILT-IN HappyHorse 1.1 Video"
+	case strings.Contains(s, "qwen-audio"):
+		return "BUILT-IN Qwen Audio 3.0"
 	case strings.Contains(s, "image") || strings.Contains(s, "imagen"):
 		return "BUILT-IN Gemini 3.1 Flash Image"
 	case strings.Contains(s, "gemini-3.8-flash"):
@@ -159,22 +200,56 @@ func buildModelBadge(id string) string {
 		return "BUILT-IN Gemini 3 Flash"
 	case strings.Contains(s, "gemini-3.1-pro"):
 		return "BUILT-IN Gemini 3.1 Pro"
+	case strings.Contains(s, "claude-opus-5-5"):
+		return "BUILT-IN Claude Opus 5.5 (Default)"
+	case strings.Contains(s, "claude-fable-5-1"):
+		return "BUILT-IN Claude Fable 5.1"
+	case strings.Contains(s, "claude-sonnet-5-5"):
+		return "BUILT-IN Claude Sonnet 5.5"
+	case strings.Contains(s, "claude-haiku-5-5"):
+		return "BUILT-IN Claude Haiku 5.5"
+	case strings.Contains(s, "claude-sonnet-5"):
+		return "BUILT-IN Claude Sonnet 5"
+	case strings.Contains(s, "claude-opus-5"):
+		return "BUILT-IN Claude Opus 5"
+	case strings.Contains(s, "claude-fable-5"):
+		return "BUILT-IN Claude Fable 5"
+	case strings.Contains(s, "claude-opus-4-8"):
+		return "BUILT-IN Claude Opus 4.8"
+	case strings.Contains(s, "claude-opus-4-7"):
+		return "BUILT-IN Claude Opus 4.7"
 	case strings.Contains(s, "claude-opus"):
 		return "BUILT-IN Claude Opus 4.6 (Thinking)"
 	case strings.Contains(s, "claude-sonnet"):
 		return "BUILT-IN Claude Sonnet 4.6"
 	case strings.Contains(s, "claude-haiku"):
 		return "BUILT-IN Claude Haiku 4.5"
+	case s == "alibaba/auto":
+		return "BUILT-IN Qwen Auto (New)"
 	case strings.Contains(s, "qwen3.8-max"):
-		return "BUILT-IN Qwen 3.8 Max (Token Plan)"
+		return "⚡ 40% Off Nights • Qwen 3.8 Max (New)"
 	case strings.Contains(s, "qwen3.8-flash"):
-		return "BUILT-IN Qwen 3.8 Flash (Token Plan)"
+		return "⚡ 40% Off Nights • Qwen 3.8 Flash"
+	case strings.Contains(s, "qwen3.7-plus"):
+		return "BUILT-IN Qwen 3.7 Plus (Token Plan)"
+	case strings.Contains(s, "qwen3.7-max"):
+		return "BUILT-IN Qwen 3.7 Max (Token Plan)"
+	case strings.Contains(s, "qwen3.6-flash"):
+		return "BUILT-IN Qwen 3.6 Flash (Token Plan)"
+	case strings.Contains(s, "deepseek-v4.1-flash-1017"):
+		return "⚡ 50% Off Nights • DeepSeek V4.1 Flash 1017 (New)"
+	case strings.Contains(s, "deepseek-v4.1-flash"):
+		return "⚡ 50% Off Nights • DeepSeek V4.1 Flash"
+	case strings.Contains(s, "deepseek-v4-pro-0813"):
+		return "⚡ Limited-time Night 50% Off • DeepSeek V4 Pro 0813"
+	case strings.Contains(s, "deepseek-v4-flash-0731"):
+		return "⚡ Limited-time Night 50% Off • DeepSeek V4 Flash 0731"
 	case strings.Contains(s, "deepseek-v4-pro"):
 		return "BUILT-IN DeepSeek V4 Pro (Token Plan)"
-	case strings.Contains(s, "deepseek-v4.1-flash"):
-		return "BUILT-IN DeepSeek V4.1 Flash (Token Plan)"
-	case strings.Contains(s, "glm-5"):
-		return "BUILT-IN GLM 5.3 (Token Plan)"
+	case strings.Contains(s, "glm-5.3"):
+		return "BUILT-IN Zhipu GLM 5.3 (Token Plan)"
+	case strings.Contains(s, "glm-5.2"):
+		return "BUILT-IN Zhipu GLM 5.2 (Token Plan)"
 	case strings.Contains(s, "qwen3-coder"):
 		return "BUILT-IN Qwen3 Coder Plus"
 	case strings.Contains(s, "qwen3-max") || strings.Contains(s, "qwen-max"):

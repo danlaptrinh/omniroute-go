@@ -270,14 +270,29 @@ func inspectClaudeCodeAccount(ctx context.Context, acc *ConnectedAccount, detail
 	detail.SessionPercent = 100
 	detail.WeeklyPercent = 100
 	detail.SupportedModels = []string{
+		"claude-code/claude-opus-5-5",
+		"claude-code/claude-fable-5-1",
+		"claude-code/claude-sonnet-5-5",
+		"claude-code/claude-haiku-5-5",
+		"claude-code/claude-sonnet-5",
+		"claude-code/claude-opus-5",
+		"claude-code/claude-fable-5",
+		"claude-code/claude-opus-4-8",
+		"claude-code/claude-opus-4-7",
 		"claude-code/claude-opus-4-6-thinking",
 		"claude-code/claude-sonnet-4-6",
 		"claude-code/claude-haiku-4-5",
 	}
 	detail.ModelQuotas = []ModelQuotaInfo{
-		{ModelID: "claude-code/claude-opus-4-6-thinking", DisplayName: "Claude Opus 4.6 Thinking", RemainingPercent: 100, ResetTime: defaultResetText, Status: "good"},
-		{ModelID: "claude-code/claude-sonnet-4-6", DisplayName: "Claude Sonnet 4.6", RemainingPercent: 100, ResetTime: defaultResetText, Status: "good"},
-		{ModelID: "claude-code/claude-haiku-4-5", DisplayName: "Claude Haiku 4.5", RemainingPercent: 100, ResetTime: defaultResetText, Status: "good"},
+		{ModelID: "claude-code/claude-opus-5-5", DisplayName: "Opus 5.5 (Default • Extra)", RemainingPercent: 100, ResetTime: defaultResetText, Status: "good"},
+		{ModelID: "claude-code/claude-fable-5-1", DisplayName: "Fable 5.1", RemainingPercent: 100, ResetTime: defaultResetText, Status: "good"},
+		{ModelID: "claude-code/claude-sonnet-5-5", DisplayName: "Sonnet 5.5", RemainingPercent: 100, ResetTime: defaultResetText, Status: "good"},
+		{ModelID: "claude-code/claude-haiku-5-5", DisplayName: "Haiku 5.5", RemainingPercent: 100, ResetTime: defaultResetText, Status: "good"},
+		{ModelID: "claude-code/claude-sonnet-5", DisplayName: "Sonnet 5 / Opus 5 / Fable 5", RemainingPercent: 100, ResetTime: defaultResetText, Status: "good"},
+		{ModelID: "claude-code/claude-opus-4-8", DisplayName: "Opus 4.8 / Opus 4.7", RemainingPercent: 100, ResetTime: defaultResetText, Status: "good"},
+		{ModelID: "claude-code/claude-opus-4-6-thinking", DisplayName: "Opus 4.6 (Thinking)", RemainingPercent: 100, ResetTime: defaultResetText, Status: "good"},
+		{ModelID: "claude-code/claude-sonnet-4-6", DisplayName: "Sonnet 4.6", RemainingPercent: 100, ResetTime: defaultResetText, Status: "good"},
+		{ModelID: "claude-code/claude-haiku-4-5", DisplayName: "Haiku 4.5", RemainingPercent: 100, ResetTime: defaultResetText, Status: "good"},
 	}
 }
 
@@ -303,11 +318,19 @@ func inspectAlibabaAccount(ctx context.Context, acc *ConnectedAccount, detail *A
 	detail.ResetTimeText = resetText
 
 	detail.SupportedModels = []string{
+		"alibaba/auto",
 		"alibaba/qwen3.8-max",
 		"alibaba/qwen3.8-flash",
-		"alibaba/deepseek-v4-pro",
+		"alibaba/qwen3.7-plus",
+		"alibaba/qwen3.7-max",
+		"alibaba/qwen3.6-flash",
+		"alibaba/deepseek-v4.1-flash-1017",
 		"alibaba/deepseek-v4.1-flash",
+		"alibaba/deepseek-v4-pro-0813",
+		"alibaba/deepseek-v4-pro",
+		"alibaba/deepseek-v4-flash-0731",
 		"alibaba/glm-5.3",
+		"alibaba/glm-5.2",
 		"alibaba/qwen3-coder-plus",
 	}
 
@@ -323,42 +346,56 @@ func inspectAlibabaAccount(ctx context.Context, acc *ConnectedAccount, detail *A
 		},
 		{
 			ModelID:          "alibaba/qwen3.8-max",
-			DisplayName:      "Qwen 3.8 Max (Coding Plan)",
+			DisplayName:      "qwen3.8-max (⚡ 40% Off Nights)",
 			RemainingPercent: remainingPct,
 			ResetTime:        resetText,
 			Status:           status,
 		},
 		{
 			ModelID:          "alibaba/qwen3.8-flash",
-			DisplayName:      "Qwen 3.8 Flash",
+			DisplayName:      "qwen3.8-flash (⚡ 40% Off Nights)",
 			RemainingPercent: remainingPct,
 			ResetTime:        resetText,
 			Status:           status,
 		},
 		{
-			ModelID:          "alibaba/deepseek-v4-pro",
-			DisplayName:      "DeepSeek V4 Pro",
+			ModelID:          "alibaba/deepseek-v4.1-flash-1017",
+			DisplayName:      "deepseek-v4.1-flash-1017 (⚡ 50% Off Nights)",
 			RemainingPercent: remainingPct,
 			ResetTime:        resetText,
 			Status:           status,
 		},
 		{
 			ModelID:          "alibaba/deepseek-v4.1-flash",
-			DisplayName:      "DeepSeek V4.1 Flash",
+			DisplayName:      "deepseek-v4.1-flash (⚡ 50% Off Nights)",
+			RemainingPercent: remainingPct,
+			ResetTime:        resetText,
+			Status:           status,
+		},
+		{
+			ModelID:          "alibaba/deepseek-v4-pro-0813",
+			DisplayName:      "deepseek-v4-pro-0813 (⚡ Night 50% Off)",
+			RemainingPercent: remainingPct,
+			ResetTime:        resetText,
+			Status:           status,
+		},
+		{
+			ModelID:          "alibaba/deepseek-v4-flash-0731",
+			DisplayName:      "deepseek-v4-flash-0731 (⚡ Night 50% Off)",
+			RemainingPercent: remainingPct,
+			ResetTime:        resetText,
+			Status:           status,
+		},
+		{
+			ModelID:          "alibaba/deepseek-v4-pro",
+			DisplayName:      "deepseek-v4-pro / qwen3.7-max / plus",
 			RemainingPercent: remainingPct,
 			ResetTime:        resetText,
 			Status:           status,
 		},
 		{
 			ModelID:          "alibaba/glm-5.3",
-			DisplayName:      "GLM 5.3",
-			RemainingPercent: remainingPct,
-			ResetTime:        resetText,
-			Status:           status,
-		},
-		{
-			ModelID:          "alibaba/qwen3-coder-plus",
-			DisplayName:      "Qwen 3 Coder Plus",
+			DisplayName:      "glm-5.3 / glm-5.2 / auto",
 			RemainingPercent: remainingPct,
 			ResetTime:        resetText,
 			Status:           status,

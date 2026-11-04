@@ -45,6 +45,8 @@ func ResolveAlibabaEndpoint(region string, customBaseURL string) string {
 // (token-plan.ap-southeast-1.maas.aliyuncs.com) model IDs when using an sk-sp-* Token Plan key.
 func mapAlibabaTokenPlanModel(modelID string) string {
 	switch strings.ToLower(strings.TrimSpace(modelID)) {
+	case "auto":
+		return "auto"
 	case "qwen3-coder-plus", "qwen3-max", "qwen-max", "qwen3-235b-a22b", "qwen3.8-max":
 		return "qwen3.8-max"
 	case "qwen3-coder-turbo", "qwen-plus", "qwen3-32b", "qwen3.8-flash":
@@ -55,6 +57,12 @@ func mapAlibabaTokenPlanModel(modelID string) string {
 		return "qwen3.7-plus"
 	case "qwen3.6-flash":
 		return "qwen3.6-flash"
+	case "deepseek-v4.1-flash-1017":
+		return "deepseek-v4.1-flash-1017"
+	case "deepseek-v4-pro-0813":
+		return "deepseek-v4-pro-0813"
+	case "deepseek-v4-flash-0731":
+		return "deepseek-v4-flash-0731"
 	case "deepseek-r1", "qwq-plus", "deepseek-v4-pro":
 		return "deepseek-v4-pro"
 	case "deepseek-v3", "deepseek-v4.1-flash":
@@ -69,6 +77,34 @@ func mapAlibabaTokenPlanModel(modelID string) string {
 		}
 		return "qwen3.8-max"
 	}
+}
+
+func buildAlibabaTargetModels(primary string) []string {
+	mapped := mapAlibabaTokenPlanModel(primary)
+	raw := []string{mapped}
+	if primary != "" && primary != mapped {
+		raw = append(raw, primary)
+	}
+	lower := strings.ToLower(mapped)
+	switch {
+	case strings.HasPrefix(lower, "deepseek-v4-pro"):
+		raw = append(raw, "deepseek-v4-pro", "qwen3.8-max")
+	case strings.HasPrefix(lower, "deepseek-v4"):
+		raw = append(raw, "deepseek-v4.1-flash", "qwen3.8-flash")
+	case lower == "auto":
+		raw = append(raw, "qwen3.8-max", "qwen3.8-flash")
+	default:
+		raw = append(raw, "qwen3.8-max")
+	}
+	seen := make(map[string]bool, len(raw))
+	out := make([]string, 0, len(raw))
+	for _, m := range raw {
+		if m != "" && !seen[m] {
+			seen[m] = true
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 // handleAlibabaProvider handles chat completions for Alibaba Token Plan (Bailian Coding Plan / DashScope).
@@ -99,17 +135,13 @@ func (u *GatewayUpstream) handleAlibabaProvider(
 			"https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/chat/completions",
 			ResolveAlibabaEndpoint(acc.Region, acc.BaseURL),
 		}
-		mapped := mapAlibabaTokenPlanModel(resolved.UpstreamModelID)
-		targetModels = []string{mapped}
-		if mapped != resolved.UpstreamModelID && resolved.UpstreamModelID != "" {
-			targetModels = append(targetModels, resolved.UpstreamModelID)
-		}
+		targetModels = buildAlibabaTargetModels(resolved.UpstreamModelID)
 	} else {
 		endpoints = []string{
 			ResolveAlibabaEndpoint(acc.Region, acc.BaseURL),
 			"https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/chat/completions",
 		}
-		targetModels = []string{resolved.UpstreamModelID, mapAlibabaTokenPlanModel(resolved.UpstreamModelID)}
+		targetModels = buildAlibabaTargetModels(resolved.UpstreamModelID)
 	}
 
 	client := u.client
@@ -235,6 +267,28 @@ type anthropicMessagesResponse struct {
 	} `json:"error,omitempty"`
 }
 
+func buildClaudeCodeCandidates(primary string) []string {
+	raw := []string{primary}
+	lower := strings.ToLower(strings.TrimSpace(primary))
+	switch {
+	case strings.Contains(lower, "haiku"):
+		raw = append(raw, "claude-haiku-4-5-20251001", "claude-sonnet-4-6")
+	case strings.Contains(lower, "sonnet"):
+		raw = append(raw, "claude-sonnet-4-6", "claude-opus-4-6")
+	default:
+		raw = append(raw, "claude-opus-4-6", "claude-sonnet-4-6")
+	}
+	seen := make(map[string]bool, len(raw))
+	out := make([]string, 0, len(raw))
+	for _, m := range raw {
+		if m != "" && !seen[m] {
+			seen[m] = true
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
 // handleClaudeCodeProvider handles chat completions for Claude Code (OAuth & Anthropic API).
 func (u *GatewayUpstream) handleClaudeCodeProvider(
 	ctx context.Context,
@@ -297,53 +351,76 @@ func (u *GatewayUpstream) handleClaudeCodeProvider(
 		maxTokens = 8192
 	}
 
-	anthReq := anthropicMessagesRequest{
-		Model:     resolved.UpstreamModelID,
-		MaxTokens: maxTokens,
-		System:    strings.Join(sysParts, "\n\n"),
-		Messages:  anthMessages,
-	}
-
-	payloadBytes, err := json.Marshal(anthReq)
-	if err != nil {
-		return fmt.Errorf("failed to marshal claude-code request: %w", err)
-	}
-
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payloadBytes))
-	if err != nil {
-		return fmt.Errorf("failed to create claude-code request: %w", err)
-	}
-
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Accept", "application/json")
-	httpReq.Header.Set("anthropic-version", "2023-06-01")
-
-	if strings.HasPrefix(token, "sk-ant-oat") {
-		httpReq.Header.Set("Authorization", "Bearer "+token)
-		httpReq.Header.Set("anthropic-beta", "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14")
-		httpReq.Header.Set("User-Agent", "claude-cli/1.0.0 (external, cli)")
-	} else if token != "" {
-		httpReq.Header.Set("x-api-key", token)
-	}
-
 	client := u.client
 	if client == nil {
 		client = http.DefaultClient
 	}
 
-	resp, err := client.Do(httpReq)
-	if err != nil {
-		return fmt.Errorf("claude-code upstream transport error: %w", err)
-	}
-	defer resp.Body.Close()
+	candidates := buildClaudeCodeCandidates(resolved.UpstreamModelID)
+	var bodyBytes []byte
+	var lastErr error
+	var succeeded bool
 
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read claude-code response: %w", err)
+	for _, candModel := range candidates {
+		anthReq := anthropicMessagesRequest{
+			Model:     candModel,
+			MaxTokens: maxTokens,
+			System:    strings.Join(sysParts, "\n\n"),
+			Messages:  anthMessages,
+		}
+
+		payloadBytes, err := json.Marshal(anthReq)
+		if err != nil {
+			lastErr = fmt.Errorf("failed to marshal claude-code request: %w", err)
+			continue
+		}
+
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payloadBytes))
+		if err != nil {
+			lastErr = fmt.Errorf("failed to create claude-code request: %w", err)
+			continue
+		}
+
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("Accept", "application/json")
+		httpReq.Header.Set("anthropic-version", "2023-06-01")
+
+		if strings.HasPrefix(token, "sk-ant-oat") {
+			httpReq.Header.Set("Authorization", "Bearer "+token)
+			httpReq.Header.Set("anthropic-beta", "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14")
+			httpReq.Header.Set("User-Agent", "claude-cli/1.0.0 (external, cli)")
+		} else if token != "" {
+			httpReq.Header.Set("x-api-key", token)
+		}
+
+		resp, err := client.Do(httpReq)
+		if err != nil {
+			lastErr = fmt.Errorf("claude-code upstream transport error: %w", err)
+			continue
+		}
+
+		b, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if err != nil {
+			lastErr = fmt.Errorf("failed to read claude-code response: %w", err)
+			continue
+		}
+
+		if resp.StatusCode >= 400 {
+			lastErr = fmt.Errorf("claude-code HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+			if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusBadRequest {
+				continue
+			}
+			break
+		}
+
+		bodyBytes = b
+		succeeded = true
+		break
 	}
 
-	if resp.StatusCode >= 400 {
-		return fmt.Errorf("claude-code HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(bodyBytes)))
+	if !succeeded {
+		return lastErr
 	}
 
 	var anthResp anthropicMessagesResponse
