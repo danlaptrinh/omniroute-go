@@ -6,6 +6,7 @@ import (
 	"html"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -698,6 +699,19 @@ func (s *Server) handleOAuthURL(w http.ResponseWriter, r *http.Request) {
 		redirectURI = AgyOAuthDefaultRedirectURI
 	}
 	state := strings.TrimSpace(r.URL.Query().Get("state"))
+	if state == "" {
+		origin := strings.TrimSpace(r.URL.Query().Get("origin"))
+		if origin == "" && r.Host != "" && !strings.HasPrefix(r.Host, "127.0.0.1:20128") {
+			scheme := "http"
+			if strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") || r.TLS != nil {
+				scheme = "https"
+			}
+			origin = scheme + "://" + r.Host
+		}
+		if origin != "" {
+			state = "origin=" + origin
+		}
+	}
 	authURL := BuildOAuthAuthURL(redirectURI, state)
 
 	w.Header().Set("Content-Type", "application/json")
@@ -747,6 +761,26 @@ func (s *Server) handleOAuthExchange(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
+	state := strings.TrimSpace(r.URL.Query().Get("state"))
+	origin := ""
+	if strings.HasPrefix(state, "origin=") {
+		origin = strings.TrimSpace(strings.TrimPrefix(state, "origin="))
+	}
+	if origin != "" && r.URL.Query().Get("forwarded") != "1" {
+		if u, err := url.Parse(origin); err == nil && u.Host != "" && !strings.EqualFold(u.Host, r.Host) {
+			target := strings.TrimRight(origin, "/") + "/callback?" + r.URL.RawQuery + "&forwarded=1"
+			http.Redirect(w, r, target, http.StatusFound)
+			return
+		}
+	}
+
+	returnUI := "/ui?connected=1"
+	if origin != "" {
+		returnUI = strings.TrimRight(origin, "/") + "/ui?connected=1"
+	} else if strings.HasPrefix(r.Host, "127.0.0.1:20128") || strings.HasPrefix(r.Host, "localhost:20128") {
+		returnUI = "http://127.0.0.1:8787/ui?connected=1"
+	}
+
 	fullURL := fmt.Sprintf("http://%s%s", r.Host, r.URL.RequestURI())
 	if r.Host == "" {
 		fullURL = AgyOAuthDefaultRedirectURI + "?" + r.URL.RawQuery
@@ -757,7 +791,7 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = fmt.Fprintf(w, `<!DOCTYPE html><html><body style="background:#0b0f19;color:#f87171;font-family:sans-serif;padding:40px;text-align:center;">
-<h2>Kết nối OAuth thất bại</h2><p>%s</p><p><a href="http://127.0.0.1:8787/ui" style="color:#60a5fa;">Quay lại AI Gateway UI</a></p></body></html>`, html.EscapeString(err.Error()))
+<h2>Kết nối OAuth thất bại</h2><p>%s</p><p><a href="%s" style="color:#60a5fa;">Quay lại AI Gateway UI</a></p></body></html>`, html.EscapeString(err.Error()), html.EscapeString(returnUI))
 		return
 	}
 
@@ -767,12 +801,12 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusOK)
-	_, _ = fmt.Fprintf(w, `<!DOCTYPE html><html><head><meta http-equiv="refresh" content="1;url=http://127.0.0.1:8787/ui?connected=1" /></head>
+	_, _ = fmt.Fprintf(w, `<!DOCTYPE html><html><head><meta http-equiv="refresh" content="1;url=%s" /></head>
 <body style="background:#0b0f19;color:#10b981;font-family:sans-serif;padding:40px;text-align:center;">
 <h2>Đã kết nối thành công tài khoản Antigravity!</h2>
 <p style="color:#e2e8f0;">Email: <strong>%s</strong> | Project ID: <code>%s</code></p>
-<p><a href="http://127.0.0.1:8787/ui?connected=1" style="color:#60a5fa;">Đang chuyển hướng về AI Gateway Dashboard...</a></p>
-</body></html>`, html.EscapeString(acc.Email), html.EscapeString(acc.ProjectID))
+<p><a href="%s" style="color:#60a5fa;">Đang chuyển hướng về AI Gateway Dashboard...</a></p>
+</body></html>`, html.EscapeString(returnUI), html.EscapeString(acc.Email), html.EscapeString(acc.ProjectID), html.EscapeString(returnUI))
 }
 
 func (s *Server) handleOAuthAccountDelete(w http.ResponseWriter, r *http.Request) {

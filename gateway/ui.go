@@ -367,7 +367,7 @@ const gatewayUIHTML = `<!DOCTYPE html>
           AI Routing Engine đa nhà cung cấp: Antigravity, Claude Code, Alibaba Token Plan
         </div>
         <div style="margin-top:10px;">
-          <span class="badge" style="background:#0f172a;color:#38bdf8;border:1px solid #1e293b;font-family:monospace;font-size:11px;">127.0.0.1:8787/v1</span>
+          <span id="sidebarEndpointBadge" class="badge" style="background:#0f172a;color:#38bdf8;border:1px solid #1e293b;font-family:monospace;font-size:11px;">omni.bucloud.vip/v1</span>
         </div>
       </div>
 
@@ -2564,7 +2564,12 @@ docker compose up -d --build</pre>
 
     async function loadAgyUrl() {
       try {
-        const r = await fetch('/v1/oauth/url');
+        const sbBadge = document.getElementById('sidebarEndpointBadge');
+        if (sbBadge && window.location && window.location.host) {
+          sbBadge.textContent = window.location.host + '/v1';
+        }
+        const originParam = (window.location && window.location.origin) ? ('?origin=' + encodeURIComponent(window.location.origin)) : '';
+        const r = await fetch('/v1/oauth/url' + originParam);
         const d = await r.json();
         document.getElementById('agyOAuthUrlBox').textContent = d.auth_url;
         document.getElementById('agyOpenBrowserBtn').href = d.auth_url;
