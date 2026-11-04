@@ -980,7 +980,7 @@ const gatewayUIHTML = `<!DOCTYPE html>
               <span style="width:7px;height:7px;border-radius:50%;background:#10b981;display:inline-block;"></span>
               <span style="font-size:12.5px;color:#cbd5e1;">Công khai</span>
             </div>
-            <div style="flex:1;font-family:monospace;font-size:13px;font-weight:700;color:#fff;word-break:break-all;" id="epActivePublicURL">https://omni.huongque.com/v1</div>
+            <div style="flex:1;font-family:monospace;font-size:13px;font-weight:700;color:#fff;word-break:break-all;" id="epActivePublicURL">https://omni.bucloud.vip/v1</div>
             <button title="Sao chép Endpoint Công khai" style="padding:5px 9px;font-size:12px;" onclick="copyEndpointField('epActivePublicURL')">📋</button>
           </div>
 
@@ -1024,7 +1024,7 @@ const gatewayUIHTML = `<!DOCTYPE html>
             <span style="color:#38bdf8;font-size:16px;">☁️</span>
             <div>
               <div style="font-weight:600;font-size:13.5px;color:#f1f5f9;">Cloud OmniRoute</div>
-              <div id="epCloudSubUrl" style="font-size:11px;color:var(--muted);font-family:monospace;">https://omni.huongque.com/v1</div>
+              <div id="epCloudSubUrl" style="font-size:11px;color:var(--muted);font-family:monospace;">https://omni.bucloud.vip/v1</div>
             </div>
           </div>
           <div style="display:flex;align-items:center;gap:10px;">
@@ -1122,7 +1122,7 @@ const gatewayUIHTML = `<!DOCTYPE html>
     "omni-parallel-dispatcher": {
       "command": "omni-mcp",
       "env": {
-        "OMNI_GATEWAY_URL": "https://omni.huongque.com/v1/chat/completions",
+        "OMNI_GATEWAY_URL": "https://omni.bucloud.vip/v1/chat/completions",
         "OMNI_DEFAULT_MODEL": "antigravity/gemini-4-argon-high"
       }
     }
@@ -1145,14 +1145,14 @@ const gatewayUIHTML = `<!DOCTYPE html>
           <div class="setting-row">
             <div class="setting-info">
               <div class="setting-title">A2A Discovery Card URL</div>
-              <div class="setting-desc" id="epA2ADiscoveryURL" style="font-family:monospace;color:#38bdf8;">https://omni.huongque.com/.well-known/agent.json</div>
+              <div class="setting-desc" id="epA2ADiscoveryURL" style="font-family:monospace;color:#38bdf8;">https://omni.bucloud.vip/.well-known/agent.json</div>
             </div>
             <button onclick="copyEndpointField('epA2ADiscoveryURL')">📋 Sao chép</button>
           </div>
           <div class="setting-row">
             <div class="setting-info">
               <div class="setting-title">A2A Task Dispatch Endpoint</div>
-              <div class="setting-desc" id="epA2ADispatchURL" style="font-family:monospace;color:#34d399;">https://omni.huongque.com/v1/a2a</div>
+              <div class="setting-desc" id="epA2ADispatchURL" style="font-family:monospace;color:#34d399;">https://omni.bucloud.vip/v1/a2a</div>
             </div>
             <button onclick="copyEndpointField('epA2ADispatchURL')">📋 Sao chép</button>
           </div>
@@ -1173,7 +1173,7 @@ docker compose up -d --build</pre>
         <div style="font-size:12px;font-weight:600;color:#e2e8f0;margin:12px 0 6px;">2. Cấu hình Nginx Reverse Proxy cho tên miền công khai (SSE Streaming chuẩn):</div>
         <pre id="epVpsNginxConf">server {
     listen 80;
-    server_name omni.huongque.com;
+    server_name omni.bucloud.vip;
 
     location / {
         proxy_pass http://127.0.0.1:8787;
@@ -2902,14 +2902,14 @@ docker compose up -d --build</pre>
     function renderEndpointStatus(d) {
       if (!d) return;
       currentEndpointData = d;
-      document.getElementById('epActivePublicURL').textContent = d.active_public_url || 'https://omni.huongque.com/v1';
+      document.getElementById('epActivePublicURL').textContent = d.active_public_url || 'https://omni.bucloud.vip/v1';
       document.getElementById('epActiveLocalURL').textContent = d.active_local_url || 'http://localhost:8787/v1';
       document.getElementById('epHostID').textContent = d.host_id || '569fb55e';
       document.getElementById('epLanServerURL').textContent = d.lan_server_url || '127.0.0.1:8787/v1';
       document.getElementById('epActiveTunnelsCount').textContent = (d.active_tunnels_count || 0) + '/' + (d.total_tunnels_count || 4) + ' đang hoạt động';
 
       const cfg = d.config || {};
-      document.getElementById('epCloudSubUrl').textContent = cfg.public_url || 'https://omni.huongque.com/v1';
+      document.getElementById('epCloudSubUrl').textContent = cfg.public_url || 'https://omni.bucloud.vip/v1';
       if (cfg.cloudflare_tunnel_url) {
         document.getElementById('epCfSubUrl').textContent = cfg.cloudflare_tunnel_url;
       }
@@ -3028,7 +3028,7 @@ docker compose up -d --build</pre>
       }
 
       // Update MCP and A2A snippets with active public URL
-      const pubUrl = d.active_public_url || 'https://omni.huongque.com/v1';
+      const pubUrl = d.active_public_url || 'https://omni.bucloud.vip/v1';
       const basePub = pubUrl.replace(/\/v1\/?$/, '');
       document.getElementById('epMcpConfigSnippet').textContent = JSON.stringify({
         mcpServers: {
@@ -3085,8 +3085,8 @@ docker compose up -d --build</pre>
     }
 
     async function editPublicDomainPrompt() {
-      const curr = (currentEndpointData && currentEndpointData.config && currentEndpointData.config.public_url) || 'https://omni.huongque.com/v1';
-      const val = prompt('Nhập địa chỉ Endpoint Công khai trên VPS của bạn:\n(Ví dụ: https://omni.huongque.com/v1 hoặc http://IP-VPS:8787/v1)', curr);
+      const curr = (currentEndpointData && currentEndpointData.config && currentEndpointData.config.public_url) || 'https://omni.bucloud.vip/v1';
+      const val = prompt('Nhập địa chỉ Endpoint Công khai trên VPS của bạn:\n(Ví dụ: https://omni.bucloud.vip/v1 hoặc http://IP-VPS:8787/v1)', curr);
       if (val === null || !val.trim()) return;
       try {
         const r = await fetch('/v1/endpoint', {

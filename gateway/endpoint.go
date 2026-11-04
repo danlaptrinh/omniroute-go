@@ -64,13 +64,13 @@ func GetEndpointConfig() EndpointConfig {
 	cfg := loadSavedAuthConfigLocked()
 	if cfg.EndpointConfig == nil {
 		return EndpointConfig{
-			PublicURL:    "https://omni.huongque.com/v1",
+			PublicURL:    "https://omni.bucloud.vip/v1",
 			CloudEnabled: true,
 		}
 	}
 	res := *cfg.EndpointConfig
 	if strings.TrimSpace(res.PublicURL) == "" {
-		res.PublicURL = "https://omni.huongque.com/v1"
+		res.PublicURL = "https://omni.bucloud.vip/v1"
 	}
 	return res
 }
@@ -81,7 +81,7 @@ func SaveEndpointConfig(newCfg EndpointConfig) error {
 	defer configMu.Unlock()
 	cfg := loadSavedAuthConfigLocked()
 	if strings.TrimSpace(newCfg.PublicURL) == "" {
-		newCfg.PublicURL = "https://omni.huongque.com/v1"
+		newCfg.PublicURL = "https://omni.bucloud.vip/v1"
 	} else {
 		u := strings.TrimRight(strings.TrimSpace(newCfg.PublicURL), "/")
 		if !strings.HasSuffix(u, "/v1") && !strings.Contains(u, "/v1/") {
