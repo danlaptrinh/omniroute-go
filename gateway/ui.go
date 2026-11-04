@@ -1509,7 +1509,7 @@ docker compose up -d --build</pre>
       <!-- KPI Cards -->
       <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(185px, 1fr));gap:12px;margin-top:16px;">
         <div class="setting-card" style="padding:14px;border-left:3px solid #fb923c;">
-          <div style="font-size:11px;color:var(--muted);font-weight:600;">TÀI KHOẢN ANTIGRAVITY (MỤC TIÊU 50)</div>
+          <div style="font-size:11px;color:var(--muted);font-weight:600;">TÀI KHOẢN ANTIGRAVITY PRO (MỤC TIÊU 50)</div>
           <div id="saKpiAgyCount" style="font-size:25px;font-weight:700;color:#fb923c;margin-top:4px;">0 / 50</div>
         </div>
         <div class="setting-card" style="padding:14px;border-left:3px solid #10b981;">
@@ -1523,6 +1523,31 @@ docker compose up -d --build</pre>
         <div class="setting-card" style="padding:14px;border-left:3px solid #38bdf8;">
           <div style="font-size:11px;color:#38bdf8;font-weight:600;">⚡ TỔNG SUB-AGENTS ĐÃ THỰC THI</div>
           <div id="saKpiTotalRun" style="font-size:25px;font-weight:700;color:#38bdf8;margin-top:4px;">0</div>
+        </div>
+      </div>
+
+      <!-- Kiến trúc Phân Tầng Quản Lý Dự Án SEO & Đàn Sub-Agents Antigravity Pro -->
+      <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(260px, 1fr));gap:12px;margin-top:14px;">
+        <div class="setting-card" style="padding:13px;border-left:3px solid #f59e0b;background:rgba(245,158,11,0.06);">
+          <div style="font-weight:700;font-size:13px;color:#fbbf24;">👑 Tầng 1: Quản Lý Dự Án SEO (Lead Orchestrator)</div>
+          <div style="font-size:11.5px;color:#e2e8f0;margin-top:5px;line-height:1.5;">
+            • <strong>Ban ngày (07:00–19:00):</strong> <code>antigravity/gemini-4-argon-high</code> &amp; <code>claude-code/claude-opus-5-5</code><br/>
+            • <strong>Buổi tối (19:00–07:00):</strong> Tự động ưu tiên <code>alibaba/qwen3.8-max</code> (<span style="color:#34d399;font-weight:700;">⚡ 40% Off Nights</span>) làm Quản Lý Dự Án SEO &amp; chia việc cho đàn Sub-Agents.
+          </div>
+        </div>
+        <div class="setting-card" style="padding:13px;border-left:3px solid #10b981;background:rgba(16,185,129,0.06);">
+          <div style="font-weight:700;font-size:13px;color:#34d399;">✍️ Tầng 2A: Đội Sub-Agents Viết Bài Chuẩn SEO</div>
+          <div style="font-size:11.5px;color:#e2e8f0;margin-top:5px;line-height:1.5;">
+            • <strong>Model chuyên trách:</strong> <code>antigravity/gemini-3.1-pro-high</code> (<strong>Gemini 3.1 Pro High</strong>)<br/>
+            • Chạy song song trên <strong>50 tài khoản Antigravity Pro</strong> để viết bài chuẩn SEO E-E-A-T, Content Pillar, Semantic Keywords mà không tốn hạn mức Argon/Opus.
+          </div>
+        </div>
+        <div class="setting-card" style="padding:13px;border-left:3px solid #38bdf8;background:rgba(56,189,248,0.06);">
+          <div style="font-weight:700;font-size:13px;color:#38bdf8;">💻 Tầng 2B: Đội Sub-Agents Code &amp; Kỹ Thuật SEO</div>
+          <div style="font-size:11.5px;color:#e2e8f0;margin-top:5px;line-height:1.5;">
+            • <strong>Model chuyên trách:</strong> <code>antigravity/gemini-3.8-flash-high</code> (<strong>Gemini 3.8 Flash High</strong>)<br/>
+            • Chạy song song tốc độ cực cao trên <strong>50 tài khoản Antigravity Pro</strong> để viết Code, Schema JSON-LD, tối ưu Core Web Vitals &amp; Automation Script.
+          </div>
         </div>
       </div>
     </div>
@@ -1543,14 +1568,15 @@ docker compose up -d --build</pre>
 
     <!-- Bảng Điều Khiển Kích Hoạt Đàn Sub-Agents Song Song -->
     <div class="card" style="border:1px solid #2b354f;">
-      <h2>🚀 Kích Hoạt Đàn Sub-Agents Chạy Cùng 1 Lúc (Parallel Swarm Dispatcher)</h2>
+      <h2>🚀 Kích Hoạt Quản Lý Dự Án SEO &amp; Đàn Sub-Agents Chạy Cùng Lúc (50 Antigravity Pro Swarm)</h2>
       <div style="font-size:12.5px;color:var(--muted);margin-bottom:14px;">
-        Giao một bài toán lớn hoặc danh sách các module độc lập để hệ thống phóng đồng loạt N Sub-Agents chạy song song trên N tài khoản Antigravity khác nhau:
+        <strong>Bước 1:</strong> Model Quản Lý Dự Án SEO (Ban ngày: <code>antigravity/gemini-4-argon-high</code> &amp; <code>claude-code/claude-opus-5-5</code> | Buổi tối: <code>alibaba/qwen3.8-max</code> ⚡40% Off) lập kế hoạch tổng thể.<br/>
+        <strong>Bước 2:</strong> Phóng đồng loạt <strong>N Sub-Agents chạy song song</strong> trên 50 tài khoản Antigravity Pro: <code>antigravity/gemini-3.1-pro-high</code> (<strong>Gemini 3.1 Pro High</strong>) viết bài chuẩn SEO &amp; <code>antigravity/gemini-3.8-flash-high</code> (<strong>Gemini 3.8 Flash High</strong>) viết code kỹ thuật.
       </div>
 
       <div class="grid-2">
         <div>
-          <label class="form-label">Số lượng Sub-Agents chạy đồng thời</label>
+          <label class="form-label">Số lượng Sub-Agents chạy đồng thời (trên Pool 50 Acc Antigravity Pro)</label>
           <select id="saAgentCountSelect">
             <option value="3">3 Sub-Agents chạy cùng lúc (3 Tài khoản song song)</option>
             <option value="5" selected>5 Sub-Agents chạy cùng lúc (5 Tài khoản song song)</option>
@@ -1558,25 +1584,33 @@ docker compose up -d --build</pre>
             <option value="10">10 Sub-Agents chạy cùng lúc (10 Tài khoản song song)</option>
             <option value="20">20 Sub-Agents chạy cùng lúc (20 Tài khoản song song)</option>
             <option value="30">30 Sub-Agents chạy cùng lúc (30 Tài khoản song song)</option>
-            <option value="50">50 Sub-Agents chạy cùng lúc (Toàn bộ 50 Tài khoản Antigravity)</option>
+            <option value="50">50 Sub-Agents chạy cùng lúc (Toàn bộ 50 Tài khoản Antigravity Pro)</option>
           </select>
         </div>
         <div>
-          <label class="form-label">Model sử dụng cho Đàn Sub-Agents</label>
-          <select id="saModelSelect">
-            <option value="antigravity/gemini-4-argon-high" selected>antigravity/gemini-4-argon-high (Gemini 4 Argon High - Ưu tiên Pool Antigravity)</option>
-            <option value="antigravity/gemini-3.8-flash-high">antigravity/gemini-3.8-flash-high (Tốc độ siêu nhanh)</option>
-            <option value="antigravity/gemini-3.1-pro-high">antigravity/gemini-3.1-pro-high</option>
-            <option value="auto/best-coding">auto/best-coding (Argon 4 ➔ Claude Opus 5.5 ➔ Qwen 3.8 Max)</option>
-            <option value="claude-code/claude-opus-5-5">claude-code/claude-opus-5-5 (Claude Opus 5.5)</option>
-            <option value="alibaba/qwen3.8-max">alibaba/qwen3.8-max (⚡ 40% Off Nights)</option>
+          <label class="form-label">Chế độ Phân Công Đội Sub-Agents (Viết Bài SEO &amp; Code)</label>
+          <select id="saSwarmRoleModeSelect">
+            <option value="seo-and-code" selected>👑 Kết Hợp: Quản Lý SEO ➔ Viết Bài (Gemini 3.1 Pro High) + Code (Gemini 3.8 Flash High)</option>
+            <option value="content-only">✍️ Chuyên Viết Bài Hàng Loạt: Quản Lý SEO ➔ 100% Sub-Agents Gemini 3.1 Pro High</option>
+            <option value="coding-only">💻 Chuyên Viết Code Hàng Loạt: Quản Lý SEO ➔ 100% Sub-Agents Gemini 3.8 Flash High</option>
+            <option value="night-seo">🌙 Chế Độ Đêm (⚡ 40% Off): Quản Lý SEO Qwen 3.8 Max ➔ Gemini 3.1 Pro High &amp; 3.8 Flash High</option>
           </select>
         </div>
       </div>
 
+      <div style="margin-top:10px;">
+        <label class="form-label">👑 Model Quản Lý Dự Án SEO (Tier 1 Lead Manager — Lập kế hoạch &amp; Điều phối)</label>
+        <select id="saModelSelect">
+          <option value="auto-manager" selected>👑 Tự động theo giờ: Ngày (gemini-4-argon-high &amp; claude-opus-5-5) | Tối (alibaba/qwen3.8-max ⚡ 40% Off)</option>
+          <option value="antigravity/gemini-4-argon-high">antigravity/gemini-4-argon-high (Gemini 4 Argon High - Quản Lý Dự Án SEO)</option>
+          <option value="claude-code/claude-opus-5-5">claude-code/claude-opus-5-5 (Claude Opus 5.5 - Quản Lý Dự Án SEO)</option>
+          <option value="alibaba/qwen3.8-max">alibaba/qwen3.8-max (Alibaba Qwen 3.8 Max ⚡ 40% Off Nights - Quản Lý SEO Buổi Tối)</option>
+        </select>
+      </div>
+
       <div style="margin-top:12px;">
-        <label class="form-label">Bài toán lớn / Yêu cầu dự án (Hệ thống sẽ tự động phân tách cho N Sub-Agents chuyên biệt làm việc cùng lúc — hoặc nhập mỗi dòng 1 nhiệm vụ nếu muốn giao việc riêng)</label>
-        <textarea id="saMasterGoalInput" rows="4" placeholder="Ví dụ: Thiết kế và viết mã nguồn hệ thống quản lý Cloud VPS tự động cho BuCloud gồm: Kiến trúc tổng thể, API thanh toán, Quản lý Docker Container, Schema PostgreSQL và Giao diện Dashboard..."></textarea>
+        <label class="form-label">Chủ đề dự án SEO / Yêu cầu bài viết &amp; Code (Hoặc nhập mỗi dòng 1 từ khóa/bài viết để 50 Sub-Agents viết cùng lúc)</label>
+        <textarea id="saMasterGoalInput" rows="4" placeholder="Ví dụ: Chiến dịch SEO Tổng Thể & Hệ Thống Web Cloud VPS BuCloud 2026: Lập bộ từ khóa Semantic, viết chuỗi bài Pillar & Cluster chuẩn E-E-A-T, tạo mã nguồn Landing Page chuẩn Core Web Vitals và Schema JSON-LD..."></textarea>
       </div>
 
       <div style="display:flex;justify-content:space-between;align-items:center;margin-top:12px;flex-wrap:wrap;gap:10px;">
@@ -4072,6 +4106,8 @@ docker compose up -d --build</pre>
       const goal = document.getElementById('saMasterGoalInput').value.trim();
       const count = parseInt(document.getElementById('saAgentCountSelect').value || '5', 10);
       const model = document.getElementById('saModelSelect').value;
+      const roleModeEl = document.getElementById('saSwarmRoleModeSelect');
+      const roleMode = roleModeEl ? roleModeEl.value : 'seo-and-code';
       const lineByLine = document.getElementById('saLineByLineCheckbox').checked;
       const statusBox = document.getElementById('saLaunchStatus');
       const btn = document.getElementById('saLaunchBtn');
@@ -4082,21 +4118,25 @@ docker compose up -d --build</pre>
       }
 
       let customTasks = [];
-      let mode = 'auto-decompose';
+      let mode = roleMode;
       if (lineByLine) {
         mode = 'custom-tasks';
         const lines = goal.split('\n').map(l => l.trim()).filter(Boolean);
+        let workerModel = 'auto-worker';
+        if (roleMode === 'content-only') workerModel = 'antigravity/gemini-3.1-pro-high';
+        else if (roleMode === 'coding-only') workerModel = 'antigravity/gemini-3.8-flash-high';
+
         customTasks = lines.map((line, i) => ({
           index: i + 1,
           role: 'Sub-Agent #' + (i + 1),
           prompt: line,
-          model: model
+          model: workerModel
         }));
       }
 
       btn.disabled = true;
-      btn.textContent = '⏳ Đang chạy song song ' + (customTasks.length || count) + ' Sub-Agents...';
-      statusBox.innerHTML = '<span style="color:#38bdf8;">🐝 Đang kích hoạt đồng loạt ' + (customTasks.length || count) + ' Goroutine Sub-Agents phân bổ trên các tài khoản Antigravity...</span>';
+      btn.textContent = '⏳ Quản Lý SEO đang lập kế hoạch & chạy ' + (customTasks.length || count) + ' Sub-Agents...';
+      statusBox.innerHTML = '<span style="color:#38bdf8;">👑 Bước 1: Quản Lý Dự Án SEO (Argon 4 / Opus 5.5 / Tối Qwen 3.8 Max) lập kế hoạch ➔ Bước 2: Phóng ' + (customTasks.length || count) + ' Sub-Agents (Gemini 3.1 Pro High viết bài & Gemini 3.8 Flash High viết code)...</span>';
 
       if (saPollingTimer) clearInterval(saPollingTimer);
       saPollingTimer = setInterval(loadSubAgentsView, 900);
@@ -4119,7 +4159,7 @@ docker compose up -d --build</pre>
         loadSubAgentsView();
 
         if (r.ok && d.summary) {
-          statusBox.innerHTML = '<span style="color:#34d399;">✔ Hoàn tất ' + d.summary.success_count + '/' + d.summary.total_sub_agents + ' Sub-Agents song song trên ' + d.summary.distinct_accounts + ' tài khoản khác nhau trong <strong>' + d.summary.total_wall_time_ms + ' ms</strong>!</span>';
+          statusBox.innerHTML = '<span style="color:#34d399;">✔ Quản Lý SEO (<strong>' + htmlEscape(d.summary.manager_model || 'auto') + '</strong>) + ' + d.summary.success_count + '/' + d.summary.total_sub_agents + ' Sub-Agents hoàn tất trên ' + d.summary.distinct_accounts + ' tài khoản trong <strong>' + d.summary.total_wall_time_ms + ' ms</strong>!</span>';
           renderSwarmSummary(d.summary);
         } else {
           statusBox.innerHTML = '<span style="color:#f87171;">❌ Lỗi: ' + htmlEscape(d.error ? d.error.message : 'Thất bại') + '</span>';
@@ -4137,6 +4177,18 @@ docker compose up -d --build</pre>
       const box = document.getElementById('saSwarmResultsBox');
       if (!box || !summary) return;
 
+      let managerCard = '';
+      if (summary.manager_plan || summary.manager_model) {
+        const nightTag = summary.is_night_mode ? ' <span class="badge badge-green">🌙 Chế Độ Đêm ⚡ 40% Off</span>' : ' <span class="badge badge-blue">☀️ Chế Độ Ban Ngày</span>';
+        managerCard = '<div style="background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.35);border-radius:9px;padding:12px;margin-bottom:14px;">' +
+          '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;margin-bottom:6px;">' +
+            '<div><strong style="color:#fbbf24;font-size:13px;">👑 Quản Lý Dự Án SEO (Lead Orchestrator): ' + htmlEscape(summary.manager_model || 'antigravity/gemini-4-argon-high') + '</strong>' + nightTag + '</div>' +
+            '<span style="font-size:11.5px;color:#cbd5e1;font-family:monospace;">Tài khoản Quản lý: <strong>' + htmlEscape(summary.manager_account || 'auto') + '</strong> | Viết bài: <code>gemini-3.1-pro-high</code> | Code: <code>gemini-3.8-flash-high</code></span>' +
+          '</div>' +
+          (summary.manager_plan ? '<pre style="max-height:190px;overflow-y:auto;font-size:11.5px;margin:0;background:#080b11;color:#fde68a;">' + htmlEscape(summary.manager_plan) + '</pre>' : '') +
+        '</div>';
+      }
+
       let html = '<div style="background:#0b0f17;border:1px solid #242c3d;border-radius:10px;padding:14px;">' +
         '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:12px;padding-bottom:10px;border-bottom:1px solid #1e293b;">' +
           '<div>' +
@@ -4149,6 +4201,7 @@ docker compose up -d --build</pre>
             'Tổng Token: <strong style="color:#38bdf8;">' + Number(summary.total_tokens || 0).toLocaleString() + '</strong>' +
           '</div>' +
         '</div>' +
+        managerCard +
         '<div style="display:grid;grid-template-columns:repeat(auto-fill, minmax(380px, 1fr));gap:12px;">';
 
       (summary.results || []).forEach(res => {

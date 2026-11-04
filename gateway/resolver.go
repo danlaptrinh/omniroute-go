@@ -17,7 +17,48 @@ var defaultFallbackModels = []string{
 
 // DefaultCombos returns the built-in OmniRoute-Go multi-provider combo stacks and collaborative multi-model pipelines.
 func DefaultCombos() []ComboModel {
+	seoModels := []string{
+		"antigravity/gemini-4-argon-high",
+		"claude-code/claude-opus-5-5",
+		"alibaba/qwen3.8-max",
+		"antigravity/gemini-3.1-pro-high",
+		"antigravity/gemini-3.8-flash-high",
+	}
+	seoRoles := []string{
+		"👑 Quản Lý Dự Án SEO (Ban ngày: Argon 4 High)",
+		"👑 Quản Lý Dự Án SEO (Đồng quản lý: Claude Opus 5.5)",
+		"🌙 Quản Lý Dự Án SEO (Buổi tối: Qwen 3.8 Max ⚡ 40% Off)",
+		"✍️ Sub-Agent Viết Bài SEO (Antigravity Pro: Gemini 3.1 Pro High)",
+		"💻 Sub-Agent Code & Kỹ Thuật (Antigravity Pro: Gemini 3.8 Flash High)",
+	}
+	if isVietnamNightHours() {
+		seoModels = []string{
+			"alibaba/qwen3.8-max",
+			"antigravity/gemini-4-argon-high",
+			"claude-code/claude-opus-5-5",
+			"antigravity/gemini-3.1-pro-high",
+			"antigravity/gemini-3.8-flash-high",
+		}
+		seoRoles = []string{
+			"🌙 Quản Lý Dự Án SEO Đang Bật (Buổi tối: Qwen 3.8 Max ⚡ 40% Off)",
+			"👑 Quản Lý Dự Án SEO Dự Phòng (Argon 4 High)",
+			"👑 Quản Lý Dự Án SEO Dự Phòng (Claude Opus 5.5)",
+			"✍️ Sub-Agent Viết Bài SEO (Antigravity Pro: Gemini 3.1 Pro High)",
+			"💻 Sub-Agent Code & Kỹ Thuật (Antigravity Pro: Gemini 3.8 Flash High)",
+		}
+	}
+
 	return []ComboModel{
+		{
+			ID:          "auto/seo-master",
+			Name:        "👑 Quản Lý Dự Án SEO & Đàn Antigravity Pro (Argon 4 / Opus 5.5 / Tối Qwen 3.8 Max ➔ Gemini 3.1 Pro High Viết Bài & 3.8 Flash High Code)",
+			Mode:        ComboModePipeline,
+			Description: "Phân tầng thông minh cho dàn 50 tài khoản Antigravity Pro: Quản lý dự án SEO bằng Gemini 4 Argon High & Claude Opus 5.5 (buổi tối tự chuyển sang Alibaba Qwen 3.8 Max ⚡ 40% Off Nights) ➔ Điều phối Gemini 3.1 Pro High viết bài chuẩn SEO và Gemini 3.8 Flash High viết code kỹ thuật.",
+			Models:      seoModels,
+			Roles:       seoRoles,
+			HandoffPrompt: "Dựa trên Bản Kế Hoạch Quản Lý Dự Án SEO ở Bước 1, hãy triển khai bài viết chuẩn SEO chuyên sâu (bằng Gemini 3.1 Pro High) hoặc mã nguồn kỹ thuật hoàn chỉnh (bằng Gemini 3.8 Flash High).",
+			BuiltIn:       true,
+		},
 		{
 			ID:          "auto/best-coding",
 			Name:        "Best Coding Failover (Gemini 4 Argon ➔ Claude Opus ➔ Qwen3 Coder)",
@@ -778,6 +819,7 @@ func (r *DefaultResolver) ListModels() []OpenAIModelCard {
 		tier     string
 	}{
 		// --- Combos ---
+		{"auto/seo-master", "omniroute-go", "auto", "combo"},
 		{"auto/best-coding", "omniroute-go", "auto", "combo"},
 		{"auto/team-coding", "omniroute-go", "auto", "combo"},
 		{"auto/council-pro", "omniroute-go", "auto", "combo"},

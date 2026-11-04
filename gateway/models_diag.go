@@ -41,6 +41,7 @@ var curatedDashboardModels = []struct {
 	Provider ProviderID
 }{
 	// --- Combos (Smart Routing & Collaborative Multi-Model Pipelines) ---
+	{"auto/seo-master", ProviderAutoCombo},
 	{"auto/best-coding", ProviderAutoCombo},
 	{"auto/team-coding", ProviderAutoCombo},
 	{"auto/council-pro", ProviderAutoCombo},

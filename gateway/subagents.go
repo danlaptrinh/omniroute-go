@@ -137,8 +137,14 @@ type SubAgentResult struct {
 type SwarmRunSummary struct {
 	ID               string           `json:"id"`
 	Timestamp        string           `json:"timestamp"`
-	Mode             string           `json:"mode"` // "auto-decompose" or "custom-tasks"
+	Mode             string           `json:"mode"` // "seo-project", "coding-project", or "custom-tasks"
 	MasterGoal       string           `json:"master_goal,omitempty"`
+	ManagerModel     string           `json:"manager_model,omitempty"`
+	ManagerAccount   string           `json:"manager_account,omitempty"`
+	ManagerPlan      string           `json:"manager_plan,omitempty"`
+	ContentModel     string           `json:"content_model,omitempty"`
+	CodingModel      string           `json:"coding_model,omitempty"`
+	IsNightMode      bool             `json:"is_night_mode"`
 	Model            string           `json:"model"`
 	TotalSubAgents   int              `json:"total_sub_agents"`
 	SuccessCount     int              `json:"success_count"`
@@ -163,14 +169,47 @@ type AccountSlotStatus struct {
 	AvgLatencyMs int64      `json:"avg_latency_ms"`
 }
 
-// listActiveAntigravityAccounts returns all enabled, non-cooldown Antigravity accounts first, followed by other active accounts.
+// isVietnamNightHours checks if current time in Vietnam (UTC+7) is between 19:00 and 07:00 (Alibaba Night Discount window).
+func isVietnamNightHours() bool {
+	vnTime := time.Now().UTC().Add(7 * time.Hour)
+	hr := vnTime.Hour()
+	return hr >= 19 || hr < 7
+}
+
+// selectSEOProjectManagerChain returns the ordered Manager model chain:
+// - Night hours (or forceNight): alibaba/qwen3.8-max (⚡40% Off) -> antigravity/gemini-4-argon-high -> claude-code/claude-opus-5-5
+// - Day hours: antigravity/gemini-4-argon-high -> claude-code/claude-opus-5-5 -> alibaba/qwen3.8-max
+func selectSEOProjectManagerChain(preferredManager string, forceNight bool) ([]string, bool) {
+	night := forceNight || isVietnamNightHours()
+	pref := strings.TrimSpace(preferredManager)
+	var chain []string
+	if pref != "" && pref != "auto-manager" {
+		chain = append(chain, pref)
+	}
+	if night {
+		chain = append(chain,
+			"alibaba/qwen3.8-max",
+			"antigravity/gemini-4-argon-high",
+			"claude-code/claude-opus-5-5",
+		)
+	} else {
+		chain = append(chain,
+			"antigravity/gemini-4-argon-high",
+			"claude-code/claude-opus-5-5",
+			"alibaba/qwen3.8-max",
+		)
+	}
+	return chain, night
+}
+
+// listActiveAccountPool returns all enabled, non-cooldown Antigravity Pro accounts first for Worker Sub-Agents.
 func listActiveAccountPool() []ConnectedAccount {
 	saved := LoadSavedAuthConfig()
 	now := time.Now().Unix()
 
 	var agyReady []ConnectedAccount
+	var agyCooldown []ConnectedAccount
 	var otherReady []ConnectedAccount
-	var fallback []ConnectedAccount
 
 	for _, a := range saved.Accounts {
 		if a.Disabled {
@@ -180,70 +219,135 @@ func listActiveAccountPool() []ConnectedAccount {
 		if prov == "" {
 			prov = ProviderAntigravity
 		}
-		if a.CooldownUntil <= now {
-			if prov == ProviderAntigravity {
+		if prov == ProviderAntigravity {
+			if a.CooldownUntil <= now {
 				agyReady = append(agyReady, a)
 			} else {
-				otherReady = append(otherReady, a)
+				agyCooldown = append(agyCooldown, a)
 			}
-		} else {
-			fallback = append(fallback, a)
+		} else if a.CooldownUntil <= now {
+			otherReady = append(otherReady, a)
 		}
 	}
 
-	out := make([]ConnectedAccount, 0, len(agyReady)+len(otherReady)+len(fallback))
-	out = append(out, agyReady...)
-	out = append(out, otherReady...)
-	if len(out) == 0 {
-		out = append(out, fallback...)
+	if len(agyReady) > 0 {
+		return agyReady
 	}
-	return out
+	if len(otherReady) > 0 {
+		return otherReady
+	}
+	return agyCooldown
 }
 
-// buildDefaultSubAgentTasks decomposes a master goal into N specialized parallel Sub-Agent tasks.
-func buildDefaultSubAgentTasks(goal string, count int, model string) []SubAgentTask {
+// buildDefaultSubAgentTasks decomposes a master goal into N specialized parallel Sub-Agent tasks:
+// - SEO Article & Content Writers use "antigravity/gemini-3.1-pro-high" (Gemini 3.1 Pro High)
+// - Coding & Technical SEO Workers use "antigravity/gemini-3.8-flash-high" (Gemini 3.8 Flash High)
+func buildDefaultSubAgentTasks(goal string, count int, mode string, managerPlan string) []SubAgentTask {
 	if count <= 0 {
-		count = 4
+		count = 5
 	}
 	if count > 60 {
 		count = 60
 	}
 
-	specialties := []struct {
+	const (
+		seoWriterModel = "antigravity/gemini-3.1-pro-high"
+		codeFlashModel = "antigravity/gemini-3.8-flash-high"
+	)
+
+	planContext := ""
+	if strings.TrimSpace(managerPlan) != "" {
+		planContext = "\n\n[ĐỊNH HƯỚNG TỪ QUẢN LÝ DỰ ÁN SEO (MANAGER)]:\n" + managerPlan
+	}
+
+	seoAndCodeSpecialties := []struct {
 		role   string
+		model  string
 		prefix string
 	}{
-		{"Sub-Agent #1 • Kiến Trúc Hệ Thống (System Architect)", "Thiết kế kiến trúc tổng thể, sơ đồ luồng dữ liệu, contracts/interfaces và cấu trúc thư mục cho yêu cầu sau: "},
-		{"Sub-Agent #2 • Backend & API Core Engineer", "Viết mã nguồn xử lý Backend Core, REST/RPC API handlers và logic nghiệp vụ chính cho yêu cầu sau: "},
-		{"Sub-Agent #3 • Database, PostgreSQL & Vector Schema", "Thiết kế schema cơ sở dữ liệu, truy vấn tối ưu, indexing và lớp lưu trữ bền vững cho yêu cầu sau: "},
-		{"Sub-Agent #4 • Frontend & Dashboard UI Engineer", "Thiết kế và viết giao diện người dùng (UI/UX), trạng thái tương tác và kết nối API cho yêu cầu sau: "},
-		{"Sub-Agent #5 • Bảo Mật, OAuth2 & Rate-Limit Guard", "Kiểm tra bảo mật, xác thực OAuth2/API Key, chống tấn công và tối ưu phân tải cho yêu cầu sau: "},
-		{"Sub-Agent #6 • DevOps, Docker & Nginx VPS Deployment", "Xây dựng cấu hình Dockerfile, docker-compose, Nginx Reverse Proxy SSL và script tự động triển khai VPS cho yêu cầu sau: "},
-		{"Sub-Agent #7 • Performance & Concurrency Optimizer", "Tối ưu hóa hiệu năng, Goroutines song song, bộ nhớ đệm (Cache) và giảm độ trễ cho yêu cầu sau: "},
-		{"Sub-Agent #8 • Unit Tests & Edge-Case QA", "Viết bộ kiểm thử tự động (Unit Tests / Integration Tests) và xử lý các trường hợp biên (Edge Cases) cho yêu cầu sau: "},
+		{
+			"Sub-Agent #1 • Viết Bài Pillar Chuẩn SEO (Gemini 3.1 Pro High)",
+			seoWriterModel,
+			"Viết bài Pillar Content chuẩn SEO chuyên sâu (tối ưu Title, Meta Description, Heading H1-H3, từ khóa LSI, E-E-A-T) cho chủ đề/dự án: ",
+		},
+		{
+			"Sub-Agent #2 • Viết Bài Cluster & Landing Page SEO (Gemini 3.1 Pro High)",
+			seoWriterModel,
+			"Viết bài vệ tinh Cluster Content & nội dung chuyển đổi Landing Page chuẩn SEO hấp dẫn người đọc cho chủ đề/dự án: ",
+		},
+		{
+			"Sub-Agent #3 • Code Giao Diện & Tối Ưu Core Web Vitals (Gemini 3.8 Flash High)",
+			codeFlashModel,
+			"Viết code HTML/CSS/JS hoặc Component tối ưu tốc độ tải trang (Core Web Vitals), cấu trúc Semantic HTML chuẩn SEO cho: ",
+		},
+		{
+			"Sub-Agent #4 • Code Schema JSON-LD & Technical SEO (Gemini 3.8 Flash High)",
+			codeFlashModel,
+			"Viết mã nguồn Schema Markup (JSON-LD Article, FAQPage, Product, Organization), OpenGraph, Sitemap và cấu hình Technical SEO cho: ",
+		},
+		{
+			"Sub-Agent #5 • Viết Bài FAQ, So Sánh & Review Chuẩn SEO (Gemini 3.1 Pro High)",
+			seoWriterModel,
+			"Viết bài phân tích chuyên sâu, câu hỏi thường gặp (FAQ Rich Snippets) và đánh giá chi tiết chuẩn SEO cho: ",
+		},
+		{
+			"Sub-Agent #6 • Code Script Tự Động Hóa & Internal Link (Gemini 3.8 Flash High)",
+			codeFlashModel,
+			"Viết code backend/script tự động hóa liên kết nội bộ (Internal Linking), API hoặc công cụ hỗ trợ SEO cho: ",
+		},
+		{
+			"Sub-Agent #7 • Viết Bài Case Study & Hướng Dẫn Chi Tiết (Gemini 3.1 Pro High)",
+			seoWriterModel,
+			"Viết bài hướng dẫn từng bước (How-to Guide) và Case Study thực tế chuẩn SEO giữ chân người dùng (Time on Site) cho: ",
+		},
+		{
+			"Sub-Agent #8 • Code Audit, Kiểm Tra On-Page & Bảo Mật (Gemini 3.8 Flash High)",
+			codeFlashModel,
+			"Viết code kiểm tra On-Page SEO tự động, tối ưu thẻ Meta/Canonical/Robots và bảo mật hệ thống cho: ",
+		},
 	}
 
 	tasks := make([]SubAgentTask, 0, count)
 	for i := 0; i < count; i++ {
-		var role, prompt string
-		if i < len(specialties) {
-			role = specialties[i].role
-			prompt = specialties[i].prefix + goal
+		var role, prompt, workerModel string
+		if mode == "coding-only" {
+			workerModel = codeFlashModel
+			role = fmt.Sprintf("Sub-Agent #%d • Code Module Worker (Gemini 3.8 Flash High)", i+1)
+			prompt = fmt.Sprintf("[Module Code #%d/%d] Viết code hoàn chỉnh, tối ưu hiệu năng cho yêu cầu: %s%s", i+1, count, goal, planContext)
+		} else if mode == "content-only" {
+			workerModel = seoWriterModel
+			role = fmt.Sprintf("Sub-Agent #%d • Viết Bài Chuẩn SEO #%d (Gemini 3.1 Pro High)", i+1, i+1)
+			prompt = fmt.Sprintf("[Bài viết chuẩn SEO #%d/%d] Viết bài chuẩn SEO chi tiết, độc đáo (Unique 100%%), đầy đủ H1-H3 cho chủ đề: %s%s", i+1, count, goal, planContext)
+		} else if i < len(seoAndCodeSpecialties) {
+			spec := seoAndCodeSpecialties[i]
+			role = spec.role
+			workerModel = spec.model
+			prompt = spec.prefix + goal + planContext
 		} else {
-			role = fmt.Sprintf("Sub-Agent #%d • Parallel Module Worker #%d", i+1, i+1)
-			prompt = fmt.Sprintf("[Nhiệm vụ phân mảnh #%d/%d] Triển khai chi tiết module chuyên biệt số %d và giải pháp kỹ thuật cho bài toán: %s", i+1, count, i+1, goal)
+			// Alternate between Gemini 3.1 Pro High (Viết bài SEO) and Gemini 3.8 Flash High (Viết Code)
+			if i%2 == 0 {
+				workerModel = seoWriterModel
+				role = fmt.Sprintf("Sub-Agent #%d • Viết Bài SEO Chuyên Sâu (Gemini 3.1 Pro High)", i+1)
+				prompt = fmt.Sprintf("[Bài viết SEO mở rộng #%d/%d] Viết bài chuẩn SEO chuyên sâu triển khai khía cạnh số %d của dự án: %s%s", i+1, count, i+1, goal, planContext)
+			} else {
+				workerModel = codeFlashModel
+				role = fmt.Sprintf("Sub-Agent #%d • Code & Kỹ Thuật SEO (Gemini 3.8 Flash High)", i+1)
+				prompt = fmt.Sprintf("[Module Code & Kỹ thuật #%d/%d] Viết code & cấu hình kỹ thuật số %d cho dự án: %s%s", i+1, count, i+1, goal, planContext)
+			}
 		}
 		tasks = append(tasks, SubAgentTask{
 			Index:  i + 1,
 			Role:   role,
 			Prompt: prompt,
-			Model:  model,
+			Model:  workerModel,
 		})
 	}
 	return tasks
 }
 
-// ExecuteSubAgentSwarm launches N Sub-Agents in 100% parallel Goroutines, assigning each Sub-Agent to a distinct account in the pool.
+// ExecuteSubAgentSwarm runs a 2-tier Hierarchical Swarm:
+//   - Tier 1 (SEO & Project Manager): Uses Gemini 4 Argon High / Claude Opus 5.5 (Day) or Alibaba Qwen 3.8 Max ⚡40% Off (Night) to create the Master SEO & Technical Plan.
+//   - Tier 2 (50 Antigravity Pro Workers): Runs N Sub-Agents 100% simultaneously in parallel Goroutines using Gemini 3.1 Pro High (SEO Article Writing) & Gemini 3.8 Flash High (Coding).
 func (s *Server) ExecuteSubAgentSwarm(
 	ctx context.Context,
 	mode string,
@@ -253,10 +357,56 @@ func (s *Server) ExecuteSubAgentSwarm(
 	customTasks []SubAgentTask,
 ) SwarmRunSummary {
 	startWall := time.Now()
-	if strings.TrimSpace(defaultModel) == "" {
-		defaultModel = "antigravity/gemini-4-argon-high"
+	forceNight := strings.Contains(strings.ToLower(mode), "night") || strings.Contains(strings.ToLower(defaultModel), "qwen3.8-max")
+	managerChain, isNight := selectSEOProjectManagerChain(defaultModel, forceNight)
+
+	// STEP 0 (Tier 1): Lead SEO & Project Manager creates the Master Strategy & Task Brief
+	var managerModelUsed string
+	var managerAccountUsed string
+	var managerPlanText string
+	var managerTokens int
+
+	if strings.TrimSpace(masterGoal) != "" && len(customTasks) == 0 {
+		mgrSys := "Bạn là Quản Lý Dự Án SEO & Kiến Trúc Sư Trưởng (Lead SEO & Technical Project Manager). Hãy lập dàn ý chiến lược SEO ngắn gọn (Từ khóa trọng tâm, Search Intent, Cấu trúc bài viết cho đội Gemini 3.1 Pro High và Yêu cầu Code/Schema cho đội Gemini 3.8 Flash High) trong khoảng 150-250 từ."
+		rawMgrSys, _ := json.Marshal(mgrSys)
+		rawMgrUser, _ := json.Marshal(masterGoal)
+
+		for _, candMgrModel := range managerChain {
+			mgrResolved := s.resolver.Resolve(candMgrModel, s.cfg.FallbackModels)
+			mgrReq := OpenAIChatRequest{
+				Model: candMgrModel,
+				Messages: []OpenAIChatMessage{
+					{Role: "system", Content: rawMgrSys},
+					{Role: "user", Content: rawMgrUser},
+				},
+				MaxTokens: 700,
+				Stream:    false,
+			}
+			mgrCtx, cancelMgr := context.WithTimeout(ctx, 45*time.Second)
+			recMgr := newResponseRecorder()
+			errMgr := s.upstream.HandleChatCompletion(mgrCtx, recMgr, mgrReq, mgrResolved, "")
+			cancelMgr()
+
+			if errMgr == nil && recMgr.statusCode >= 200 && recMgr.statusCode < 300 {
+				txt, reas, toks := extractAssistantTextFromRecorder(recMgr, candMgrModel)
+				if strings.TrimSpace(txt) == "" {
+					txt = reas
+				}
+				if strings.TrimSpace(txt) != "" {
+					managerModelUsed = candMgrModel
+					managerAccountUsed = recMgr.Header().Get("X-Omni-Gateway-Account")
+					managerPlanText = txt
+					managerTokens = toks
+					break
+				}
+			}
+		}
+	}
+	if managerModelUsed == "" && len(managerChain) > 0 {
+		managerModelUsed = managerChain[0]
 	}
 
+	// STEP 1 (Tier 2): Build N Worker Sub-Agent Tasks for the 50 Antigravity Pro Pool
 	var tasks []SubAgentTask
 	if len(customTasks) > 0 {
 		for i, t := range customTasks {
@@ -267,8 +417,16 @@ func (s *Server) ExecuteSubAgentSwarm(
 			if strings.TrimSpace(t.Role) == "" {
 				t.Role = fmt.Sprintf("Sub-Agent #%d", i+1)
 			}
-			if strings.TrimSpace(t.Model) == "" {
-				t.Model = defaultModel
+			// Auto-assign Gemini 3.8 Flash High for code tasks and Gemini 3.1 Pro High for SEO writing tasks
+			if strings.TrimSpace(t.Model) == "" || t.Model == "auto-worker" {
+				lowerP := strings.ToLower(t.Prompt)
+				if strings.Contains(lowerP, "code") || strings.Contains(lowerP, "html") || strings.Contains(lowerP, "schema") || strings.Contains(lowerP, "api") || strings.Contains(lowerP, "script") {
+					t.Model = "antigravity/gemini-3.8-flash-high"
+					t.Role += " • Code (Gemini 3.8 Flash High)"
+				} else {
+					t.Model = "antigravity/gemini-3.1-pro-high"
+					t.Role += " • Viết Bài SEO (Gemini 3.1 Pro High)"
+				}
 			}
 			tasks = append(tasks, t)
 		}
@@ -276,8 +434,10 @@ func (s *Server) ExecuteSubAgentSwarm(
 			mode = "custom-tasks"
 		}
 	} else {
-		tasks = buildDefaultSubAgentTasks(masterGoal, agentCount, defaultModel)
-		mode = "auto-decompose"
+		tasks = buildDefaultSubAgentTasks(masterGoal, agentCount, mode, managerPlanText)
+		if mode == "" {
+			mode = "seo-and-code"
+		}
 	}
 
 	pool := listActiveAccountPool()
@@ -389,8 +549,11 @@ func (s *Server) ExecuteSubAgentSwarm(
 
 	wallMs := time.Since(startWall).Milliseconds()
 	succCount := 0
-	totalToks := 0
+	totalToks := managerTokens
 	uniqueAccs := make(map[string]bool)
+	if managerAccountUsed != "" {
+		uniqueAccs[strings.ToLower(managerAccountUsed)] = true
+	}
 	for _, r := range results {
 		if r.Status == "ok" {
 			succCount++
@@ -407,6 +570,12 @@ func (s *Server) ExecuteSubAgentSwarm(
 		Mode:             mode,
 		MasterGoal:       masterGoal,
 		Model:            defaultModel,
+		ManagerModel:     managerModelUsed,
+		ManagerAccount:   managerAccountUsed,
+		ManagerPlan:      managerPlanText,
+		ContentModel:     "antigravity/gemini-3.1-pro-high",
+		CodingModel:      "antigravity/gemini-3.8-flash-high",
+		IsNightMode:      isNight,
 		TotalSubAgents:   len(results),
 		SuccessCount:     succCount,
 		DistinctAccounts: len(uniqueAccs),
@@ -543,6 +712,11 @@ func (s *Server) handleSubAgents(w http.ResponseWriter, r *http.Request) {
 			"antigravity_accounts": agyCount,
 			"ready_accounts":       readyCount,
 			"max_parallel_target":  50,
+			"is_night_mode":        isVietnamNightHours(),
+			"day_manager_models":   []string{"antigravity/gemini-4-argon-high", "claude-code/claude-opus-5-5"},
+			"night_manager_model":  "alibaba/qwen3.8-max",
+			"seo_writer_model":     "antigravity/gemini-3.1-pro-high",
+			"coding_worker_model":  "antigravity/gemini-3.8-flash-high",
 			"active_sub_agents":    atomic.LoadInt64(&activeSubAgentsNow),
 			"total_sub_agents_run": atomic.LoadInt64(&totalSubAgentsRun),
 			"account_slots":        slots,
@@ -592,3 +766,4 @@ func (s *Server) handleSubAgents(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusMethodNotAllowed, "method not allowed", "invalid_request_error")
 	}
 }
+

@@ -287,8 +287,33 @@ func (u *GatewayUpstream) executeComboPipeline(
 	step2Req.Messages = step2Messages
 	step2Req.Stream = false
 
-	for i := step1Idx + 1; i < len(targets); i++ {
-		candidate := targets[i]
+	step2Candidates := targets[step1Idx+1:]
+	if strings.EqualFold(resolved.CanonicalID, "auto/seo-master") {
+		lastPrompt := ""
+		if len(req.Messages) > 0 {
+			lastPrompt = strings.ToLower(req.Messages[len(req.Messages)-1].ContentText())
+		}
+		isCodeTask := strings.Contains(lastPrompt, "code") ||
+			strings.Contains(lastPrompt, "html") ||
+			strings.Contains(lastPrompt, "schema") ||
+			strings.Contains(lastPrompt, "script") ||
+			strings.Contains(lastPrompt, "api") ||
+			strings.Contains(lastPrompt, "css") ||
+			strings.Contains(lastPrompt, "plugin")
+		if isCodeTask {
+			step2Candidates = []ResolvedModel{
+				ResolveModel("antigravity/gemini-3.8-flash-high", nil),
+				ResolveModel("antigravity/gemini-3.1-pro-high", nil),
+			}
+		} else {
+			step2Candidates = []ResolvedModel{
+				ResolveModel("antigravity/gemini-3.1-pro-high", nil),
+				ResolveModel("antigravity/gemini-3.8-flash-high", nil),
+			}
+		}
+	}
+
+	for _, candidate := range step2Candidates {
 		if strings.EqualFold(candidate.CanonicalID, step1Target.CanonicalID) {
 			continue
 		}
