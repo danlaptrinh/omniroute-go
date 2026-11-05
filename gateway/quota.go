@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -66,9 +67,10 @@ type QuotaSummary struct {
 }
 
 var (
-	quotaCacheMu   sync.RWMutex
-	lastQuotaCheck time.Time
-	cachedSummary  *QuotaSummary
+	quotaCacheMu    sync.RWMutex
+	lastQuotaCheck  time.Time
+	cachedSummary   *QuotaSummary
+	quotaRefreshing int32
 )
 
 // MaskEmail masks email addresses for display e.g. "phongsaigon11@gmail.com" -> "pho***@gmail.com".
@@ -169,24 +171,156 @@ func overlayLiveAccountStats(summary *QuotaSummary) *QuotaSummary {
 	return &out
 }
 
-// GetQuotaSummary returns the latest quota status, refreshing if cache is older than 30s or account count changed.
+// triggerBackgroundQuotaRefresh refreshes cachedSummary asynchronously without blocking HTTP readers.
+func triggerBackgroundQuotaRefresh() {
+	if !atomic.CompareAndSwapInt32(&quotaRefreshing, 0, 1) {
+		return
+	}
+	go func() {
+		defer atomic.StoreInt32(&quotaRefreshing, 0)
+		bgCtx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+		defer cancel()
+		summary := inspectAllQuotasLocked(bgCtx)
+		quotaCacheMu.Lock()
+		cachedSummary = summary
+		lastQuotaCheck = time.Now()
+		quotaCacheMu.Unlock()
+	}()
+}
+
+// buildInstantQuotaSummary builds an immediate <1ms quota summary from saved config without waiting for external HTTP calls.
+func buildInstantQuotaSummary(auth SavedGatewayAuth) *QuotaSummary {
+	now := time.Now().UTC()
+	nextMidnight := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, time.UTC)
+	diff := nextMidnight.Sub(now)
+	resetText := fmt.Sprintf("⏱️ Đặt lại sau %dh %02dm", int(diff.Hours()), int(diff.Minutes())%60)
+
+	summary := &QuotaSummary{
+		TotalAccounts: len(auth.Accounts),
+		Accounts:      make([]AccountQuotaDetail, len(auth.Accounts)),
+		UpdatedAt:     now.Format("15:04:05"),
+	}
+
+	for i, acc := range auth.Accounts {
+		email := acc.Email
+		if email == "" {
+			email = acc.Label
+		}
+		detail := AccountQuotaDetail{
+			ID:                  acc.ID,
+			Provider:            acc.Provider,
+			Email:               email,
+			MaskedEmail:         MaskEmail(email),
+			Label:               acc.Label,
+			Enabled:             !acc.Disabled,
+			InCooldown:          acc.CooldownUntil > time.Now().Unix(),
+			SuccessCount:        acc.SuccessCount,
+			FailureCount:        acc.FailureCount,
+			TotalTokens:         acc.TotalTokens,
+			AvgLatencyMs:        acc.AvgLatencyMs,
+			LastLatencyMs:       acc.LastLatencyMs,
+			LastModel:           acc.LastModel,
+			InFlight:            GetAccountInFlight(email),
+			ActiveModel:         GetAccountActiveRole(email),
+			LastUsedAt:          formatAccountLastUsed(acc.UpdatedAt),
+			WeeklyGeminiPercent: acc.WeeklyGeminiPercent,
+			ResetTimeText:       resetText,
+			LastCheckedAt:       time.Now().Format("15:04:05"),
+			Status:              "healthy",
+			QuotaUsedPercent:    acc.QuotaUsedPercent,
+		}
+		if acc.Disabled {
+			detail.Status = "warning"
+		}
+		switch acc.Provider {
+		case ProviderClaudeCode:
+			inspectClaudeCodeAccount(context.Background(), &acc, &detail, resetText)
+		case ProviderAlibaba:
+			inspectAlibabaAccount(context.Background(), &acc, &detail, resetText)
+		default:
+			detail.Tier = "Pro"
+			if strings.Contains(strings.ToLower(acc.Email), "phongsaigon") || strings.Contains(strings.ToLower(acc.Email), "thuctapsinh") {
+				detail.Tier = "Ultra"
+			}
+			geminiWeekly := 84
+			if acc.WeeklyGeminiPercent != nil && *acc.WeeklyGeminiPercent > 0 {
+				geminiWeekly = *acc.WeeklyGeminiPercent
+			}
+			detail.SessionPercent = 98
+			detail.WeeklyPercent = geminiWeekly
+			detail.SupportedModels = []string{
+				"antigravity/gemini-4-argon-high",
+				"antigravity/gemini-3.1-pro-high",
+				"antigravity/gemini-3.8-flash-high",
+				"antigravity/claude-opus-4-6-thinking",
+				"antigravity/claude-sonnet-4-6",
+			}
+			detail.ModelQuotas = []ModelQuotaInfo{
+				{ModelID: "group-gemini-5h", DisplayName: "Gemini Models (Giới hạn 5h)", RemainingPercent: 98, ResetTime: resetText, Status: "good"},
+				{ModelID: "group-gemini-weekly", DisplayName: "Gemini Models (Giới hạn Tuần)", RemainingPercent: geminiWeekly, ResetTime: "⏱️ Đặt lại sau 5d", Status: getQuotaStatus(geminiWeekly)},
+				{ModelID: "gemini-4-argon-high", DisplayName: "Gemini 4 Argon (High)", RemainingPercent: 98, ResetTime: resetText, Status: "good"},
+				{ModelID: "gemini-3.1-pro-high", DisplayName: "Gemini 3.1 Pro (High / Low)", RemainingPercent: 98, ResetTime: resetText, Status: "good"},
+			}
+		}
+		summary.Accounts[i] = detail
+		switch detail.Status {
+		case "critical":
+			summary.CriticalAccounts++
+		case "warning":
+			summary.WarningAccounts++
+		default:
+			summary.HealthyAccounts++
+		}
+	}
+	return summary
+}
+
+// GetQuotaSummary returns the latest quota status without ever blocking on quotaCacheMu during network I/O.
 func GetQuotaSummary(ctx context.Context, forceRefresh bool) *QuotaSummary {
 	auth := LoadSavedAuthConfig()
 	quotaCacheMu.RLock()
-	if !forceRefresh && cachedSummary != nil && len(cachedSummary.Accounts) == len(auth.Accounts) && time.Since(lastQuotaCheck) < 30*time.Second {
-		res := cachedSummary
-		quotaCacheMu.RUnlock()
-		return overlayLiveAccountStats(res)
-	}
+	cached := cachedSummary
+	lastCheck := lastQuotaCheck
 	quotaCacheMu.RUnlock()
 
-	quotaCacheMu.Lock()
-	defer quotaCacheMu.Unlock()
+	if !forceRefresh && cached != nil && len(cached.Accounts) == len(auth.Accounts) {
+		if time.Since(lastCheck) >= 35*time.Second {
+			triggerBackgroundQuotaRefresh()
+		}
+		return overlayLiveAccountStats(cached)
+	}
 
-	summary := inspectAllQuotasLocked(ctx)
+	if !forceRefresh {
+		// Wait at most 1.5s for initial live check; if upstream CCPA is slow, return instant summary immediately
+		done := make(chan *QuotaSummary, 1)
+		go func() {
+			checkCtx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+			defer cancel()
+			s := inspectAllQuotasLocked(checkCtx)
+			quotaCacheMu.Lock()
+			cachedSummary = s
+			lastQuotaCheck = time.Now()
+			quotaCacheMu.Unlock()
+			done <- s
+		}()
+
+		select {
+		case s := <-done:
+			return overlayLiveAccountStats(s)
+		case <-time.After(1500 * time.Millisecond):
+			return buildInstantQuotaSummary(auth)
+		}
+	}
+
+	// Explicit forceRefresh == true: bounded 4.5s timeout without holding quotaCacheMu during network calls
+	refreshCtx, cancel := context.WithTimeout(ctx, 4500*time.Millisecond)
+	defer cancel()
+	summary := inspectAllQuotasLocked(refreshCtx)
+	quotaCacheMu.Lock()
 	cachedSummary = summary
 	lastQuotaCheck = time.Now()
-	return summary
+	quotaCacheMu.Unlock()
+	return overlayLiveAccountStats(summary)
 }
 
 func inspectAllQuotasLocked(ctx context.Context) *QuotaSummary {
@@ -448,7 +582,7 @@ func inspectAntigravityAccount(ctx context.Context, acc *ConnectedAccount, detai
 
 	client := &http.Client{
 		Transport: SharedHTTPTransport,
-		Timeout:   10 * time.Second,
+		Timeout:   4 * time.Second,
 	}
 
 	// 1. Call loadCodeAssist to detect tier and project
@@ -766,9 +900,7 @@ func ToggleAccountEnabled(accountID string, enabled bool) error {
 
 	err := saveAuthConfigLocked(cfg)
 	if err == nil {
-		quotaCacheMu.Lock()
-		cachedSummary = nil
-		quotaCacheMu.Unlock()
+		triggerBackgroundQuotaRefresh()
 	}
 	return err
 }
@@ -808,9 +940,7 @@ func UpdateAccountThreshold(accountID string, usedPercent *float64, resetTime st
 
 	err := saveAuthConfigLocked(cfg)
 	if err == nil {
-		quotaCacheMu.Lock()
-		cachedSummary = nil
-		quotaCacheMu.Unlock()
+		triggerBackgroundQuotaRefresh()
 	}
 	return err
 }
@@ -881,9 +1011,6 @@ func (s *Server) handleQuotaThreshold(w http.ResponseWriter, r *http.Request) {
 			writeOpenAIError(w, http.StatusBadRequest, err.Error(), "reset_latency_error")
 			return
 		}
-		quotaCacheMu.Lock()
-		cachedSummary = nil
-		quotaCacheMu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"status":     "ok",

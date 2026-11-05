@@ -33,17 +33,22 @@ var (
 	pgVectorExtension bool
 )
 
+// defaultVectorDBConfig returns the default VectorDBConfig without acquiring configMu.
+func defaultVectorDBConfig() VectorDBConfig {
+	return VectorDBConfig{
+		Enabled:          true,
+		AutoLearnPrompts: true,
+		AutoInjectRAG:    true,
+		TopK:             DefaultVectorTopK,
+		MinSimilarity:    DefaultMinSimilarity,
+	}
+}
+
 // GetVectorDBConfig returns the active VectorDBConfig with sensible defaults enabled by default.
 func GetVectorDBConfig() VectorDBConfig {
 	cfg := LoadSavedAuthConfig()
 	if cfg.VectorDBConfig == nil {
-		return VectorDBConfig{
-			Enabled:          true,
-			AutoLearnPrompts: true,
-			AutoInjectRAG:    true,
-			TopK:             DefaultVectorTopK,
-			MinSimilarity:    DefaultMinSimilarity,
-		}
+		return defaultVectorDBConfig()
 	}
 	vc := *cfg.VectorDBConfig
 	if vc.TopK <= 0 || vc.TopK > 10 {
@@ -79,7 +84,7 @@ func incrementVectorRAGHits() {
 	defer configMu.Unlock()
 	cfg := loadSavedAuthConfigLocked()
 	if cfg.VectorDBConfig == nil {
-		vc := GetVectorDBConfig()
+		vc := defaultVectorDBConfig()
 		cfg.VectorDBConfig = &vc
 	}
 	cfg.VectorDBConfig.TotalRAGHits++

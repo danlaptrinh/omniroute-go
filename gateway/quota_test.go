@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -106,4 +107,31 @@ func TestInspectClaudeCodeAccount(t *testing.T) {
 		t.Errorf("expected 100%%, got %d", detail.ModelQuotas[0].RemainingPercent)
 	}
 }
+
+func TestIncrementVectorRAGHitsNoDeadlockAndFastQuotaSummary(t *testing.T) {
+	tmpCfg := filepath.Join(t.TempDir(), "gateway_config.json")
+	t.Setenv("GATEWAY_CONFIG_FILE", tmpCfg)
+
+	// Ensure incrementVectorRAGHits never deadlocks even when VectorDBConfig was nil on disk
+	done := make(chan struct{})
+	go func() {
+		incrementVectorRAGHits()
+		vc := GetVectorDBConfig()
+		if vc.TotalRAGHits < 1 {
+			t.Errorf("expected TotalRAGHits >= 1, got %d", vc.TotalRAGHits)
+		}
+		summary := GetQuotaSummary(context.Background(), false)
+		if summary == nil {
+			t.Errorf("expected non-nil QuotaSummary")
+		}
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("incrementVectorRAGHits or GetQuotaSummary deadlocked!")
+	}
+}
+
 

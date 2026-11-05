@@ -2058,9 +2058,10 @@ docker compose up -d --build</pre>
 
       if (recentBox) {
         try {
-          const lr = await fetch('/v1/logs');
+          const lr = await fetch('/v1/logs?limit=5');
           const ld = await lr.json();
-          const entries = (ld && ld.entries) ? ld.entries.slice(0, 5) : [];
+          const rawList = (ld && (ld.data || ld.entries)) ? (ld.data || ld.entries) : [];
+          const entries = rawList.slice(0, 5);
           if (entries.length === 0) {
             recentBox.innerHTML = 'Chưa có lịch sử gọi model nào gần đây.';
           } else {
@@ -2094,7 +2095,7 @@ docker compose up -d --build</pre>
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({action: 'reset_latency', account_id: accId || 'all'})
         });
-        loadQuotaSummary(true);
+        loadQuotaSummary(false);
       } catch (e) {
         alert('Lỗi reset độ trễ: ' + e.message);
       }

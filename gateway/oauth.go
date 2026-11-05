@@ -52,6 +52,11 @@ var (
 	cachedAuthMtime   time.Time
 	asyncFlushPending bool
 
+	oauthHTTPClient = &http.Client{
+		Transport: SharedHTTPTransport,
+		Timeout:   8 * time.Second,
+	}
+
 	rrMu       sync.Mutex
 	rrCounters = make(map[ProviderID]uint64)
 )
@@ -154,6 +159,9 @@ func cloneAuthConfig(src SavedGatewayAuth) SavedGatewayAuth {
 
 func loadSavedAuthConfigLocked() SavedGatewayAuth {
 	path := GatewayConfigFilePath()
+	if cachedAuthCfg != nil && cachedAuthPath == path && asyncFlushPending {
+		return cloneAuthConfig(*cachedAuthCfg)
+	}
 	info, statErr := os.Stat(path)
 	if statErr == nil && cachedAuthCfg != nil && cachedAuthPath == path && info.ModTime().Equal(cachedAuthMtime) {
 		return cloneAuthConfig(*cachedAuthCfg)
@@ -182,9 +190,13 @@ func loadSavedAuthConfigLocked() SavedGatewayAuth {
 	}
 	if cfg.EndpointConfig == nil {
 		cfg.EndpointConfig = &EndpointConfig{
-			PublicURL:    "https://omni.huongque.com/v1",
+			PublicURL:    "https://omni.bucloud.vip/v1",
 			CloudEnabled: true,
 		}
+	}
+	if cfg.VectorDBConfig == nil {
+		vc := defaultVectorDBConfig()
+		cfg.VectorDBConfig = &vc
 	}
 	for i := range cfg.Accounts {
 		if cfg.Accounts[i].Provider == "" {
@@ -443,7 +455,7 @@ func ExchangeOAuthInput(ctx context.Context, rawInput string, defaultRedirectURI
 	}
 	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	resp, err := http.DefaultClient.Do(httpReq)
+	resp, err := oauthHTTPClient.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("oauth token exchange transport error: %w", err)
 	}
@@ -478,7 +490,7 @@ func ExchangeOAuthInput(ctx context.Context, rawInput string, defaultRedirectURI
 	infoReq, err := http.NewRequestWithContext(ctx, http.MethodGet, OAuthUserInfoEndpoint, nil)
 	if err == nil {
 		infoReq.Header.Set("Authorization", "Bearer "+tokenResp.AccessToken)
-		if infoResp, err := http.DefaultClient.Do(infoReq); err == nil {
+		if infoResp, err := oauthHTTPClient.Do(infoReq); err == nil {
 			defer infoResp.Body.Close()
 			var userInfo struct {
 				Email string `json:"email"`
@@ -498,7 +510,7 @@ func ExchangeOAuthInput(ctx context.Context, rawInput string, defaultRedirectURI
 			ccpaReq.Header.Set("Authorization", "Bearer "+tokenResp.AccessToken)
 			ccpaReq.Header.Set("User-Agent", AgyUserAgent)
 			ccpaReq.Header.Set("Content-Type", "application/json")
-			if ccpaResp, err := http.DefaultClient.Do(ccpaReq); err == nil {
+			if ccpaResp, err := oauthHTTPClient.Do(ccpaReq); err == nil {
 				defer ccpaResp.Body.Close()
 				if ccpaResp.StatusCode < 400 {
 					var projData struct {
@@ -678,7 +690,7 @@ func ExchangeClaudeInput(ctx context.Context, rawInput string, verifier string, 
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "application/json")
 
-	resp, err := http.DefaultClient.Do(httpReq)
+	resp, err := oauthHTTPClient.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("claude oauth transport error: %w", err)
 	}
@@ -757,7 +769,7 @@ func RefreshAntigravityToken(ctx context.Context, acc *ConnectedAccount) error {
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := oauthHTTPClient.Do(req)
 	if err != nil {
 		return err
 	}
