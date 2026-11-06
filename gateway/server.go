@@ -26,11 +26,13 @@ type Server struct {
 
 // NewServer constructs a new OmniRoute-Go HTTP server.
 func NewServer(cfg GatewayConfig, resolver ModelResolver, upstream UpstreamHandler) *Server {
-	return &Server{
+	s := &Server{
 		cfg:      cfg,
 		resolver: resolver,
 		upstream: upstream,
 	}
+	s.StartAutomationScheduler()
+	return s
 }
 
 // Handler returns the root http.Handler with CORS and GZIP middleware applied.

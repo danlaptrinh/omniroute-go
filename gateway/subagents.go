@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,10 +22,13 @@ var (
 	accountInFlight   = make(map[string]int)
 	accountActiveRole = make(map[string]string)
 
-	swarmHistoryMu     sync.RWMutex
-	recentSwarmRuns    []SwarmRunSummary
-	totalSubAgentsRun  int64
-	activeSubAgentsNow int64
+	swarmHistoryMu       sync.RWMutex
+	recentSwarmRuns      []SwarmRunSummary
+	scheduledAutomations []ScheduledAutomation
+	vaultLoadedFromDisk  bool
+	automationScheduler  int32
+	totalSubAgentsRun    int64
+	activeSubAgentsNow   int64
 )
 
 // WithPinnedAccount attaches a specific account email/ID to ctx so SelectProviderAccount binds 1-to-1 to that account.
@@ -121,37 +127,140 @@ type SubAgentTask struct {
 
 // SubAgentResult holds the execution result of a single Sub-Agent worker.
 type SubAgentResult struct {
-	Index         int    `json:"index"`
-	Role          string `json:"role"`
-	Prompt        string `json:"prompt"`
-	AccountEmail  string `json:"account_email"`
-	ResolvedModel string `json:"resolved_model"`
-	Status        string `json:"status"` // "ok" or "error"
-	LatencyMs     int64  `json:"latency_ms"`
-	Tokens        int    `json:"tokens"`
-	Output        string `json:"output"`
-	Error         string `json:"error,omitempty"`
+	Index           int    `json:"index"`
+	Role            string `json:"role"`
+	Prompt          string `json:"prompt"`
+	AccountEmail    string `json:"account_email"`
+	FailoverFrom    string `json:"failover_from,omitempty"`
+	WatchdogRetried bool   `json:"watchdog_retried,omitempty"`
+	ResolvedModel   string `json:"resolved_model"`
+	Status          string `json:"status"` // "ok" or "error"
+	LatencyMs       int64  `json:"latency_ms"`
+	Tokens          int    `json:"tokens"`
+	Output          string `json:"output"`
+	Error           string `json:"error,omitempty"`
 }
 
 // SwarmRunSummary records a completed parallel Sub-Agent Swarm execution.
 type SwarmRunSummary struct {
-	ID               string           `json:"id"`
-	Timestamp        string           `json:"timestamp"`
-	Mode             string           `json:"mode"` // "seo-project", "coding-project", or "custom-tasks"
-	MasterGoal       string           `json:"master_goal,omitempty"`
-	ManagerModel     string           `json:"manager_model,omitempty"`
-	ManagerAccount   string           `json:"manager_account,omitempty"`
-	ManagerPlan      string           `json:"manager_plan,omitempty"`
-	ContentModel     string           `json:"content_model,omitempty"`
-	CodingModel      string           `json:"coding_model,omitempty"`
-	IsNightMode      bool             `json:"is_night_mode"`
-	Model            string           `json:"model"`
-	TotalSubAgents   int              `json:"total_sub_agents"`
-	SuccessCount     int              `json:"success_count"`
-	DistinctAccounts int              `json:"distinct_accounts"`
-	TotalWallTimeMs  int64            `json:"total_wall_time_ms"`
-	TotalTokens      int              `json:"total_tokens"`
-	Results          []SubAgentResult `json:"results"`
+	ID                string           `json:"id"`
+	Timestamp         string           `json:"timestamp"`
+	Mode              string           `json:"mode"` // "seo-project", "coding-project", or "custom-tasks"
+	MasterGoal        string           `json:"master_goal,omitempty"`
+	ManagerModel      string           `json:"manager_model,omitempty"`
+	ManagerAccount    string           `json:"manager_account,omitempty"`
+	ManagerPlan       string           `json:"manager_plan,omitempty"`
+	SharedLinkMatrix  string           `json:"shared_link_matrix,omitempty"`
+	ContentModel      string           `json:"content_model,omitempty"`
+	CodingModel       string           `json:"coding_model,omitempty"`
+	IsNightMode       bool             `json:"is_night_mode"`
+	Model             string           `json:"model"`
+	TotalSubAgents    int              `json:"total_sub_agents"`
+	SuccessCount      int              `json:"success_count"`
+	WatchdogFailovers int              `json:"watchdog_failovers"`
+	DistinctAccounts  int              `json:"distinct_accounts"`
+	TotalWallTimeMs   int64            `json:"total_wall_time_ms"`
+	TotalTokens       int              `json:"total_tokens"`
+	EstimatedValueUSD float64          `json:"estimated_value_usd"`
+	Results           []SubAgentResult `json:"results"`
+}
+
+// ScheduledAutomation represents an Orca-style scheduled background Sub-Agent campaign (e.g., Night 40%-50% Off SEO & Code runs).
+type ScheduledAutomation struct {
+	ID             string `json:"id"`
+	Name           string `json:"name"`
+	MasterGoal     string `json:"master_goal"`
+	Mode           string `json:"mode"`            // "seo-and-code", "content-only", "coding-only"
+	AgentCount     int    `json:"agent_count"`     // 1..50
+	Model          string `json:"model,omitempty"`
+	ScheduleWindow string `json:"schedule_window"` // "nightly_21h", "night-22h", "interval_6h", "interval_12h"
+	Enabled        bool   `json:"enabled"`
+	NextRunUnix    int64  `json:"next_run_unix"`
+	LastRunAt      string `json:"last_run_at,omitempty"`
+	LastRunID      string `json:"last_run_id,omitempty"`
+	LastStatus     string `json:"last_status,omitempty"`
+	TotalRuns      int    `json:"total_runs"`
+	CreatedAt      string `json:"created_at"`
+}
+
+type subAgentVaultDisk struct {
+	Runs        []SwarmRunSummary     `json:"runs"`
+	Automations []ScheduledAutomation `json:"automations"`
+	UpdatedAt   string                `json:"updated_at"`
+}
+
+// SubAgentVaultFilePath returns the path to the persistent AI vault JSON file.
+func SubAgentVaultFilePath() string {
+	base := GatewayConfigFilePath()
+	return filepath.Join(filepath.Dir(base), "omni_subagent_vault.json")
+}
+
+func defaultSeededAutomations() []ScheduledAutomation {
+	loc := time.FixedZone("ICT", 7*3600)
+	vnNow := time.Now().In(loc)
+	next22 := time.Date(vnNow.Year(), vnNow.Month(), vnNow.Day(), 22, 0, 0, 0, loc)
+	if !next22.After(vnNow) {
+		next22 = next22.Add(24 * time.Hour)
+	}
+	return []ScheduledAutomation{
+		{
+			ID:             "auto-night-seo-default",
+			Name:           "🌙 Chiến Dịch SEO & Code Ban Đêm (⚡ 40% Off Qwen 3.8 Max + Antigravity Pro)",
+			MasterGoal:     "Triển khai bộ bài viết Pillar & Cluster chuẩn SEO kèm Schema JSON-LD tối ưu chuyển đổi cho dự án trọng điểm",
+			Mode:           "seo-and-code",
+			AgentCount:     6,
+			Model:          "alibaba/qwen3.8-max",
+			ScheduleWindow: "night-22h",
+			Enabled:        false,
+			NextRunUnix:    next22.Unix(),
+			LastStatus:     "Sẵn sàng (Bấm Bật hoặc Chạy Ngay)",
+			CreatedAt:      time.Now().Format("15:04:05 02/01/2006"),
+		},
+	}
+}
+
+func ensureSubAgentVaultLoadedLocked() {
+	if vaultLoadedFromDisk {
+		return
+	}
+	vaultLoadedFromDisk = true
+	path := SubAgentVaultFilePath()
+	data, err := os.ReadFile(path)
+	if err == nil {
+		var disk subAgentVaultDisk
+		if json.Unmarshal(data, &disk) == nil {
+			if len(disk.Runs) > 0 {
+				recentSwarmRuns = disk.Runs
+			}
+			if len(disk.Automations) > 0 {
+				scheduledAutomations = disk.Automations
+			}
+		}
+	}
+	if len(scheduledAutomations) == 0 {
+		scheduledAutomations = defaultSeededAutomations()
+	}
+}
+
+func saveSubAgentVaultAsyncLocked() {
+	runsCopy := make([]SwarmRunSummary, len(recentSwarmRuns))
+	copy(runsCopy, recentSwarmRuns)
+	autoCopy := make([]ScheduledAutomation, len(scheduledAutomations))
+	copy(autoCopy, scheduledAutomations)
+	targetPath := SubAgentVaultFilePath()
+
+	go func() {
+		disk := subAgentVaultDisk{
+			Runs:        runsCopy,
+			Automations: autoCopy,
+			UpdatedAt:   time.Now().UTC().Format(time.RFC3339),
+		}
+		if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err == nil {
+			if raw, err := json.MarshalIndent(disk, "", "  "); err == nil {
+				_ = os.WriteFile(targetPath, raw, 0600)
+			}
+		}
+	}()
 }
 
 // AccountSlotStatus represents one account slot in the 50-Account Sub-Agent Pool matrix.
@@ -360,14 +469,15 @@ func (s *Server) ExecuteSubAgentSwarm(
 	forceNight := strings.Contains(strings.ToLower(mode), "night") || strings.Contains(strings.ToLower(defaultModel), "qwen3.8-max")
 	managerChain, isNight := selectSEOProjectManagerChain(defaultModel, forceNight)
 
-	// STEP 0 (Tier 1): Lead SEO & Project Manager creates the Master Strategy & Task Brief
+	// STEP 0 (Tier 1): Lead SEO & Project Manager creates the Master Strategy & Shared Internal Link Matrix (Orca Inter-Agent Mailbox)
 	var managerModelUsed string
 	var managerAccountUsed string
 	var managerPlanText string
+	var sharedLinkMatrix string
 	var managerTokens int
 
 	if strings.TrimSpace(masterGoal) != "" && len(customTasks) == 0 {
-		mgrSys := "Bạn là Quản Lý Dự Án SEO & Kiến Trúc Sư Trưởng (Lead SEO & Technical Project Manager). Hãy lập dàn ý chiến lược SEO ngắn gọn (Từ khóa trọng tâm, Search Intent, Cấu trúc bài viết cho đội Gemini 3.1 Pro High và Yêu cầu Code/Schema cho đội Gemini 3.8 Flash High) trong khoảng 150-250 từ."
+		mgrSys := "Bạn là Quản Lý Dự Án SEO & Kiến Trúc Sư Trưởng (Lead SEO & Technical Project Manager). Hãy lập: (1) Dàn ý chiến lược SEO tổng thể (Từ khóa chính/LSI, Search Intent, định hướng cho đội Gemini 3.1 Pro High viết bài & đội Gemini 3.8 Flash High viết code), và (2) Sơ Đồ Liên Kết Nội Bộ Chéo (SHARED INTERNAL LINK MATRIX: danh sách 5-8 cặp Anchor Text ➔ URL Slug gợi ý để tất cả các bài viết của các Sub-Agents tự động chèn link chéo cho nhau không trùng lặp). Trình bày súc tích trong khoảng 180-280 từ."
 		rawMgrSys, _ := json.Marshal(mgrSys)
 		rawMgrUser, _ := json.Marshal(masterGoal)
 
@@ -396,6 +506,7 @@ func (s *Server) ExecuteSubAgentSwarm(
 					managerModelUsed = candMgrModel
 					managerAccountUsed = recMgr.Header().Get("X-Omni-Gateway-Account")
 					managerPlanText = txt
+					sharedLinkMatrix = fmt.Sprintf("Hộp thư Liên Kết Nội Bộ Chung (Inter-Agent Mailbox • %d Workers): Sử dụng thống nhất hệ thống Slug & Anchor Text trong bản kế hoạch của Quản Lý Dự Án (%s) để liên kết chéo giữa bài Pillar, bài Cluster và Schema JSON-LD.", agentCount, candMgrModel)
 					managerTokens = toks
 					break
 				}
@@ -443,6 +554,7 @@ func (s *Server) ExecuteSubAgentSwarm(
 	pool := listActiveAccountPool()
 	results := make([]SubAgentResult, len(tasks))
 	var wg sync.WaitGroup
+	var watchdogFailoversCount int32
 
 	for i, task := range tasks {
 		wg.Add(1)
@@ -458,11 +570,6 @@ func (s *Server) ExecuteSubAgentSwarm(
 			atomic.AddInt64(&totalSubAgentsRun, 1)
 			defer atomic.AddInt64(&activeSubAgentsNow, -1)
 
-			if assignedEmail != "" {
-				AcquireAccountInFlightWithRole(assignedEmail, t.Role)
-				defer ReleaseAccountInFlight(assignedEmail)
-			}
-
 			tStart := time.Now()
 			modelID := strings.TrimSpace(t.Model)
 			if modelID == "" {
@@ -470,7 +577,7 @@ func (s *Server) ExecuteSubAgentSwarm(
 			}
 			resolved := s.resolver.Resolve(modelID, s.cfg.FallbackModels)
 
-			sysText := fmt.Sprintf("Bạn là %s trong Đàn Sub-Agents Song Song của OmniRoute-Go. Hãy trả lời ngắn gọn, súc tích, đi thẳng vào giải pháp kỹ thuật/code trọng tâm.", t.Role)
+			sysText := fmt.Sprintf("Bạn là %s trong Đàn Sub-Agents Song Song của OmniRoute-Go. Hãy trả lời súc tích, chuyên sâu, đi thẳng vào nội dung bài viết chuẩn SEO (kèm chèn Internal Link theo Sơ đồ chung) hoặc giải pháp code trọng tâm.", t.Role)
 			rawSys, _ := json.Marshal(sysText)
 			rawUser, _ := json.Marshal(t.Prompt)
 
@@ -484,14 +591,42 @@ func (s *Server) ExecuteSubAgentSwarm(
 				Stream:    false,
 			}
 
-			subCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
-			defer cancel()
-			if assignedEmail != "" {
-				subCtx = WithPinnedAccount(subCtx, assignedEmail)
+			runAttempt := func(targetAccount string, timeout time.Duration) (*responseRecorder, error) {
+				if targetAccount != "" {
+					AcquireAccountInFlightWithRole(targetAccount, t.Role)
+					defer ReleaseAccountInFlight(targetAccount)
+				}
+				attCtx, cancel := context.WithTimeout(ctx, timeout)
+				defer cancel()
+				if targetAccount != "" {
+					attCtx = WithPinnedAccount(attCtx, targetAccount)
+				}
+				r := newResponseRecorder()
+				err := s.upstream.HandleChatCompletion(attCtx, r, chatReq, resolved, "")
+				return r, err
 			}
 
-			rec := newResponseRecorder()
-			err := s.upstream.HandleChatCompletion(subCtx, rec, chatReq, resolved, "")
+			// Primary Attempt with Orca Hang Watchdog (55s stall fence)
+			rec, err := runAttempt(assignedEmail, 55*time.Second)
+			watchdogRetried := false
+			failoverFrom := ""
+
+			// If primary account stalled, timed out, or returned an error, Orca Watchdog fences it and fails over to another account in the pool!
+			if (err != nil || rec.statusCode >= 400) && len(pool) > 1 && ctx.Err() == nil {
+				altEmail := pool[(idx+1)%len(pool)].Email
+				if !strings.EqualFold(altEmail, assignedEmail) {
+					watchdogRetried = true
+					failoverFrom = assignedEmail
+					atomic.AddInt32(&watchdogFailoversCount, 1)
+					rec2, err2 := runAttempt(altEmail, 65*time.Second)
+					if err2 == nil && rec2.statusCode < 400 {
+						rec = rec2
+						err = nil
+						assignedEmail = altEmail
+					}
+				}
+			}
+
 			lat := time.Since(tStart).Milliseconds()
 
 			actualAcc := rec.Header().Get("X-Omni-Gateway-Account")
@@ -511,14 +646,16 @@ func (s *Server) ExecuteSubAgentSwarm(
 					errMsg = fmt.Sprintf("HTTP %d: %s", rec.statusCode, strings.TrimSpace(rec.body.String()))
 				}
 				results[idx] = SubAgentResult{
-					Index:         t.Index,
-					Role:          t.Role,
-					Prompt:        t.Prompt,
-					AccountEmail:  actualAcc,
-					ResolvedModel: actualModel,
-					Status:        "error",
-					LatencyMs:     lat,
-					Error:         errMsg,
+					Index:           t.Index,
+					Role:            t.Role,
+					Prompt:          t.Prompt,
+					AccountEmail:    actualAcc,
+					FailoverFrom:    failoverFrom,
+					WatchdogRetried: watchdogRetried,
+					ResolvedModel:   actualModel,
+					Status:          "error",
+					LatencyMs:       lat,
+					Error:           errMsg,
 				}
 				return
 			}
@@ -532,15 +669,17 @@ func (s *Server) ExecuteSubAgentSwarm(
 			}
 
 			results[idx] = SubAgentResult{
-				Index:         t.Index,
-				Role:          t.Role,
-				Prompt:        t.Prompt,
-				AccountEmail:  actualAcc,
-				ResolvedModel: actualModel,
-				Status:        "ok",
-				LatencyMs:     lat,
-				Tokens:        toks,
-				Output:        txt,
+				Index:           t.Index,
+				Role:            t.Role,
+				Prompt:          t.Prompt,
+				AccountEmail:    actualAcc,
+				FailoverFrom:    failoverFrom,
+				WatchdogRetried: watchdogRetried,
+				ResolvedModel:   actualModel,
+				Status:          "ok",
+				LatencyMs:       lat,
+				Tokens:          toks,
+				Output:          txt,
 			}
 		}(i, task, pinnedEmail)
 	}
@@ -550,6 +689,7 @@ func (s *Server) ExecuteSubAgentSwarm(
 	wallMs := time.Since(startWall).Milliseconds()
 	succCount := 0
 	totalToks := managerTokens
+	estValueUSD := EstimateModelCostUSD(managerModelUsed, int64(managerTokens))
 	uniqueAccs := make(map[string]bool)
 	if managerAccountUsed != "" {
 		uniqueAccs[strings.ToLower(managerAccountUsed)] = true
@@ -559,36 +699,42 @@ func (s *Server) ExecuteSubAgentSwarm(
 			succCount++
 		}
 		totalToks += r.Tokens
+		estValueUSD += EstimateModelCostUSD(r.ResolvedModel, int64(r.Tokens))
 		if r.AccountEmail != "" {
 			uniqueAccs[strings.ToLower(r.AccountEmail)] = true
 		}
 	}
 
 	summary := SwarmRunSummary{
-		ID:               fmt.Sprintf("swarm-%d", time.Now().UnixNano()),
-		Timestamp:        time.Now().Format("15:04:05 02/01/2006"),
-		Mode:             mode,
-		MasterGoal:       masterGoal,
-		Model:            defaultModel,
-		ManagerModel:     managerModelUsed,
-		ManagerAccount:   managerAccountUsed,
-		ManagerPlan:      managerPlanText,
-		ContentModel:     "antigravity/gemini-3.1-pro-high",
-		CodingModel:      "antigravity/gemini-3.8-flash-high",
-		IsNightMode:      isNight,
-		TotalSubAgents:   len(results),
-		SuccessCount:     succCount,
-		DistinctAccounts: len(uniqueAccs),
-		TotalWallTimeMs:  wallMs,
-		TotalTokens:      totalToks,
-		Results:          results,
+		ID:                fmt.Sprintf("swarm-%d", time.Now().Unix()),
+		Timestamp:         time.Now().Format("15:04:05 02/01/2006"),
+		Mode:              mode,
+		MasterGoal:        masterGoal,
+		Model:             defaultModel,
+		ManagerModel:      managerModelUsed,
+		ManagerAccount:    managerAccountUsed,
+		ManagerPlan:       managerPlanText,
+		SharedLinkMatrix:  sharedLinkMatrix,
+		ContentModel:      "antigravity/gemini-3.1-pro-high",
+		CodingModel:       "antigravity/gemini-3.8-flash-high",
+		IsNightMode:       isNight,
+		TotalSubAgents:    len(results),
+		SuccessCount:      succCount,
+		WatchdogFailovers: int(atomic.LoadInt32(&watchdogFailoversCount)),
+		DistinctAccounts:  len(uniqueAccs),
+		TotalWallTimeMs:   wallMs,
+		TotalTokens:       totalToks,
+		EstimatedValueUSD: math.Round(estValueUSD*1000) / 1000,
+		Results:           results,
 	}
 
 	swarmHistoryMu.Lock()
+	ensureSubAgentVaultLoadedLocked()
 	recentSwarmRuns = append([]SwarmRunSummary{summary}, recentSwarmRuns...)
-	if len(recentSwarmRuns) > 15 {
-		recentSwarmRuns = recentSwarmRuns[:15]
+	if len(recentSwarmRuns) > 25 {
+		recentSwarmRuns = recentSwarmRuns[:25]
 	}
+	saveSubAgentVaultAsyncLocked()
 	swarmHistoryMu.Unlock()
 
 	return summary
@@ -661,10 +807,173 @@ func BulkImportAntigravityInputs(ctx context.Context, rawLines string) (int, []s
 	return imported, errs, nil
 }
 
+// FormatSwarmRunMarkdown converts a SwarmRunSummary into a clean Markdown document for 1-click export.
+func FormatSwarmRunMarkdown(run SwarmRunSummary) string {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("# 🐝 Báo Cáo Chiến Dịch 50-Sub-Agent Swarm (`%s`)\n\n", run.ID))
+	sb.WriteString(fmt.Sprintf("- **Mục tiêu tổng thể**: %s\n", run.MasterGoal))
+	sb.WriteString(fmt.Sprintf("- **Model Quản lý (Tier 1 Manager)**: `%s` (Tài khoản: `%s`)\n", run.ManagerModel, run.ManagerAccount))
+	sb.WriteString(fmt.Sprintf("- **Thời điểm chạy**: `%s` (Tổng thời gian: **%d ms**)\n", run.Timestamp, run.TotalWallTimeMs))
+	failedCount := run.TotalSubAgents - run.SuccessCount
+	sb.WriteString(fmt.Sprintf("- **Tiến độ Sub-Agents**: **%d/%d thành công** (Thất bại: %d | Watchdog Failover: %d)\n", run.SuccessCount, run.TotalSubAgents, failedCount, run.WatchdogFailovers))
+	sb.WriteString(fmt.Sprintf("- **Tài khoản tham gia**: **%d tài khoản**\n", run.DistinctAccounts))
+	sb.WriteString(fmt.Sprintf("- **Tổng Tokens**: **%d tokens** | **Giá trị API ước tính**: **$%.4f USD**\n\n", run.TotalTokens, run.EstimatedValueUSD))
+
+	if strings.TrimSpace(run.SharedLinkMatrix) != "" {
+		sb.WriteString("## 🔗 Ma Trận Liên Kết Nội Bộ (Shared Inter-Agent Link Matrix)\n\n")
+		sb.WriteString("```text\n" + run.SharedLinkMatrix + "\n```\n\n")
+	}
+
+	sb.WriteString("---\n\n## 📄 Chi Tiết Kết Quả Từng Sub-Agent\n\n")
+	for _, res := range run.Results {
+		statusBadge := "✅ THÀNH CÔNG"
+		if res.Status != "ok" {
+			statusBadge = "❌ LỖI: " + res.Error
+		}
+		sb.WriteString(fmt.Sprintf("### #%d. %s\n\n", res.Index, res.Role))
+		sb.WriteString(fmt.Sprintf("- **Trạng thái**: %s\n", statusBadge))
+		sb.WriteString(fmt.Sprintf("- **Model**: `%s` | **Tài khoản**: `%s`", res.ResolvedModel, res.AccountEmail))
+		if res.WatchdogRetried && res.FailoverFrom != "" {
+			sb.WriteString(fmt.Sprintf(" *(⚡ Watchdog Failover từ `%s`)*", res.FailoverFrom))
+		}
+		sb.WriteString("\n")
+		sb.WriteString(fmt.Sprintf("- **Độ trễ**: `%d ms` | **Tokens**: `%d`\n\n", res.LatencyMs, res.Tokens))
+		if strings.TrimSpace(res.Prompt) != "" {
+			sb.WriteString("**Nhiệm vụ:**\n```text\n" + res.Prompt + "\n```\n\n")
+		}
+		content := res.Output
+		if content == "" {
+			content = res.Error
+		}
+		if strings.TrimSpace(content) != "" {
+			sb.WriteString("**Kết quả:**\n\n" + content + "\n\n")
+		}
+		sb.WriteString("---\n\n")
+	}
+	return sb.String()
+}
+
+var automationSchedulerOnce sync.Once
+
+// StartAutomationScheduler runs a background ticker that checks ScheduledAutomation items
+// every 60 seconds and executes due campaigns automatically (Orca Automations Engine).
+func (s *Server) StartAutomationScheduler() {
+	automationSchedulerOnce.Do(func() {
+		go func() {
+			ticker := time.NewTicker(60 * time.Second)
+			defer ticker.Stop()
+			loc := time.FixedZone("ICT", 7*3600)
+			for now := range ticker.C {
+				vnNow := now.In(loc)
+				var dueList []ScheduledAutomation
+
+				swarmHistoryMu.Lock()
+				ensureSubAgentVaultLoadedLocked()
+				for i := range scheduledAutomations {
+					auto := &scheduledAutomations[i]
+					if !auto.Enabled {
+						continue
+					}
+					isDue := false
+					if auto.NextRunUnix > 0 && vnNow.Unix() >= auto.NextRunUnix {
+						isDue = true
+					} else if (auto.ScheduleWindow == "nightly_21h" || auto.ScheduleWindow == "night-22h") && vnNow.Hour() >= 21 {
+						if auto.NextRunUnix == 0 {
+							isDue = true
+						}
+					}
+					if isDue {
+						auto.LastRunAt = vnNow.Format(time.RFC3339)
+						switch auto.ScheduleWindow {
+						case "interval_6h":
+							auto.NextRunUnix = vnNow.Add(6 * time.Hour).Unix()
+						case "interval_12h":
+							auto.NextRunUnix = vnNow.Add(12 * time.Hour).Unix()
+						default: // nightly_21h / night-22h
+							targetHour := 21
+							if auto.ScheduleWindow == "night-22h" {
+								targetHour = 22
+							}
+							next := time.Date(vnNow.Year(), vnNow.Month(), vnNow.Day(), targetHour, 0, 0, 0, loc)
+							if !next.After(vnNow) {
+								next = next.Add(24 * time.Hour)
+							}
+							auto.NextRunUnix = next.Unix()
+						}
+						dueList = append(dueList, *auto)
+					}
+				}
+				if len(dueList) > 0 {
+					saveSubAgentVaultAsyncLocked()
+				}
+				swarmHistoryMu.Unlock()
+
+				for _, auto := range dueList {
+					go func(a ScheduledAutomation) {
+						ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+						defer cancel()
+						summary := s.ExecuteSubAgentSwarm(ctx, "auto-decompose", a.MasterGoal, a.AgentCount, a.Model, nil)
+						swarmHistoryMu.Lock()
+						for i := range scheduledAutomations {
+							if scheduledAutomations[i].ID == a.ID {
+								scheduledAutomations[i].LastRunID = summary.ID
+								scheduledAutomations[i].TotalRuns++
+								scheduledAutomations[i].LastStatus = fmt.Sprintf("Thành công %d/%d agents", summary.SuccessCount, summary.TotalSubAgents)
+								break
+							}
+						}
+						saveSubAgentVaultAsyncLocked()
+						swarmHistoryMu.Unlock()
+					}(auto)
+				}
+			}
+		}()
+	})
+}
+
 // handleSubAgents handles GET and POST /v1/subagents for the 50-Account Parallel Sub-Agent Swarm Engine.
 func (s *Server) handleSubAgents(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet, http.MethodHead:
+		// Check if user requested 1-click export of a Swarm run from the AI Vault
+		if exportID := strings.TrimSpace(r.URL.Query().Get("export")); exportID != "" {
+			format := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("format")))
+			if format == "" {
+				format = "md"
+			}
+			swarmHistoryMu.Lock()
+			ensureSubAgentVaultLoadedLocked()
+			var target *SwarmRunSummary
+			for i := range recentSwarmRuns {
+				if exportID == "latest" || recentSwarmRuns[i].ID == exportID {
+					cp := recentSwarmRuns[i]
+					target = &cp
+					break
+				}
+			}
+			swarmHistoryMu.Unlock()
+
+			if target == nil {
+				writeOpenAIError(w, http.StatusNotFound, "không tìm thấy chiến dịch Sub-Agent để xuất: "+exportID, "not_found")
+				return
+			}
+			if format == "json" {
+				w.Header().Set("Content-Type", "application/json; charset=utf-8")
+				w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s.json\"", target.ID))
+				w.WriteHeader(http.StatusOK)
+				enc := json.NewEncoder(w)
+				enc.SetIndent("", "  ")
+				_ = enc.Encode(target)
+				return
+			}
+			md := FormatSwarmRunMarkdown(*target)
+			w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+			w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s.md\"", target.ID))
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(md))
+			return
+		}
+
 		saved := LoadSavedAuthConfig()
 		now := time.Now().Unix()
 
@@ -699,10 +1008,13 @@ func (s *Server) handleSubAgents(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 
-		swarmHistoryMu.RLock()
+		swarmHistoryMu.Lock()
+		ensureSubAgentVaultLoadedLocked()
 		history := make([]SwarmRunSummary, len(recentSwarmRuns))
 		copy(history, recentSwarmRuns)
-		swarmHistoryMu.RUnlock()
+		automations := make([]ScheduledAutomation, len(scheduledAutomations))
+		copy(automations, scheduledAutomations)
+		swarmHistoryMu.Unlock()
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -721,24 +1033,30 @@ func (s *Server) handleSubAgents(w http.ResponseWriter, r *http.Request) {
 			"total_sub_agents_run": atomic.LoadInt64(&totalSubAgentsRun),
 			"account_slots":        slots,
 			"recent_swarms":        history,
+			"automations":          automations,
+			"vault_file":           SubAgentVaultFilePath(),
 		})
 
 	case http.MethodPost:
 		var req struct {
-			Action      string         `json:"action"` // "swarm" or "bulk_import"
-			Mode        string         `json:"mode"`   // "auto-decompose" or "custom-tasks"
-			MasterGoal  string         `json:"master_goal"`
-			AgentCount  int            `json:"agent_count"`
-			Model       string         `json:"model"`
-			CustomTasks []SubAgentTask `json:"tasks"`
-			BulkInput   string         `json:"bulk_input"`
+			Action       string         `json:"action"` // "swarm", "bulk_import", "create_automation", "toggle_automation", "run_automation", "delete_automation"
+			Mode         string         `json:"mode"`   // "auto-decompose" or "custom-tasks"
+			MasterGoal   string         `json:"master_goal"`
+			AgentCount   int            `json:"agent_count"`
+			Model        string         `json:"model"`
+			CustomTasks  []SubAgentTask `json:"tasks"`
+			BulkInput    string         `json:"bulk_input"`
+			AutomationID string         `json:"automation_id"`
+			Name         string         `json:"name"`
+			ScheduleType string         `json:"schedule_type"`
 		}
 		if err := json.NewDecoder(io.LimitReader(r.Body, 512*1024)).Decode(&req); err != nil {
 			writeOpenAIError(w, http.StatusBadRequest, "invalid JSON payload: "+err.Error(), "invalid_request_error")
 			return
 		}
 
-		if req.Action == "bulk_import" {
+		switch req.Action {
+		case "bulk_import":
 			imported, errs, err := BulkImportAntigravityInputs(r.Context(), req.BulkInput)
 			if err != nil {
 				writeOpenAIError(w, http.StatusBadRequest, err.Error(), "bulk_import_error")
@@ -750,6 +1068,146 @@ func (s *Server) handleSubAgents(w http.ResponseWriter, r *http.Request) {
 				"status":   "ok",
 				"imported": imported,
 				"errors":   errs,
+			})
+			return
+
+		case "create_automation":
+			goal := strings.TrimSpace(req.MasterGoal)
+			if goal == "" {
+				writeOpenAIError(w, http.StatusBadRequest, "master_goal không được để trống", "invalid_request_error")
+				return
+			}
+			name := strings.TrimSpace(req.Name)
+			if name == "" {
+				name = "Chiến dịch SEO/Code Tự Động Ban Đêm (40%-50% Off)"
+			}
+			sched := strings.TrimSpace(req.ScheduleType)
+			if sched == "" {
+				sched = "nightly_21h"
+			}
+			cnt := req.AgentCount
+			if cnt <= 0 {
+				cnt = 15
+			}
+			loc := time.FixedZone("ICT", 7*3600)
+			vnNow := time.Now().In(loc)
+			nextRun := vnNow.Add(6 * time.Hour).Unix()
+			if sched == "nightly_21h" || sched == "night-22h" {
+				targetHour := 21
+				if sched == "night-22h" {
+					targetHour = 22
+				}
+				next := time.Date(vnNow.Year(), vnNow.Month(), vnNow.Day(), targetHour, 0, 0, 0, loc)
+				if !next.After(vnNow) {
+					next = next.Add(24 * time.Hour)
+				}
+				nextRun = next.Unix()
+			} else if sched == "interval_12h" {
+				nextRun = vnNow.Add(12 * time.Hour).Unix()
+			}
+			auto := ScheduledAutomation{
+				ID:             fmt.Sprintf("auto-%d", time.Now().UnixMilli()),
+				Name:           name,
+				MasterGoal:     goal,
+				Mode:           "seo-and-code",
+				AgentCount:     cnt,
+				Model:          strings.TrimSpace(req.Model),
+				ScheduleWindow: sched,
+				Enabled:        true,
+				NextRunUnix:    nextRun,
+				LastStatus:     "Mới tạo - chờ đến lịch chạy",
+				CreatedAt:      vnNow.Format("15:04:05 02/01/2006"),
+			}
+			swarmHistoryMu.Lock()
+			ensureSubAgentVaultLoadedLocked()
+			scheduledAutomations = append([]ScheduledAutomation{auto}, scheduledAutomations...)
+			saveSubAgentVaultAsyncLocked()
+			swarmHistoryMu.Unlock()
+
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status":     "ok",
+				"automation": auto,
+			})
+			return
+
+		case "toggle_automation":
+			swarmHistoryMu.Lock()
+			ensureSubAgentVaultLoadedLocked()
+			var updated *ScheduledAutomation
+			for i := range scheduledAutomations {
+				if scheduledAutomations[i].ID == req.AutomationID {
+					scheduledAutomations[i].Enabled = !scheduledAutomations[i].Enabled
+					cp := scheduledAutomations[i]
+					updated = &cp
+					break
+				}
+			}
+			saveSubAgentVaultAsyncLocked()
+			swarmHistoryMu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status":     "ok",
+				"automation": updated,
+			})
+			return
+
+		case "delete_automation":
+			swarmHistoryMu.Lock()
+			ensureSubAgentVaultLoadedLocked()
+			filtered := make([]ScheduledAutomation, 0, len(scheduledAutomations))
+			for _, a := range scheduledAutomations {
+				if a.ID != req.AutomationID {
+					filtered = append(filtered, a)
+				}
+			}
+			scheduledAutomations = filtered
+			saveSubAgentVaultAsyncLocked()
+			swarmHistoryMu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status": "deleted",
+				"id":     req.AutomationID,
+			})
+			return
+
+		case "run_automation":
+			swarmHistoryMu.Lock()
+			ensureSubAgentVaultLoadedLocked()
+			var target *ScheduledAutomation
+			for i := range scheduledAutomations {
+				if scheduledAutomations[i].ID == req.AutomationID {
+					cp := scheduledAutomations[i]
+					target = &cp
+					break
+				}
+			}
+			swarmHistoryMu.Unlock()
+			if target == nil {
+				writeOpenAIError(w, http.StatusNotFound, "không tìm thấy lịch tự động hóa: "+req.AutomationID, "not_found")
+				return
+			}
+			summary := s.ExecuteSubAgentSwarm(r.Context(), "auto-decompose", target.MasterGoal, target.AgentCount, target.Model, nil)
+			swarmHistoryMu.Lock()
+			for i := range scheduledAutomations {
+				if scheduledAutomations[i].ID == target.ID {
+					scheduledAutomations[i].LastRunAt = time.Now().UTC().Format(time.RFC3339)
+					scheduledAutomations[i].LastRunID = summary.ID
+					scheduledAutomations[i].TotalRuns++
+					scheduledAutomations[i].LastStatus = fmt.Sprintf("Thành công %d/%d agents", summary.SuccessCount, summary.TotalSubAgents)
+					break
+				}
+			}
+			saveSubAgentVaultAsyncLocked()
+			swarmHistoryMu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status":  "ok",
+				"summary": summary,
 			})
 			return
 		}

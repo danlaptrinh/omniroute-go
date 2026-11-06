@@ -486,6 +486,12 @@ const gatewayUIHTML = `<!DOCTYPE html>
         </div>
         <div id="kpiHealthy" style="font-size:26px;font-weight:700;color:#10b981;margin-top:4px;">0</div>
       </div>
+      <div class="setting-card" style="padding:14px;border-left:3px solid #c084fc;">
+        <div style="font-size:11px;color:#c084fc;font-weight:600;display:flex;align-items:center;gap:6px;">
+          <span>💰</span> GIÁ TRỊ API ƯỚC TÍNH
+        </div>
+        <div id="kpiTotalValueUSD" style="font-size:24px;font-weight:700;color:#c084fc;margin-top:4px;">$0.00</div>
+      </div>
     </div>
 
     <!-- Filter Pills & Action Row -->
@@ -1641,6 +1647,85 @@ docker compose up -d --build</pre>
       <div id="saSwarmResultsBox" style="margin-top:16px;"></div>
     </div>
 
+    <!-- LẬP LỊCH TỰ ĐỘNG HÓA BAN ĐÊM (ORCA AUTOMATIONS ENGINE) -->
+    <div class="card" style="border:1px solid #334155;">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:10px;">
+        <div>
+          <h2>🌙 Lập Lịch Tự Động Hóa Định Kỳ (Orca Automations Engine)</h2>
+          <div style="font-size:12.5px;color:var(--muted);">
+            Tự động kích hoạt Đàn Sub-Agents chạy vào ban đêm (19:00–07:00) để tận dụng ưu đãi <strong style="color:#34d399;">⚡ Giảm 40%–50% Alibaba Qwen 3.8 Max / DeepSeek V4</strong> kết hợp cùng 50 tài khoản Antigravity Pro.
+          </div>
+        </div>
+        <button class="btn-primary" onclick="toggleNewAutomationForm()">+ Tạo Lịch Tự Động Hóa Mới</button>
+      </div>
+
+      <!-- Form tạo lịch tự động hóa -->
+      <div id="newAutomationFormBox" style="display:none;background:#0d121d;border:1px dashed #38bdf8;border-radius:10px;padding:14px;margin-bottom:14px;">
+        <div style="font-weight:700;font-size:13px;color:#38bdf8;margin-bottom:10px;">✨ Thiết lập Chiến dịch Tự động hóa mới</div>
+        <div class="grid-2">
+          <div>
+            <label class="form-label">Tên Chiến Dịch</label>
+            <input id="autoSchedNameInput" type="text" placeholder="Ví dụ: SEO Đêm 40% Off - BuCloud VPS &amp; Hosting" />
+          </div>
+          <div>
+            <label class="form-label">Khung giờ chạy tự động</label>
+            <select id="autoSchedWindowSelect">
+              <option value="night-22h" selected>🌙 22:00 Mỗi Đêm (Khung giờ vàng giảm 40%-50% token cost)</option>
+              <option value="nightly_21h">🌙 21:00 Mỗi Đêm (Tối ưu giờ bắt đầu ban đêm)</option>
+              <option value="interval_12h">⏰ Mỗi 12 Giờ Một Lần (Chạy 2 lần / ngày)</option>
+              <option value="interval_6h">⚡ Mỗi 6 Giờ Một Lần (Chạy liên tục 4 lần / ngày)</option>
+            </select>
+          </div>
+        </div>
+        <div class="grid-2" style="margin-top:10px;">
+          <div>
+            <label class="form-label">Số Sub-Agents chạy đồng thời</label>
+            <input id="autoSchedCountInput" type="number" min="1" max="50" value="8" />
+          </div>
+          <div>
+            <label class="form-label">Model Quản Lý Dự Án (Lead Orchestrator)</label>
+            <select id="autoSchedModelSelect">
+              <option value="alibaba/qwen3.8-max" selected>alibaba/qwen3.8-max (⚡ 40% Off Nights - Tối ưu chi phí)</option>
+              <option value="antigravity/gemini-4-argon-high">antigravity/gemini-4-argon-high (Argon High Thinking)</option>
+              <option value="claude-code/claude-opus-5-5">claude-code/claude-opus-5-5 (Claude Opus 5.5)</option>
+            </select>
+          </div>
+        </div>
+        <div style="margin-top:10px;">
+          <label class="form-label">Mục tiêu chiến dịch (Master Goal)</label>
+          <textarea id="autoSchedGoalInput" rows="3" placeholder="Nhập mục tiêu chiến dịch SEO, viết bài cluster hoặc kiểm tra mã nguồn tự động hàng đêm..."></textarea>
+        </div>
+        <div class="btn-row" style="justify-content:flex-end;margin-top:10px;">
+          <button onclick="toggleNewAutomationForm()">Hủy</button>
+          <button class="btn-primary" onclick="submitCreateAutomation()">💾 Lưu Lịch Tự Động Hóa</button>
+        </div>
+      </div>
+
+      <!-- Danh sách lịch tự động hóa -->
+      <div id="saAutomationsListBox">
+        Đang tải danh sách lịch tự động...
+      </div>
+    </div>
+
+    <!-- KHO LƯU TRỮ CHIẾN DỊCH (AI VAULT & 1-CLICK EXPORT) -->
+    <div class="card" style="border:1px solid #1e293b;">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:12px;">
+        <div>
+          <h2>🗄️ Kho Lưu Trữ Chiến Dịch AI Vault (Bền Vững Trên Đĩa &amp; Xuất 1-Click)</h2>
+          <div style="font-size:12.5px;color:var(--muted);">
+            Toàn bộ các chiến dịch 50 Sub-Agents được lưu bền vững vào <code>omni_subagent_vault.json</code>. Bấm tải về ngay báo cáo Markdown chuẩn SEO hoặc định dạng JSON.
+          </div>
+        </div>
+        <div style="display:flex;gap:6px;">
+          <a href="/v1/subagents?export=latest&amp;format=md" target="_blank" class="btn" style="text-decoration:none;display:inline-flex;align-items:center;gap:5px;font-size:11.5px;color:#38bdf8;">📥 Xuất Chiến Dịch Vừa Chạy (.MD)</a>
+          <a href="/v1/subagents?export=latest&amp;format=json" target="_blank" class="btn" style="text-decoration:none;display:inline-flex;align-items:center;gap:5px;font-size:11.5px;color:#34d399;">📥 Xuất JSON (.JSON)</a>
+        </div>
+      </div>
+      <div id="saVaultHistoryGrid">
+        Đang tải lịch sử kho lưu trữ...
+      </div>
+    </div>
+
     <!-- Nhập Hàng Loạt 50 Tài Khoản Antigravity -->
     <div class="card">
       <h2>📥 Nhập Nhanh Hàng Loạt 50 Tài Khoản Antigravity (Bulk Account Importer)</h2>
@@ -2014,6 +2099,8 @@ docker compose up -d --build</pre>
         document.getElementById('kpiCritical').textContent = d.critical_accounts || 0;
         document.getElementById('kpiWarning').textContent = d.warning_accounts || 0;
         document.getElementById('kpiHealthy').textContent = d.healthy_accounts || 0;
+        const kpiVal = document.getElementById('kpiTotalValueUSD');
+        if (kpiVal) kpiVal.textContent = '$' + (d.total_estimated_value_usd || 0).toFixed(2);
         document.getElementById('quotaAccountCountLabel').textContent = 'Giới hạn của nhà cung cấp (' + (d.total_accounts || 0) + ' tài khoản)';
 
         renderQuotaCards();
@@ -2189,7 +2276,7 @@ docker compose up -d --build</pre>
             '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;padding-bottom:5px;border-bottom:1px dashed rgba(255,255,255,0.07);font-family:monospace;font-size:11px;">' +
               activeOrLastModelText +
             '</div>' +
-            '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;padding-top:2px;text-align:center;">' +
+            '<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:6px;padding-top:2px;text-align:center;">' +
               '<div>' +
                 '<div style="color:var(--muted);font-size:10px;">TOKEN ĐÃ CHẠY</div>' +
                 '<div style="color:#38bdf8;font-weight:700;font-size:12.5px;font-family:monospace;">' + realTokens + '</div>' +
@@ -2197,6 +2284,10 @@ docker compose up -d --build</pre>
               '<div>' +
                 '<div style="color:var(--muted);font-size:10px;">REQUEST THỰC TẾ</div>' +
                 '<div style="color:#e2e8f0;font-weight:700;font-size:12.5px;font-family:monospace;">' + reqSuccess + ' <span style="color:#64748b;font-size:10.5px;">(' + reqFail + ' lỗi)</span></div>' +
+              '</div>' +
+              '<div>' +
+                '<div style="color:var(--muted);font-size:10px;">GIÁ TRỊ API</div>' +
+                '<div style="color:#c084fc;font-weight:700;font-size:12.5px;font-family:monospace;">$' + ((acc.estimated_value_usd || 0).toFixed(2)) + '</div>' +
               '</div>' +
               '<div>' +
                 '<div style="color:var(--muted);font-size:10px;">ĐỘ TRỄ TB <span style="cursor:pointer;color:#fbbf24;" title="Reset độ trễ tài khoản này" onclick="resetAccountLatency(\'' + htmlEscape(acc.id) + '\')">↺</span></div>' +
@@ -4160,12 +4251,210 @@ docker compose up -d --build</pre>
         if (totEl) totEl.textContent = d.total_sub_agents_run || 0;
 
         renderSubAgentSlots(d.account_slots || []);
+        renderAutomationsList(d.automations || []);
+        renderVaultHistory(d.recent_swarms || []);
+
         if (d.recent_swarms && d.recent_swarms.length > 0 && !document.getElementById('saSwarmResultsBox').innerHTML.trim()) {
           renderSwarmSummary(d.recent_swarms[0]);
         }
       } catch (err) {
         console.error('Failed to load subagents status:', err);
       }
+    }
+
+    function renderAutomationsList(automations) {
+      const box = document.getElementById('saAutomationsListBox');
+      if (!box) return;
+      if (!automations || automations.length === 0) {
+        box.innerHTML = '<div style="color:var(--muted);padding:10px 0;">Chưa có lịch tự động hóa nào. Bấm <strong>"+ Tạo Lịch Tự Động Hóa Mới"</strong> để kích hoạt chạy đêm 40%-50% Off.</div>';
+        return;
+      }
+      let html = '<div style="display:grid;grid-template-columns:repeat(auto-fill, minmax(320px, 1fr));gap:12px;">';
+      automations.forEach(a => {
+        const isEn = a.enabled;
+        const statusBadge = isEn
+          ? '<span class="badge badge-green">🟢 Đang Bật</span>'
+          : '<span class="badge" style="background:#1e293b;color:#94a3b8;">⏸️ Tạm Dừng</span>';
+
+        let winLabel = a.schedule_window;
+        if (winLabel === 'night-22h') winLabel = '🌙 22:00 Mỗi Đêm (⚡ 40% Off)';
+        else if (winLabel === 'nightly_21h') winLabel = '🌙 21:00 Mỗi Đêm (⚡ 40% Off)';
+        else if (winLabel === 'interval_12h') winLabel = '⏰ Mỗi 12 Giờ (2 lần/ngày)';
+        else if (winLabel === 'interval_6h') winLabel = '⚡ Mỗi 6 Giờ (4 lần/ngày)';
+
+        html += '<div style="background:#111622;border:1px solid ' + (isEn ? 'rgba(56,189,248,0.28)' : '#242c3d') + ';border-radius:10px;padding:12px;display:flex;flex-direction:column;justify-content:space-between;">' +
+          '<div>' +
+            '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">' +
+              '<strong style="font-size:13px;color:#fff;">' + htmlEscape(a.name) + '</strong>' +
+              statusBadge +
+            '</div>' +
+            '<div style="font-size:11.5px;color:#38bdf8;font-weight:600;margin-bottom:6px;">' + htmlEscape(winLabel) + ' • ' + (a.agent_count || 8) + ' Sub-Agents</div>' +
+            '<div style="font-size:12px;color:var(--muted);margin-bottom:8px;line-height:1.4;">' + htmlEscape(a.master_goal || '') + '</div>' +
+            '<div style="font-size:11px;color:#94a3b8;background:#090d16;padding:6px 8px;border-radius:6px;margin-bottom:10px;">' +
+              '<div>📊 Đã chạy: <strong>' + (a.total_runs || 0) + ' lần</strong>' + (a.last_run_at ? (' | Lần cuối: ' + htmlEscape(a.last_run_at.replace('T', ' ').substring(0, 19))) : '') + '</div>' +
+              (a.last_status ? ('<div style="color:#34d399;margin-top:2px;">Trạng thái: ' + htmlEscape(a.last_status) + '</div>') : '') +
+            '</div>' +
+          '</div>' +
+          '<div style="display:flex;justify-content:space-between;align-items:center;border-top:1px solid rgba(255,255,255,0.06);padding-top:8px;gap:6px;">' +
+            '<button style="padding:4px 8px;font-size:11px;" onclick="toggleAutomationUI(\'' + htmlEscape(a.id) + '\')">' + (isEn ? '⏸️ Tắt' : '▶️ Bật') + '</button>' +
+            '<div style="display:flex;gap:5px;">' +
+              '<button class="btn-primary" style="padding:4px 9px;font-size:11px;" onclick="runAutomationUI(\'' + htmlEscape(a.id) + '\')">⚡ Chạy Ngay</button>' +
+              '<button style="padding:4px 7px;font-size:11px;color:#f87171;" onclick="deleteAutomationUI(\'' + htmlEscape(a.id) + '\')">🗑️</button>' +
+            '</div>' +
+          '</div>' +
+        '</div>';
+      });
+      html += '</div>';
+      box.innerHTML = html;
+    }
+
+    function toggleNewAutomationForm() {
+      const el = document.getElementById('newAutomationFormBox');
+      if (el) el.style.display = (el.style.display === 'none' || !el.style.display) ? 'block' : 'none';
+    }
+
+    async function submitCreateAutomation() {
+      const name = document.getElementById('autoSchedNameInput').value.trim();
+      const goal = document.getElementById('autoSchedGoalInput').value.trim();
+      const win = document.getElementById('autoSchedWindowSelect').value;
+      const count = parseInt(document.getElementById('autoSchedCountInput').value || '8', 10);
+      const model = document.getElementById('autoSchedModelSelect').value;
+
+      if (!goal) {
+        alert('Vui lòng nhập mục tiêu chiến dịch (Master Goal)!');
+        return;
+      }
+      try {
+        const r = await fetch('/v1/subagents', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            action: 'create_automation',
+            name: name,
+            master_goal: goal,
+            schedule_type: win,
+            agent_count: count,
+            model: model
+          })
+        });
+        if (r.ok) {
+          toggleNewAutomationForm();
+          document.getElementById('autoSchedGoalInput').value = '';
+          document.getElementById('autoSchedNameInput').value = '';
+          loadSubAgentsView();
+        } else {
+          const d = await r.json();
+          alert('Lỗi tạo lịch: ' + (d.error ? d.error.message : d.message));
+        }
+      } catch (err) {
+        alert('Lỗi kết nối: ' + err.message);
+      }
+    }
+
+    async function toggleAutomationUI(id) {
+      try {
+        await fetch('/v1/subagents', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({action: 'toggle_automation', automation_id: id})
+        });
+        loadSubAgentsView();
+      } catch (e) {
+        alert('Lỗi bật/tắt lịch: ' + e.message);
+      }
+    }
+
+    async function runAutomationUI(id) {
+      if (!confirm('Khởi chạy chiến dịch tự động này ngay lập tức?')) return;
+      alert('Đang kích hoạt chiến dịch...');
+      try {
+        const r = await fetch('/v1/subagents', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({action: 'run_automation', automation_id: id})
+        });
+        const d = await r.json();
+        if (r.ok && d.summary) {
+          alert('✔ Chiến dịch hoàn tất! ' + d.summary.success_count + '/' + d.summary.total_sub_agents + ' Sub-Agents thành công.');
+          renderSwarmSummary(d.summary);
+          loadSubAgentsView();
+        } else {
+          alert('Lỗi: ' + (d.error ? d.error.message : 'Thất bại'));
+        }
+      } catch (e) {
+        alert('Lỗi chạy chiến dịch: ' + e.message);
+      }
+    }
+
+    async function deleteAutomationUI(id) {
+      if (!confirm('Bạn có chắc chắn muốn xóa lịch tự động này không?')) return;
+      try {
+        await fetch('/v1/subagents', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({action: 'delete_automation', automation_id: id})
+        });
+        loadSubAgentsView();
+      } catch (e) {
+        alert('Lỗi xóa lịch: ' + e.message);
+      }
+    }
+
+    function renderVaultHistory(runs) {
+      const box = document.getElementById('saVaultHistoryGrid');
+      if (!box) return;
+      if (!runs || runs.length === 0) {
+        box.innerHTML = '<div style="color:var(--muted);padding:8px 0;">Chưa có chiến dịch nào được lưu trong kho. Khi bạn phóng Sub-Agents hoặc chạy lịch đêm, dữ liệu sẽ tự động lưu bền vững tại đây.</div>';
+        return;
+      }
+      let html = '<div style="display:grid;grid-template-columns:repeat(auto-fill, minmax(360px, 1fr));gap:10px;">';
+      runs.forEach(r => {
+        const ok = r.success_count;
+        const tot = r.total_sub_agents;
+        const fail = tot - ok;
+        const failoverNote = (r.watchdog_failovers > 0) ? (' • <span style="color:#fbbf24;">⚡ ' + r.watchdog_failovers + ' Watchdog Failover</span>') : '';
+        html += '<div style="background:#0e131f;border:1px solid #202738;border-radius:9px;padding:12px;display:flex;flex-direction:column;justify-content:space-between;">' +
+          '<div>' +
+            '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px;">' +
+              '<code style="color:#38bdf8;font-weight:700;font-size:12px;">' + htmlEscape(r.id) + '</code>' +
+              '<span style="font-size:11px;color:var(--muted);">' + htmlEscape(r.timestamp || '') + '</span>' +
+            '</div>' +
+            '<div style="font-weight:600;font-size:12.5px;color:#f1f5f9;margin-bottom:6px;line-height:1.4;">' + htmlEscape(r.master_goal || 'Không tiêu đề') + '</div>' +
+            '<div style="font-size:11.5px;color:var(--muted);margin-bottom:8px;">' +
+              'Quản lý: <strong style="color:#fbbf24;">' + htmlEscape(r.manager_model || 'auto') + '</strong>' +
+              ' | Thành công: <strong style="color:#34d399;">' + ok + '/' + tot + '</strong>' +
+              (fail > 0 ? (' (<span style="color:#f87171;">' + fail + ' lỗi</span>)') : '') +
+              failoverNote +
+            '</div>' +
+            '<div style="display:flex;justify-content:space-between;font-size:11px;color:#94a3b8;background:#080b11;padding:5px 8px;border-radius:6px;margin-bottom:10px;">' +
+              '<span>Tokens: <strong style="color:#38bdf8;">' + Number(r.total_tokens || 0).toLocaleString() + '</strong></span>' +
+              '<span>Giá trị: <strong style="color:#c084fc;">$' + (r.estimated_value_usd || 0).toFixed(4) + '</strong></span>' +
+              '<span>Thời gian: <strong style="color:#34d399;">' + (r.total_wall_time_ms || 0) + ' ms</strong></span>' +
+            '</div>' +
+          '</div>' +
+          '<div style="display:flex;justify-content:space-between;align-items:center;border-top:1px solid rgba(255,255,255,0.06);padding-top:8px;">' +
+            '<button style="padding:4px 9px;font-size:11px;" onclick="previewHistoricalSwarm(\'' + htmlEscape(r.id) + '\')">👁️ Xem Kết Quả</button>' +
+            '<div style="display:flex;gap:5px;">' +
+              '<a href="/v1/subagents?export=' + encodeURIComponent(r.id) + '&amp;format=md" target="_blank" class="btn" style="text-decoration:none;padding:4px 8px;font-size:11px;color:#38bdf8;">📥 Tải .MD</a>' +
+              '<a href="/v1/subagents?export=' + encodeURIComponent(r.id) + '&amp;format=json" target="_blank" class="btn" style="text-decoration:none;padding:4px 8px;font-size:11px;color:#34d399;">📥 Tải .JSON</a>' +
+            '</div>' +
+          '</div>' +
+        '</div>';
+      });
+      html += '</div>';
+      box.innerHTML = html;
+    }
+
+    function previewHistoricalSwarm(id) {
+      fetch('/v1/subagents')
+        .then(r => r.json())
+        .then(d => {
+          const run = (d.recent_swarms || []).find(x => x.id === id);
+          if (run) {
+            renderSwarmSummary(run);
+            document.getElementById('saSwarmResultsBox').scrollIntoView({behavior: 'smooth', block: 'start'});
+          }
+        });
     }
 
     function renderSubAgentSlots(slots) {
@@ -4297,30 +4586,56 @@ docker compose up -d --build</pre>
         '</div>';
       }
 
+      let linkMatrixCard = '';
+      if (summary.shared_link_matrix) {
+        linkMatrixCard = '<div style="background:rgba(56,189,248,0.06);border:1px dashed rgba(56,189,248,0.35);border-radius:9px;padding:11px;margin-bottom:12px;">' +
+          '<div style="font-weight:700;font-size:12px;color:#38bdf8;margin-bottom:5px;">🔗 Ma Trận Liên Kết Nội Bộ SEO (Inter-Agent Link Matrix đã inject vào tất cả Sub-Agents):</div>' +
+          '<pre style="max-height:140px;overflow-y:auto;font-size:11px;margin:0;background:#080b11;color:#7dd3fc;">' + htmlEscape(summary.shared_link_matrix) + '</pre>' +
+        '</div>';
+      }
+
+      const runId = summary.id || 'latest';
+      const failoverTag = (summary.watchdog_failovers > 0)
+        ? (' | <span style="color:#fbbf24;">⚡ ' + summary.watchdog_failovers + ' Watchdog Failover</span>')
+        : '';
+
       let html = '<div style="background:#0b0f17;border:1px solid #242c3d;border-radius:10px;padding:14px;">' +
         '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:12px;padding-bottom:10px;border-bottom:1px solid #1e293b;">' +
           '<div>' +
             '<span class="badge badge-green">🐝 Kết Quả Đàn Sub-Agents Song Song</span> ' +
             '<strong style="color:#fff;margin-left:6px;">' + summary.success_count + '/' + summary.total_sub_agents + ' Sub-Agents Thành Công</strong>' +
+            failoverTag +
           '</div>' +
-          '<div style="font-size:12px;color:var(--muted);">' +
-            'Tài khoản tham gia: <strong style="color:#fb923c;">' + summary.distinct_accounts + ' acc</strong> | ' +
-            'Tổng thời gian (Wall-time): <strong style="color:#34d399;">' + summary.total_wall_time_ms + ' ms</strong> | ' +
-            'Tổng Token: <strong style="color:#38bdf8;">' + Number(summary.total_tokens || 0).toLocaleString() + '</strong>' +
+          '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">' +
+            '<div style="font-size:12px;color:var(--muted);">' +
+              'Tài khoản: <strong style="color:#fb923c;">' + summary.distinct_accounts + '</strong> | ' +
+              'Thời gian: <strong style="color:#34d399;">' + summary.total_wall_time_ms + ' ms</strong> | ' +
+              'Tokens: <strong style="color:#38bdf8;">' + Number(summary.total_tokens || 0).toLocaleString() + '</strong> | ' +
+              'Giá trị: <strong style="color:#c084fc;">$' + (summary.estimated_value_usd || 0).toFixed(4) + '</strong>' +
+            '</div>' +
+            '<div style="display:flex;gap:5px;">' +
+              '<a href="/v1/subagents?export=' + encodeURIComponent(runId) + '&amp;format=md" target="_blank" class="btn" style="text-decoration:none;padding:4px 8px;font-size:11px;color:#38bdf8;">📥 Xuất .MD</a>' +
+              '<a href="/v1/subagents?export=' + encodeURIComponent(runId) + '&amp;format=json" target="_blank" class="btn" style="text-decoration:none;padding:4px 8px;font-size:11px;color:#34d399;">📥 Xuất .JSON</a>' +
+            '</div>' +
           '</div>' +
         '</div>' +
         managerCard +
+        linkMatrixCard +
         '<div style="display:grid;grid-template-columns:repeat(auto-fill, minmax(380px, 1fr));gap:12px;">';
 
       (summary.results || []).forEach(res => {
         const ok = res.status === 'ok';
         const bCol = ok ? 'rgba(16,185,129,0.35)' : 'rgba(239,68,68,0.4)';
+        const wdBadge = (res.watchdog_retried && res.failover_from)
+          ? (' <span class="badge" style="background:rgba(245,158,11,0.2);color:#fbbf24;font-size:10px;">⚡ Failover từ ' + htmlEscape(res.failover_from) + '</span>')
+          : '';
+
         html += '<div style="background:#121722;border:1px solid ' + bCol + ';border-radius:9px;padding:12px;">' +
           '<div style="display:flex;justify-content:space-between;align-items:center;gap:6px;margin-bottom:6px;">' +
             '<strong style="font-size:12.5px;color:#c084fc;">' + htmlEscape(res.role || ('Sub-Agent #' + res.index)) + '</strong>' +
             '<span style="font-size:11px;color:' + (ok ? '#34d399' : '#f87171') + ';font-weight:700;">' + (ok ? ('✔ ' + res.latency_ms + ' ms') : '❌ Lỗi') + '</span>' +
           '</div>' +
-          '<div style="font-size:11.5px;color:#fb923c;margin-bottom:6px;font-family:monospace;">👤 Tài khoản xử lý: <strong>' + htmlEscape(res.account_email || 'auto-pool') + '</strong> (' + htmlEscape(res.resolved_model || '') + ')</div>' +
+          '<div style="font-size:11.5px;color:#fb923c;margin-bottom:6px;font-family:monospace;">👤 Tài khoản: <strong>' + htmlEscape(res.account_email || 'auto-pool') + '</strong> (' + htmlEscape(res.resolved_model || '') + ')' + wdBadge + '</div>' +
           '<pre style="max-height:220px;overflow-y:auto;font-size:11.5px;margin:0;background:#080b11;color:#e2e8f0;">' + htmlEscape(ok ? res.output : res.error) + '</pre>' +
         '</div>';
       });

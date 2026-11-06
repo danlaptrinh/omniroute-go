@@ -52,18 +52,20 @@ type AccountQuotaDetail struct {
 	ResetTimeText       string           `json:"reset_time_text"`
 	LastCheckedAt       string           `json:"last_checked_at"`
 	QuotaUsedPercent    *float64         `json:"quota_used_percent,omitempty"`
+	EstimatedValueUSD   float64          `json:"estimated_value_usd"`
 	SupportedModels     []string         `json:"supported_models"`
 	ModelQuotas         []ModelQuotaInfo `json:"model_quotas"`
 }
 
 // QuotaSummary represents the KPI aggregate across all accounts.
 type QuotaSummary struct {
-	TotalAccounts    int                  `json:"total_accounts"`
-	HealthyAccounts  int                  `json:"healthy_accounts"`
-	WarningAccounts  int                  `json:"warning_accounts"`
-	CriticalAccounts int                  `json:"critical_accounts"`
-	Accounts         []AccountQuotaDetail `json:"accounts"`
-	UpdatedAt        string               `json:"updated_at"`
+	TotalAccounts          int                  `json:"total_accounts"`
+	HealthyAccounts        int                  `json:"healthy_accounts"`
+	WarningAccounts        int                  `json:"warning_accounts"`
+	CriticalAccounts       int                  `json:"critical_accounts"`
+	TotalEstimatedValueUSD float64              `json:"total_estimated_value_usd"`
+	Accounts               []AccountQuotaDetail `json:"accounts"`
+	UpdatedAt              string               `json:"updated_at"`
 }
 
 var (
@@ -137,6 +139,60 @@ func formatAccountLastUsed(rfc3339Time string) string {
 	return t.Local().Format("15:04:05")
 }
 
+// EstimateModelCostUSD estimates the equivalent API cost in USD for a given model and token count,
+// modeled after Orca's MODEL_PRICING (blended input/output per 1M tokens).
+func EstimateModelCostUSD(modelID string, tokens int64) float64 {
+	if tokens <= 0 {
+		return 0
+	}
+	s := strings.ToLower(strings.TrimSpace(modelID))
+	ratePerMillion := 5.0 // default blended rate ($5 / 1M tokens)
+	switch {
+	case strings.Contains(s, "fable-5-1"), strings.Contains(s, "mythos-5-1"), strings.Contains(s, "fable-5"), strings.Contains(s, "mythos-5"):
+		ratePerMillion = 22.0 // Orca Fable/Mythos ($10 in / $50 out blended)
+	case strings.Contains(s, "opus-5-5"):
+		ratePerMillion = 9.5 // Orca Opus 5.5 ($4 in / $20 out blended)
+	case strings.Contains(s, "opus-5"), strings.Contains(s, "opus-4-8"), strings.Contains(s, "opus-4-7"), strings.Contains(s, "opus-4-6"):
+		ratePerMillion = 11.0 // Orca Opus 5 / 4.x ($5 in / $25 out blended)
+	case strings.Contains(s, "sonnet-5-5"), strings.Contains(s, "sonnet-5"):
+		ratePerMillion = 4.8 // Orca Sonnet 5.5 ($2 in / $10 out blended)
+	case strings.Contains(s, "sonnet-4-6"):
+		ratePerMillion = 6.5 // Orca Sonnet 4.6 ($3 in / $15 out blended)
+	case strings.Contains(s, "haiku-5-5"):
+		ratePerMillion = 0.35
+	case strings.Contains(s, "haiku-4-5"):
+		ratePerMillion = 2.2
+	case strings.Contains(s, "gemini-4-argon"):
+		ratePerMillion = 8.5 // Gemini 4 Argon High flagship
+	case strings.Contains(s, "gemini-3.1-pro"):
+		ratePerMillion = 5.5 // Gemini 3.1 Pro High
+	case strings.Contains(s, "gemini-3.8-flash"), strings.Contains(s, "gemini-3.7-flash"):
+		ratePerMillion = 1.6 // Gemini 3.8 Flash High
+	case strings.Contains(s, "qwen3.8-max"), strings.Contains(s, "deepseek-v4-pro"), strings.Contains(s, "glm-5.3"):
+		ratePerMillion = 2.4 // Alibaba Token Plan flagship
+	case strings.Contains(s, "qwen3.8-flash"), strings.Contains(s, "deepseek-v4.1-flash"):
+		ratePerMillion = 0.8
+	}
+	val := (float64(tokens) / 1_000_000.0) * ratePerMillion
+	return math.Round(val*1000) / 1000
+}
+
+// EstimateAccountValueUSD estimates cumulative USD API value delivered by a connected subscription account.
+func EstimateAccountValueUSD(acc ConnectedAccount) float64 {
+	model := acc.LastModel
+	if model == "" {
+		switch acc.Provider {
+		case ProviderClaudeCode:
+			model = "claude-code/claude-opus-5-5"
+		case ProviderAlibaba:
+			model = "alibaba/qwen3.8-max"
+		default:
+			model = "antigravity/gemini-4-argon-high"
+		}
+	}
+	return EstimateModelCostUSD(model, acc.TotalTokens)
+}
+
 func overlayLiveAccountStats(summary *QuotaSummary) *QuotaSummary {
 	if summary == nil {
 		return nil
@@ -147,6 +203,7 @@ func overlayLiveAccountStats(summary *QuotaSummary) *QuotaSummary {
 	out.Accounts = make([]AccountQuotaDetail, len(summary.Accounts))
 	copy(out.Accounts, summary.Accounts)
 
+	var totalUSD float64
 	for i := range out.Accounts {
 		for _, acc := range auth.Accounts {
 			if (out.Accounts[i].ID != "" && out.Accounts[i].ID == acc.ID) ||
@@ -164,10 +221,13 @@ func overlayLiveAccountStats(summary *QuotaSummary) *QuotaSummary {
 				out.Accounts[i].QuotaUsedPercent = acc.QuotaUsedPercent
 				out.Accounts[i].WeeklyGeminiPercent = acc.WeeklyGeminiPercent
 				out.Accounts[i].LastUsedAt = formatAccountLastUsed(acc.UpdatedAt)
+				out.Accounts[i].EstimatedValueUSD = EstimateAccountValueUSD(acc)
 				break
 			}
 		}
+		totalUSD += out.Accounts[i].EstimatedValueUSD
 	}
+	out.TotalEstimatedValueUSD = math.Round(totalUSD*1000) / 1000
 	return &out
 }
 
@@ -228,15 +288,16 @@ func buildInstantQuotaSummary(auth SavedGatewayAuth) *QuotaSummary {
 			LastCheckedAt:       time.Now().Format("15:04:05"),
 			Status:              "healthy",
 			QuotaUsedPercent:    acc.QuotaUsedPercent,
+			EstimatedValueUSD:   EstimateAccountValueUSD(acc),
 		}
 		if acc.Disabled {
 			detail.Status = "warning"
 		}
 		switch acc.Provider {
 		case ProviderClaudeCode:
-			inspectClaudeCodeAccount(context.Background(), &acc, &detail, resetText)
+			inspectClaudeCodeAccount(nil, &acc, &detail, resetText)
 		case ProviderAlibaba:
-			inspectAlibabaAccount(context.Background(), &acc, &detail, resetText)
+			inspectAlibabaAccount(nil, &acc, &detail, resetText)
 		default:
 			detail.Tier = "Pro"
 			if strings.Contains(strings.ToLower(acc.Email), "phongsaigon") || strings.Contains(strings.ToLower(acc.Email), "thuctapsinh") {
@@ -263,6 +324,7 @@ func buildInstantQuotaSummary(auth SavedGatewayAuth) *QuotaSummary {
 			}
 		}
 		summary.Accounts[i] = detail
+		summary.TotalEstimatedValueUSD = math.Round((summary.TotalEstimatedValueUSD+detail.EstimatedValueUSD)*1000) / 1000
 		switch detail.Status {
 		case "critical":
 			summary.CriticalAccounts++
@@ -351,6 +413,7 @@ func inspectAllQuotasLocked(ctx context.Context) *QuotaSummary {
 	wg.Wait()
 
 	for _, detail := range summary.Accounts {
+		summary.TotalEstimatedValueUSD = math.Round((summary.TotalEstimatedValueUSD+detail.EstimatedValueUSD)*1000) / 1000
 		switch detail.Status {
 		case "critical":
 			summary.CriticalAccounts++
@@ -393,6 +456,7 @@ func inspectSingleAccountQuota(ctx context.Context, acc ConnectedAccount, resetT
 		LastCheckedAt:       time.Now().Format("15:04:05"),
 		Status:              "healthy",
 		QuotaUsedPercent:    acc.QuotaUsedPercent,
+		EstimatedValueUSD:   EstimateAccountValueUSD(acc),
 	}
 
 	if acc.Disabled {
@@ -411,18 +475,259 @@ func inspectSingleAccountQuota(ctx context.Context, acc ConnectedAccount, resetT
 	return detail
 }
 
+type claudeUsageWindowInput struct {
+	Utilization    *float64 `json:"utilization,omitempty"`
+	UsedPercentage *float64 `json:"used_percentage,omitempty"`
+	Percent        *float64 `json:"percent,omitempty"`
+	ResetsAt       any      `json:"resets_at,omitempty"`
+}
+
+type claudeUsageScopedLimit struct {
+	Kind     string  `json:"kind"`
+	Percent  float64 `json:"percent"`
+	ResetsAt any     `json:"resets_at,omitempty"`
+	Scope    *struct {
+		Model *struct {
+			DisplayName string `json:"display_name"`
+		} `json:"model,omitempty"`
+	} `json:"scope,omitempty"`
+}
+
+type claudeOAuthMoney struct {
+	AmountMinor *float64 `json:"amount_minor,omitempty"`
+	Currency    string   `json:"currency,omitempty"`
+	Exponent    *int     `json:"exponent,omitempty"`
+}
+
+type claudeOAuthUsageResponse struct {
+	FiveHour      *claudeUsageWindowInput  `json:"five_hour,omitempty"`
+	SevenDay      *claudeUsageWindowInput  `json:"seven_day,omitempty"`
+	FableWeekly   *claudeUsageWindowInput  `json:"fable_weekly,omitempty"`
+	FableSevenDay *claudeUsageWindowInput  `json:"fable_seven_day,omitempty"`
+	SevenDayFable *claudeUsageWindowInput  `json:"seven_day_fable,omitempty"`
+	Limits        []claudeUsageScopedLimit `json:"limits,omitempty"`
+	Spend         *struct {
+		Used    *claudeOAuthMoney `json:"used,omitempty"`
+		Limit   *claudeOAuthMoney `json:"limit,omitempty"`
+		Percent *float64          `json:"percent,omitempty"`
+		Enabled bool              `json:"enabled,omitempty"`
+	} `json:"spend,omitempty"`
+	ExtraUsage *struct {
+		IsEnabled     bool     `json:"is_enabled,omitempty"`
+		MonthlyLimit  *float64 `json:"monthly_limit,omitempty"`
+		UsedCredits   *float64 `json:"used_credits,omitempty"`
+		Utilization   *float64 `json:"utilization,omitempty"`
+		DecimalPlaces *int     `json:"decimal_places,omitempty"`
+	} `json:"extra_usage,omitempty"`
+}
+
+func parseClaudeResetAny(val any, fallback string) string {
+	if val == nil {
+		return fallback
+	}
+	switch v := val.(type) {
+	case string:
+		v = strings.TrimSpace(v)
+		if v == "" {
+			return fallback
+		}
+		return formatResetDuration(v, fallback)
+	case float64:
+		if v <= 0 {
+			return fallback
+		}
+		sec := int64(v)
+		if v > 10_000_000_000 {
+			sec = int64(v / 1000)
+		}
+		return formatResetDuration(time.Unix(sec, 0).UTC().Format(time.RFC3339), fallback)
+	default:
+		return fallback
+	}
+}
+
+func extractClaudeWindowRemaining(w *claudeUsageWindowInput, fallbackRemaining int, fallbackReset string) (int, string, bool) {
+	if w == nil {
+		return fallbackRemaining, fallbackReset, false
+	}
+	var used *float64
+	if w.Utilization != nil {
+		used = w.Utilization
+	} else if w.UsedPercentage != nil {
+		used = w.UsedPercentage
+	} else if w.Percent != nil {
+		used = w.Percent
+	}
+	if used == nil {
+		return fallbackRemaining, fallbackReset, false
+	}
+	u := *used
+	if u > 0 && u <= 1.0 {
+		u = u * 100.0
+	}
+	rem := int(math.Round(100.0 - u))
+	if rem < 0 {
+		rem = 0
+	} else if rem > 100 {
+		rem = 100
+	}
+	return rem, parseClaudeResetAny(w.ResetsAt, fallbackReset), true
+}
+
 func inspectClaudeCodeAccount(ctx context.Context, acc *ConnectedAccount, detail *AccountQuotaDetail, defaultResetText string) {
 	detail.Tier = "Pro/Max"
-	detail.SessionPercent = 100
-	detail.WeeklyPercent = 100
+	detail.EstimatedValueUSD = EstimateAccountValueUSD(*acc)
+
+	sessionPct := 100
+	weeklyPct := 100
+	fableWeeklyPct := 100
+	sessionReset := defaultResetText
+	weeklyReset := "⏱️ Đặt lại sau 5d"
+	fableReset := "⏱️ Đặt lại sau 5d"
+	var extraSpendQuota *ModelQuotaInfo
+
+	if acc.QuotaUsedPercent != nil {
+		rem := int(math.Round(100.0 - *acc.QuotaUsedPercent))
+		if rem < 0 {
+			rem = 0
+		} else if rem > 100 {
+			rem = 100
+		}
+		sessionPct = rem
+		weeklyPct = rem
+		fableWeeklyPct = rem
+	}
+	if acc.QuotaResetTime != "" {
+		sessionReset = acc.QuotaResetTime
+	}
+
+	// Orca Live Claude OAuth Usage Fetch (GET https://api.anthropic.com/api/oauth/usage)
+	if ctx != nil && strings.TrimSpace(acc.AccessToken) != "" && ClaudeOAuthUsageEndpoint != "" {
+		reqCtx, cancel := context.WithTimeout(ctx, 3500*time.Millisecond)
+		req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, ClaudeOAuthUsageEndpoint, nil)
+		if err == nil {
+			req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(acc.AccessToken))
+			req.Header.Set("anthropic-beta", "oauth-2025-04-20")
+			req.Header.Set("User-Agent", "claude-code/2.1.0")
+			req.Header.Set("Accept", "application/json")
+
+			client := &http.Client{
+				Transport: SharedHTTPTransport,
+				Timeout:   3500 * time.Millisecond,
+			}
+			if resp, doErr := client.Do(req); doErr == nil {
+				if resp.StatusCode == http.StatusOK {
+					var usageResp claudeOAuthUsageResponse
+					if decErr := json.NewDecoder(resp.Body).Decode(&usageResp); decErr == nil {
+						if rem, rst, ok := extractClaudeWindowRemaining(usageResp.FiveHour, sessionPct, sessionReset); ok {
+							sessionPct = rem
+							sessionReset = rst
+						}
+						if rem, rst, ok := extractClaudeWindowRemaining(usageResp.SevenDay, weeklyPct, weeklyReset); ok {
+							weeklyPct = rem
+							weeklyReset = rst
+							fableWeeklyPct = rem
+							fableReset = rst
+						}
+						// Check Fable / Mythos weekly scoped window (Orca mapFableWeeklyWindow)
+						fableFound := false
+						for _, lim := range usageResp.Limits {
+							if lim.Kind == "weekly_scoped" && lim.Scope != nil && lim.Scope.Model != nil &&
+								strings.EqualFold(strings.TrimSpace(lim.Scope.Model.DisplayName), "fable") {
+								u := lim.Percent
+								if u > 0 && u <= 1.0 {
+									u *= 100.0
+								}
+								rem := int(math.Round(100.0 - u))
+								if rem < 0 {
+									rem = 0
+								} else if rem > 100 {
+									rem = 100
+								}
+								fableWeeklyPct = rem
+								fableReset = parseClaudeResetAny(lim.ResetsAt, weeklyReset)
+								fableFound = true
+								break
+							}
+						}
+						if !fableFound {
+							for _, cand := range []*claudeUsageWindowInput{usageResp.FableWeekly, usageResp.FableSevenDay, usageResp.SevenDayFable} {
+								if rem, rst, ok := extractClaudeWindowRemaining(cand, fableWeeklyPct, weeklyReset); ok {
+									fableWeeklyPct = rem
+									fableReset = rst
+									break
+								}
+							}
+						}
+						// Check Extra Usage / Spend limit (Orca mapClaudeExtraUsage)
+						if usageResp.Spend != nil && usageResp.Spend.Limit != nil && usageResp.Spend.Limit.AmountMinor != nil && *usageResp.Spend.Limit.AmountMinor > 0 {
+							exp := 2
+							if usageResp.Spend.Limit.Exponent != nil {
+								exp = *usageResp.Spend.Limit.Exponent
+							}
+							div := math.Pow10(exp)
+							limitUSD := *usageResp.Spend.Limit.AmountMinor / div
+							usedUSD := 0.0
+							if usageResp.Spend.Used != nil && usageResp.Spend.Used.AmountMinor != nil {
+								usedUSD = *usageResp.Spend.Used.AmountMinor / div
+							}
+							remPct := 100
+							if limitUSD > 0 {
+								remPct = int(math.Round(100.0 - (usedUSD/limitUSD)*100.0))
+								if remPct < 0 {
+									remPct = 0
+								} else if remPct > 100 {
+									remPct = 100
+								}
+							}
+							extraSpendQuota = &ModelQuotaInfo{
+								ModelID:          "claude-extra-credits",
+								DisplayName:      fmt.Sprintf("Extra Usage Credits ($%.2f / $%.2f)", usedUSD, limitUSD),
+								RemainingPercent: remPct,
+								ResetTime:        "⏱️ Hạn mức tín dụng tháng",
+								Status:           getQuotaStatus(remPct),
+							}
+						}
+					}
+				}
+				_ = resp.Body.Close()
+			}
+		}
+		cancel()
+	}
+
+	detail.SessionPercent = sessionPct
+	detail.WeeklyPercent = weeklyPct
+	detail.ResetTimeText = sessionReset
+	minPct := sessionPct
+	if weeklyPct < minPct {
+		minPct = weeklyPct
+	}
+	if !acc.Disabled {
+		if minPct <= 20 {
+			detail.Status = "critical"
+		} else if minPct <= 50 {
+			detail.Status = "warning"
+		} else {
+			detail.Status = "healthy"
+		}
+	}
+
+	fableEffectivePct := sessionPct
+	if fableWeeklyPct < fableEffectivePct {
+		fableEffectivePct = fableWeeklyPct
+	}
+
 	detail.SupportedModels = []string{
 		"claude-code/claude-opus-5-5",
 		"claude-code/claude-fable-5-1",
+		"claude-code/claude-mythos-5-1",
 		"claude-code/claude-sonnet-5-5",
 		"claude-code/claude-haiku-5-5",
 		"claude-code/claude-sonnet-5",
 		"claude-code/claude-opus-5",
 		"claude-code/claude-fable-5",
+		"claude-code/claude-mythos-5",
 		"claude-code/claude-opus-4-8",
 		"claude-code/claude-opus-4-7",
 		"claude-code/claude-opus-4-6-thinking",
@@ -430,15 +735,18 @@ func inspectClaudeCodeAccount(ctx context.Context, acc *ConnectedAccount, detail
 		"claude-code/claude-haiku-4-5",
 	}
 	detail.ModelQuotas = []ModelQuotaInfo{
-		{ModelID: "claude-code/claude-opus-5-5", DisplayName: "Opus 5.5 (Default • Extra)", RemainingPercent: 100, ResetTime: defaultResetText, Status: "good"},
-		{ModelID: "claude-code/claude-fable-5-1", DisplayName: "Fable 5.1", RemainingPercent: 100, ResetTime: defaultResetText, Status: "good"},
-		{ModelID: "claude-code/claude-sonnet-5-5", DisplayName: "Sonnet 5.5", RemainingPercent: 100, ResetTime: defaultResetText, Status: "good"},
-		{ModelID: "claude-code/claude-haiku-5-5", DisplayName: "Haiku 5.5", RemainingPercent: 100, ResetTime: defaultResetText, Status: "good"},
-		{ModelID: "claude-code/claude-sonnet-5", DisplayName: "Sonnet 5 / Opus 5 / Fable 5", RemainingPercent: 100, ResetTime: defaultResetText, Status: "good"},
-		{ModelID: "claude-code/claude-opus-4-8", DisplayName: "Opus 4.8 / Opus 4.7", RemainingPercent: 100, ResetTime: defaultResetText, Status: "good"},
-		{ModelID: "claude-code/claude-opus-4-6-thinking", DisplayName: "Opus 4.6 (Thinking)", RemainingPercent: 100, ResetTime: defaultResetText, Status: "good"},
-		{ModelID: "claude-code/claude-sonnet-4-6", DisplayName: "Sonnet 4.6", RemainingPercent: 100, ResetTime: defaultResetText, Status: "good"},
-		{ModelID: "claude-code/claude-haiku-4-5", DisplayName: "Haiku 4.5", RemainingPercent: 100, ResetTime: defaultResetText, Status: "good"},
+		{ModelID: "claude-window-5h", DisplayName: "Claude Session (Giới hạn 5h)", RemainingPercent: sessionPct, ResetTime: sessionReset, Status: getQuotaStatus(sessionPct)},
+		{ModelID: "claude-window-7d", DisplayName: "Claude Weekly (Giới hạn 7 ngày)", RemainingPercent: weeklyPct, ResetTime: weeklyReset, Status: getQuotaStatus(weeklyPct)},
+		{ModelID: "claude-code/claude-opus-5-5", DisplayName: "Opus 5.5 (Default • Extra)", RemainingPercent: sessionPct, ResetTime: sessionReset, Status: getQuotaStatus(sessionPct)},
+		{ModelID: "claude-code/claude-fable-5-1", DisplayName: "Fable 5.1 / Mythos 5.1 (Weekly)", RemainingPercent: fableEffectivePct, ResetTime: fableReset, Status: getQuotaStatus(fableEffectivePct)},
+		{ModelID: "claude-code/claude-sonnet-5-5", DisplayName: "Sonnet 5.5 / Haiku 5.5", RemainingPercent: sessionPct, ResetTime: sessionReset, Status: getQuotaStatus(sessionPct)},
+		{ModelID: "claude-code/claude-sonnet-5", DisplayName: "Sonnet 5 / Opus 5 / Fable 5 / Mythos 5", RemainingPercent: sessionPct, ResetTime: sessionReset, Status: getQuotaStatus(sessionPct)},
+		{ModelID: "claude-code/claude-opus-4-8", DisplayName: "Opus 4.8 / Opus 4.7", RemainingPercent: sessionPct, ResetTime: sessionReset, Status: getQuotaStatus(sessionPct)},
+		{ModelID: "claude-code/claude-opus-4-6-thinking", DisplayName: "Opus 4.6 (Thinking) / Sonnet 4.6", RemainingPercent: sessionPct, ResetTime: sessionReset, Status: getQuotaStatus(sessionPct)},
+		{ModelID: "claude-code/claude-haiku-4-5", DisplayName: "Haiku 4.5", RemainingPercent: sessionPct, ResetTime: sessionReset, Status: getQuotaStatus(sessionPct)},
+	}
+	if extraSpendQuota != nil {
+		detail.ModelQuotas = append(detail.ModelQuotas, *extraSpendQuota)
 	}
 }
 

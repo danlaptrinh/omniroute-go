@@ -39,9 +39,10 @@ var (
 	OAuthTokenEndpoint            = "https://oauth2.googleapis.com/token"
 	OAuthUserInfoEndpoint         = "https://www.googleapis.com/oauth2/v2/userinfo"
 	CCPALoadCodeAssistEndpoint          = "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
-	CCPARetrieveUserQuotaEndpoint       = "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota"
+	CCPARetrieveUserQuotaEndpoint        = "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota"
 	CCPARetrieveUserQuotaSummaryEndpoint = "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
-	ClaudeTokenEndpoint                 = "https://console.anthropic.com/v1/oauth/token"
+	ClaudeTokenEndpoint                  = "https://console.anthropic.com/v1/oauth/token"
+	ClaudeOAuthUsageEndpoint             = "https://api.anthropic.com/api/oauth/usage"
 )
 
 // Internal mutex, in-memory config cache, and round-robin state
@@ -1110,8 +1111,14 @@ var defaultBuiltinAliases = map[string]string{
 	"cursor-small":      "antigravity/gemini-3.5-flash-lite",
 	"deepseek-r1":       "alibaba/deepseek-v4-pro",
 	"deepseek-v3":       "alibaba/deepseek-v4.1-flash",
-	"qwen-max":          "alibaba/qwen3.8-max",
-	"auto/smart":        "antigravity/claude-opus-4-6-thinking",
+	"qwen-max":              "alibaba/qwen3.8-max",
+	"auto/smart":            "antigravity/claude-opus-4-6-thinking",
+	"model_placeholder_m26": "antigravity/claude-opus-4-6-thinking",
+	"model_placeholder_m35": "antigravity/claude-sonnet-4-6",
+	"claude-mythos-5-1":     "claude-code/claude-mythos-5-1",
+	"claude-mythos-5":       "claude-code/claude-mythos-5",
+	"claude-fable-5-1":      "claude-code/claude-fable-5-1",
+	"claude-opus-5-5":       "claude-code/claude-opus-5-5",
 }
 
 // ResolveModelAlias resolves a model ID against custom aliases and built-in industry aliases.

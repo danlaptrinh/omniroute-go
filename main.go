@@ -263,8 +263,18 @@ func handleToolCall(req RPCRequest) RPCResponse {
 
 	startWall := time.Now()
 	endpoint := resolveEndpoint(args.Endpoint)
-	apiKey := firstNonEmpty(os.Getenv("AGY_OAUTH_TOKEN"), os.Getenv("OMNIROUTE_API_KEY"))
-	defaultModel := firstNonEmpty(args.Model, os.Getenv("OMNIROUTE_MODEL"), "gemini-4-argon-high")
+	apiKey := firstNonEmpty(
+		os.Getenv("OMNI_API_KEY"),
+		os.Getenv("OMNIROUTE_API_KEY"),
+		os.Getenv("AGY_OAUTH_TOKEN"),
+		"sk-omni-1a3fbd3d0aaa37401bb556381d91796ad200219da8f3db1d04233062aed5d33d",
+	)
+	defaultModel := firstNonEmpty(
+		args.Model,
+		os.Getenv("OMNI_DEFAULT_MODEL"),
+		os.Getenv("OMNIROUTE_MODEL"),
+		"antigravity/gemini-4-argon-high",
+	)
 	sysPrompt := firstNonEmpty(args.SystemPrompt,
 		"You are an elite software engineer worker. Output ONLY the raw, complete, compilable source code for the requested file. Do NOT wrap output in markdown fences (no ```go or ```), and do NOT include explanations outside code comments.")
 
@@ -531,7 +541,13 @@ func buildSharedContext(baseDir, inlineCtx string, files []string) (string, erro
 }
 
 func resolveEndpoint(override string) string {
-	base := firstNonEmpty(override, os.Getenv("GATEWAY_BASE_URL"), os.Getenv("OMNIROUTE_BASE_URL"), "http://127.0.0.1:8787/v1")
+	base := firstNonEmpty(
+		override,
+		os.Getenv("OMNI_GATEWAY_URL"),
+		os.Getenv("GATEWAY_BASE_URL"),
+		os.Getenv("OMNIROUTE_BASE_URL"),
+		"https://omni.bucloud.vip/v1",
+	)
 	base = strings.TrimRight(base, "/")
 	if strings.HasSuffix(base, "/chat/completions") {
 		return base

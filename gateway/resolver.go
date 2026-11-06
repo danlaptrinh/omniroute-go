@@ -425,6 +425,8 @@ func (r *DefaultResolver) Resolve(modelID string, defaultFallbacks []string) Res
 		norm == "claude-sonnet-5-5" ||
 		strings.HasPrefix(norm, "claude-fable-") ||
 		strings.HasPrefix(norm, "fable-") ||
+		strings.HasPrefix(norm, "claude-mythos-") ||
+		strings.HasPrefix(norm, "mythos-") ||
 		norm == "claude-sonnet-4-6-thinking" {
 		res.Provider = ProviderClaudeCode
 		switch norm {
@@ -443,6 +445,18 @@ func (r *DefaultResolver) Resolve(modelID string, defaultFallbacks []string) Res
 		case "claude-fable-5-1", "claude-fable-5.1", "fable-5.1", "fable-5-1":
 			res.CanonicalID = "claude-code/claude-fable-5-1"
 			res.UpstreamModelID = "claude-fable-5-1"
+			res.ThinkingLevel = ThinkingLevelHigh
+			res.ReasoningEffort = "high"
+			res.IncludeThoughts = true
+		case "claude-mythos-5-1", "claude-mythos-5.1", "mythos-5.1", "mythos-5-1":
+			res.CanonicalID = "claude-code/claude-mythos-5-1"
+			res.UpstreamModelID = "claude-mythos-5-1"
+			res.ThinkingLevel = ThinkingLevelHigh
+			res.ReasoningEffort = "high"
+			res.IncludeThoughts = true
+		case "claude-mythos-5", "mythos-5":
+			res.CanonicalID = "claude-code/claude-mythos-5"
+			res.UpstreamModelID = "claude-mythos-5"
 			res.ThinkingLevel = ThinkingLevelHigh
 			res.ReasoningEffort = "high"
 			res.IncludeThoughts = true
@@ -757,7 +771,7 @@ func (r *DefaultResolver) Resolve(modelID string, defaultFallbacks []string) Res
 		}
 	}
 
-	primaryCandidates := []string{res.OmniBaseModelID, res.CCPAModelID}
+	primaryCandidates := []string{res.CanonicalID, res.OmniBaseModelID, res.CCPAModelID}
 	primaryCandidates = append(primaryCandidates, extraCandidates...)
 	res.FallbackChain = buildFallbackChain(primaryCandidates, defaultFallbacks)
 
@@ -867,12 +881,14 @@ func (r *DefaultResolver) ListModels() []OpenAIModelCard {
 		{"claude-code/claude-opus-5-5", "claude-code", "claude-code", "claude-code"},
 		{"claude-code/claude-opus-5-5-thinking", "claude-code", "claude-code", "claude-code"},
 		{"claude-code/claude-fable-5-1", "claude-code", "claude-code", "claude-code"},
+		{"claude-code/claude-mythos-5-1", "claude-code", "claude-code", "claude-code"},
 		{"claude-code/claude-sonnet-5-5", "claude-code", "claude-code", "claude-code"},
 		{"claude-code/claude-sonnet-5-5-thinking", "claude-code", "claude-code", "claude-code"},
 		{"claude-code/claude-haiku-5-5", "claude-code", "claude-code", "claude-code"},
 		{"claude-code/claude-sonnet-5", "claude-code", "claude-code", "claude-code"},
 		{"claude-code/claude-opus-5", "claude-code", "claude-code", "claude-code"},
 		{"claude-code/claude-fable-5", "claude-code", "claude-code", "claude-code"},
+		{"claude-code/claude-mythos-5", "claude-code", "claude-code", "claude-code"},
 		{"claude-code/claude-opus-4-8", "claude-code", "claude-code", "claude-code"},
 		{"claude-code/claude-opus-4-7", "claude-code", "claude-code", "claude-code"},
 		{"claude-code/claude-opus-4-6-thinking", "claude-code", "claude-code", "claude-code"},

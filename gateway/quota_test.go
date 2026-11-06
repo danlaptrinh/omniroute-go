@@ -134,4 +134,91 @@ func TestIncrementVectorRAGHitsNoDeadlockAndFastQuotaSummary(t *testing.T) {
 	}
 }
 
+func TestOrcaPricingAndMythosModels(t *testing.T) {
+	mythosPrice := EstimateModelCostUSD("claude-code/claude-mythos-5-1", 2000)
+	if mythosPrice <= 0 {
+		t.Errorf("expected positive price for mythos, got %f", mythosPrice)
+	}
+
+	opusPrice := EstimateModelCostUSD("claude-code/claude-opus-5-5", 2000)
+	if opusPrice <= 0 || mythosPrice <= opusPrice {
+		t.Errorf("expected mythos price > opus price, got mythos=%f opus=%f", mythosPrice, opusPrice)
+	}
+
+	accValAgyUltra := EstimateAccountValueUSD(ConnectedAccount{
+		Provider:    ProviderAntigravity,
+		Email:       "ultra@gmail.com",
+		TotalTokens: 50000,
+	})
+	if accValAgyUltra <= 0.4 {
+		t.Errorf("expected Ultra tier value > 0.4, got %f", accValAgyUltra)
+	}
+
+	accValClaude := EstimateAccountValueUSD(ConnectedAccount{
+		Provider:    ProviderClaudeCode,
+		TotalTokens: 20000,
+	})
+	if accValClaude <= 0.15 {
+		t.Errorf("expected Claude Code account value > 0.15, got %f", accValClaude)
+	}
+}
+
+func TestFormatSwarmRunMarkdownAndVault(t *testing.T) {
+	run := SwarmRunSummary{
+		ID:                "swarm-test-123",
+		Timestamp:         "15:30:00 07/11/2026",
+		MasterGoal:        "Triển khai 50 bài viết Pillar & Cluster chuẩn SEO E-E-A-T",
+		ManagerModel:      "antigravity/gemini-4-argon-high",
+		ManagerAccount:    "lead@bucloud.vip",
+		TotalSubAgents:    2,
+		SuccessCount:      2,
+		WatchdogFailovers: 1,
+		DistinctAccounts:  2,
+		TotalWallTimeMs:   3500,
+		TotalTokens:       45000,
+		EstimatedValueUSD: 0.158,
+		SharedLinkMatrix:  "1. /vps-cloud -> /cloud-hosting\n2. /cloud-hosting -> /vps-cloud",
+		Results: []SubAgentResult{
+			{
+				Index:           1,
+				Role:            "Sub-Agent #1 (Pillar Writer)",
+				ResolvedModel:   "antigravity/gemini-3.1-pro-high",
+				AccountEmail:    "acc1@gmail.com",
+				Status:          "ok",
+				LatencyMs:       1800,
+				Tokens:          22000,
+				Output:          "# Bài viết Pillar VPS Cloud tốc độ cao",
+				WatchdogRetried: true,
+				FailoverFrom:    "slow_acc@gmail.com",
+			},
+			{
+				Index:         2,
+				Role:          "Sub-Agent #2 (Schema & Code)",
+				ResolvedModel: "antigravity/gemini-3.8-flash-high",
+				AccountEmail:  "acc2@gmail.com",
+				Status:        "ok",
+				LatencyMs:     1200,
+				Tokens:        23000,
+				Output:        "```json\n{\n  \"@context\": \"https://schema.org\"\n}\n```",
+			},
+		},
+	}
+
+	md := FormatSwarmRunMarkdown(run)
+	if !strings.Contains(md, "Báo Cáo Chiến Dịch 50-Sub-Agent Swarm") {
+		t.Errorf("expected title in markdown export")
+	}
+	if !strings.Contains(md, "Ma Trận Liên Kết Nội Bộ") {
+		t.Errorf("expected link matrix section")
+	}
+	if !strings.Contains(md, "Watchdog Failover") {
+		t.Errorf("expected watchdog failover badge")
+	}
+
+	vaultPath := SubAgentVaultFilePath()
+	if !strings.Contains(vaultPath, "omni_subagent_vault.json") {
+		t.Errorf("expected vault file name omni_subagent_vault.json, got %q", vaultPath)
+	}
+}
+
 

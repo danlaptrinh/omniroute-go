@@ -96,12 +96,14 @@ var curatedDashboardModels = []struct {
 	{"claude-code/claude-opus-5-5", ProviderClaudeCode},
 	{"claude-code/claude-opus-5-5-thinking", ProviderClaudeCode},
 	{"claude-code/claude-fable-5-1", ProviderClaudeCode},
+	{"claude-code/claude-mythos-5-1", ProviderClaudeCode},
 	{"claude-code/claude-sonnet-5-5", ProviderClaudeCode},
 	{"claude-code/claude-sonnet-5-5-thinking", ProviderClaudeCode},
 	{"claude-code/claude-haiku-5-5", ProviderClaudeCode},
 	{"claude-code/claude-sonnet-5", ProviderClaudeCode},
 	{"claude-code/claude-opus-5", ProviderClaudeCode},
 	{"claude-code/claude-fable-5", ProviderClaudeCode},
+	{"claude-code/claude-mythos-5", ProviderClaudeCode},
 	{"claude-code/claude-opus-4-8", ProviderClaudeCode},
 	{"claude-code/claude-opus-4-7", ProviderClaudeCode},
 	{"claude-code/claude-opus-4-6-thinking", ProviderClaudeCode},
@@ -208,6 +210,8 @@ func buildModelBadge(id string) string {
 		return "BUILT-IN Claude Opus 5.5 (Default)"
 	case strings.Contains(s, "claude-fable-5-1"):
 		return "BUILT-IN Claude Fable 5.1"
+	case strings.Contains(s, "claude-mythos-5-1"):
+		return "BUILT-IN Claude Mythos 5.1 (New)"
 	case strings.Contains(s, "claude-sonnet-5-5"):
 		return "BUILT-IN Claude Sonnet 5.5"
 	case strings.Contains(s, "claude-haiku-5-5"):
@@ -218,6 +222,8 @@ func buildModelBadge(id string) string {
 		return "BUILT-IN Claude Opus 5"
 	case strings.Contains(s, "claude-fable-5"):
 		return "BUILT-IN Claude Fable 5"
+	case strings.Contains(s, "claude-mythos-5"):
+		return "BUILT-IN Claude Mythos 5 (New)"
 	case strings.Contains(s, "claude-opus-4-8"):
 		return "BUILT-IN Claude Opus 4.8"
 	case strings.Contains(s, "claude-opus-4-7"):
