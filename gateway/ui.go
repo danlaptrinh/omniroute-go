@@ -133,24 +133,325 @@ const gatewayUIHTML = `<!DOCTYPE html>
       width: 100%;
       box-sizing: border-box;
     }
+    .mobile-topbar,
+    .mobile-quick-pills,
+    .mobile-bottom-nav,
+    .mobile-drawer-backdrop,
+    .mobile-close-drawer-btn {
+      display: none;
+    }
+    .kpi-summary-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+    .acc-exec-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 6px;
+      padding-top: 2px;
+      text-align: center;
+    }
+    .ep-subtabs-bar {
+      display: inline-flex;
+      gap: 4px;
+      background: #111520;
+      border: 1px solid #242c3d;
+      padding: 4px;
+      border-radius: 10px;
+      margin-bottom: 18px;
+      max-width: 100%;
+      overflow-x: auto;
+      scrollbar-width: none;
+    }
+    .ep-subtabs-bar::-webkit-scrollbar { display: none; }
+    .ep-subtabs-bar .btn { white-space: nowrap; }
+    .ep-url-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 6px 0;
+      gap: 10px;
+    }
+    .ep-url-label {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 95px;
+      white-space: nowrap;
+    }
+    .ep-url-value {
+      flex: 1;
+      min-width: 0;
+      font-family: monospace;
+      font-size: 13px;
+      font-weight: 700;
+      color: #fff;
+      background: rgba(8, 11, 16, 0.55);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      padding: 5px 10px;
+      border-radius: 6px;
+      overflow-x: auto;
+      white-space: nowrap;
+      scrollbar-width: none;
+    }
+    .ep-url-value::-webkit-scrollbar { display: none; }
+    .ep-local-row,
+    .ep-tunnel-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 13px 4px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+    .responsive-search-3col {
+      display: grid;
+      grid-template-columns: 260px 1fr auto;
+      gap: 10px;
+      margin-top: 14px;
+      align-items: center;
+    }
+    .responsive-search-2col {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+      margin-top: 12px;
+    }
+    .responsive-pg-grid {
+      display: grid;
+      grid-template-columns: 1fr auto auto;
+      gap: 8px;
+      margin-top: 14px;
+      align-items: center;
+    }
     @media (max-width: 960px) {
       .app-layout {
         flex-direction: column;
       }
-      .sidebar {
-        width: 100%;
-        min-width: 100%;
-        height: auto;
-        position: relative;
-        border-right: none;
+      .desktop-main-topbar {
+        display: none !important;
+      }
+      .mobile-topbar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 10px 14px;
+        background: rgba(13, 17, 23, 0.95);
+        backdrop-filter: blur(12px);
         border-bottom: 1px solid var(--border);
+        position: sticky;
+        top: 0;
+        z-index: 250;
+      }
+      .mobile-hamburger-btn {
+        background: #171d2b;
+        border: 1px solid #2b354f;
+        color: #fff;
+        padding: 6px 10px;
+        border-radius: 8px;
+        font-size: 16px;
+        line-height: 1;
+      }
+      .mobile-quick-pills {
+        display: flex;
+        gap: 6px;
+        padding: 8px 12px;
+        background: #0f141f;
+        border-bottom: 1px solid var(--border);
+        overflow-x: auto;
+        scrollbar-width: none;
+        -ms-overflow-style: none;
+        position: sticky;
+        top: 51px;
+        z-index: 240;
+      }
+      .mobile-quick-pills::-webkit-scrollbar {
+        display: none;
+      }
+      .mobile-pill-btn {
+        background: #161c2a;
+        border: 1px solid #263044;
+        color: var(--muted);
+        padding: 6px 11px;
+        border-radius: 999px;
+        font-size: 11.5px;
+        font-weight: 600;
+        white-space: nowrap;
+        flex-shrink: 0;
+      }
+      .mobile-pill-btn.active {
+        background: rgba(56, 189, 248, 0.16);
+        color: #38bdf8;
+        border-color: rgba(56, 189, 248, 0.45);
+      }
+      .mobile-drawer-backdrop.open,
+      .mobile-drawer-backdrop.show {
+        display: block;
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.72);
+        backdrop-filter: blur(3px);
+        z-index: 350;
+      }
+      .sidebar {
+        position: fixed;
+        top: 0;
+        left: 0;
+        bottom: 0;
+        width: 285px;
+        min-width: 285px;
+        max-width: 85vw;
+        height: 100dvh;
+        z-index: 400;
+        transform: translateX(-105%);
+        transition: transform 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+        border-right: 1px solid var(--border);
+      }
+      .sidebar.mobile-open {
+        transform: translateX(0);
+      }
+      .mobile-close-drawer-btn {
+        display: inline-flex;
+        background: transparent;
+        border: 1px solid #2b354f;
+        color: #cbd5e1;
+        padding: 4px 8px;
+        border-radius: 6px;
+        font-size: 13px;
       }
       .sidebar-nav {
-        flex-direction: row;
-        overflow-x: auto;
+        flex-direction: column;
+        overflow-y: auto;
+        overflow-x: hidden;
       }
       .main-content {
-        padding: 16px 14px;
+        padding: 14px 12px 82px 12px;
+      }
+      .mobile-bottom-nav {
+        display: grid;
+        grid-template-columns: repeat(5, 1fr);
+        position: fixed;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        background: rgba(15, 20, 31, 0.97);
+        backdrop-filter: blur(12px);
+        border-top: 1px solid #263044;
+        padding: 6px 4px calc(6px + env(safe-area-inset-bottom));
+        z-index: 260;
+        box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.5);
+      }
+      .mobile-bnav-btn {
+        background: transparent;
+        border: none;
+        color: var(--muted);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 3px;
+        padding: 4px 2px;
+        font-size: 10.5px;
+        font-weight: 600;
+        border-radius: 8px;
+      }
+      .mobile-bnav-btn:hover {
+        background: transparent;
+        border: none;
+      }
+      .mobile-bnav-btn .bnav-icon {
+        font-size: 16px;
+        line-height: 1.1;
+      }
+      .mobile-bnav-btn.active {
+        color: #38bdf8;
+      }
+      .grid-2 {
+        grid-template-columns: 1fr !important;
+        gap: 12px;
+      }
+      .responsive-search-3col,
+      .responsive-search-2col,
+      .responsive-pg-grid {
+        grid-template-columns: 1fr !important;
+      }
+      .card {
+        padding: 14px 12px !important;
+        border-radius: 12px;
+        margin-bottom: 14px;
+      }
+      h2 {
+        font-size: 15px !important;
+      }
+    }
+    @media (max-width: 600px) {
+      .kpi-summary-grid {
+        grid-template-columns: repeat(2, 1fr) !important;
+        gap: 8px !important;
+      }
+      .kpi-summary-grid > div:last-child:nth-child(odd) {
+        grid-column: span 2;
+      }
+      .kpi-summary-grid .setting-card {
+        padding: 10px 12px !important;
+        margin-bottom: 0 !important;
+      }
+      .acc-exec-grid {
+        grid-template-columns: repeat(2, 1fr) !important;
+        gap: 8px !important;
+      }
+      #quotaCardsGrid,
+      #modelsCardsGrid,
+      #combosGridBox,
+      #saAccountSlotsGrid,
+      #saSwarmResultsBox div[style*="grid-template-columns"],
+      #saAutomationsListBox > div,
+      #saVaultHistoryGrid > div {
+        grid-template-columns: 1fr !important;
+      }
+      .ep-subtabs-bar {
+        display: flex !important;
+        width: 100%;
+        overflow-x: auto;
+        scrollbar-width: none;
+      }
+      .ep-subtabs-bar::-webkit-scrollbar {
+        display: none;
+      }
+      .ep-subtabs-bar .btn {
+        flex: 1 0 auto;
+        justify-content: center;
+        padding: 6px 10px !important;
+        font-size: 11.5px !important;
+      }
+      .ep-url-row {
+        gap: 8px;
+        padding: 6px 0;
+      }
+      .ep-url-label {
+        min-width: 74px;
+        font-weight: 600;
+      }
+      .ep-url-value {
+        font-size: 12px;
+        padding: 5px 8px;
+      }
+      .ep-local-row > div:last-child,
+      .ep-tunnel-row > div:last-child {
+        width: 100%;
+        justify-content: space-between;
+      }
+      .setting-row {
+        flex-wrap: wrap;
+      }
+      table {
+        display: block;
+        overflow-x: auto;
+        white-space: nowrap;
+        -webkit-overflow-scrolling: touch;
       }
     }
     .header {
@@ -355,13 +656,53 @@ const gatewayUIHTML = `<!DOCTYPE html>
   </style>
 </head>
 <body>
+  <!-- MOBILE STICKY TOP HEADER -->
+  <header class="mobile-topbar">
+    <div style="display:flex;align-items:center;gap:10px;">
+      <button class="mobile-hamburger-btn" onclick="toggleMobileSidebar()" aria-label="Menu">☰</button>
+      <div>
+        <div style="font-size:15px;font-weight:700;color:#fff;display:flex;align-items:center;gap:6px;">
+          <span>OmniRoute-Go</span>
+          <span class="badge badge-green" style="font-size:9.5px;padding:2px 6px;">v2.0</span>
+        </div>
+        <div style="font-size:10.5px;color:#38bdf8;font-family:monospace;">omni.bucloud.vip/v1</div>
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:6px;">
+      <span class="badge badge-green" style="font-size:10.5px;padding:3px 7px;">🟢 Online</span>
+      <span class="badge" style="background:#1e293b;color:#cbd5e1;cursor:pointer;font-size:10.5px;padding:3px 7px;" onclick="openChangePasswordModal()">🛡️ Admin</span>
+    </div>
+  </header>
+
+  <!-- MOBILE QUICK HORIZONTAL PILLS (NO SCROLLBAR) -->
+  <div class="mobile-quick-pills">
+    <button class="mobile-pill-btn active" data-view="view-quota" onclick="switchNav('view-quota')">📊 Hạn Mức</button>
+    <button class="mobile-pill-btn" data-view="view-subagents" onclick="switchNav('view-subagents')">🐝 50 Sub-Agents</button>
+    <button class="mobile-pill-btn" data-view="view-combos" onclick="switchNav('view-combos')">🔗 Combo</button>
+    <button class="mobile-pill-btn" data-view="view-endpoint" onclick="switchNav('view-endpoint')">🎯 Điểm Cuối</button>
+    <button class="mobile-pill-btn" data-view="view-models" onclick="switchNav('view-models')">🤖 Mô Hình</button>
+    <button class="mobile-pill-btn" data-view="view-providers" onclick="switchNav('view-providers')">🔌 Kết Nối</button>
+    <button class="mobile-pill-btn" data-view="view-keys" onclick="switchNav('view-keys')">🔑 API Keys</button>
+    <button class="mobile-pill-btn" data-view="view-vectordb" onclick="switchNav('view-vectordb')">🧠 Vector DB</button>
+    <button class="mobile-pill-btn" data-view="view-optimization" onclick="switchNav('view-optimization')">🚀 Tối Ưu</button>
+    <button class="mobile-pill-btn" data-view="view-compression" onclick="switchNav('view-compression')">⚡ Nén Token</button>
+    <button class="mobile-pill-btn" data-view="view-logs" onclick="switchNav('view-logs')">📋 Nhật Ký</button>
+    <button class="mobile-pill-btn" data-view="view-playground" onclick="switchNav('view-playground')">🧪 Playground</button>
+  </div>
+
+  <!-- MOBILE OFF-CANVAS BACKDROP -->
+  <div id="mobileDrawerBackdrop" class="mobile-drawer-backdrop" onclick="closeMobileSidebar()"></div>
+
   <div class="app-layout">
     <!-- SIDEBAR VERTICAL MENU -->
-    <aside class="sidebar">
+    <aside id="mainSidebar" class="sidebar">
       <div class="sidebar-header">
-        <div class="brand-title">
-          <span>OmniRoute-Go</span>
-          <span class="badge badge-green" style="font-size:10px;">v2.0</span>
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+          <div class="brand-title">
+            <span>OmniRoute-Go</span>
+            <span class="badge badge-green" style="font-size:10px;">v2.0</span>
+          </div>
+          <button class="mobile-close-drawer-btn" onclick="closeMobileSidebar()">✕ Đóng</button>
         </div>
         <div class="brand-sub">
           AI Routing Engine đa nhà cung cấp: Antigravity, Claude Code, Alibaba Token Plan
@@ -438,7 +779,7 @@ const gatewayUIHTML = `<!DOCTYPE html>
     <!-- MAIN CONTENT (FULL WIDTH EXPANSION) -->
     <main class="main-content">
       <!-- Top Bar in Main Content -->
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;padding-bottom:12px;border-bottom:1px solid var(--border);">
+      <div class="desktop-main-topbar" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;padding-bottom:12px;border-bottom:1px solid var(--border);">
         <div>
           <h1 style="margin:0;font-size:20px;font-weight:700;">Bảng Điều Khiển OmniRoute-Go</h1>
           <div style="font-size:12px;color:var(--muted);margin-top:2px;">Hệ thống định tuyến & giám sát Gateway hiệu năng cao</div>
@@ -463,7 +804,7 @@ const gatewayUIHTML = `<!DOCTYPE html>
     </div>
 
     <!-- Summary KPI Cards (matching screenshot 1) -->
-    <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(170px, 1fr));gap:12px;margin-bottom:16px;">
+    <div class="kpi-summary-grid">
       <div class="setting-card" style="padding:14px;border-left:3px solid #38bdf8;">
         <div style="font-size:11px;color:var(--muted);font-weight:600;">TỔNG CỘNG</div>
         <div id="kpiTotal" style="font-size:26px;font-weight:700;color:#f1f5f9;margin-top:4px;">0</div>
@@ -565,11 +906,11 @@ const gatewayUIHTML = `<!DOCTYPE html>
   <!-- VIEW 3: PROVIDERS & ROUTING -->
   <div id="view-providers" class="view-content">
     <div class="card">
-      <div style="display:flex;justify-content:space-between;align-items:center;">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
         <h2>⚙️ Cơ chế Điều Phối (Routing Strategy) & Circuit Breaker</h2>
         <span id="activeStrategyBadge" class="badge badge-antigravity">round-robin</span>
       </div>
-      <div style="display:flex;gap:10px;align-items:center;margin-top:6px;">
+      <div style="display:flex;gap:10px;align-items:center;margin-top:6px;flex-wrap:wrap;">
         <select id="strategySelect" style="max-width:290px;">
           <option value="round-robin">round-robin (Xoay vòng đều giữa các tài khoản)</option>
           <option value="fill-first">fill-first (Ưu tiên tài khoản chính đến khi hết quota/lỗi)</option>
@@ -584,7 +925,7 @@ const gatewayUIHTML = `<!DOCTYPE html>
     <!-- Provider Connection Tabs -->
     <div class="card">
       <h2>🔌 Kết Nối Nhà Cung Cấp (3 Supported Providers)</h2>
-      <div style="display:flex;gap:8px;margin-bottom:14px;border-bottom:1px solid var(--border);padding-bottom:8px;">
+      <div style="display:flex;gap:8px;margin-bottom:14px;border-bottom:1px solid var(--border);padding-bottom:8px;flex-wrap:wrap;">
         <button class="btn" style="border:none;" onclick="switchProvTab('tab-antigravity')">1. Google Antigravity</button>
         <button class="btn" style="border:none;" onclick="switchProvTab('tab-claude')">2. Claude Code</button>
         <button class="btn" style="border:none;" onclick="switchProvTab('tab-alibaba')">3. Alibaba Token Plan</button>
@@ -672,7 +1013,7 @@ const gatewayUIHTML = `<!DOCTYPE html>
 
     <!-- Connected Accounts List in Providers View -->
     <div class="card">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px;">
         <div>
           <h2>📋 Danh Sách Tài Khoản Đã Kết Nối Trong Pool</h2>
           <div style="font-size:12px;color:var(--muted);">Hiển thị đầy đủ email và trạng thái tất cả tài khoản đang hoạt động trên Gateway</div>
@@ -697,7 +1038,7 @@ const gatewayUIHTML = `<!DOCTYPE html>
         <span id="pgStatusBadge" class="badge badge-yellow">🟡 Local JSON Mode</span>
       </div>
 
-      <div style="display:grid;grid-template-columns:1fr auto auto;gap:8px;margin-top:14px;align-items:center;">
+      <div class="responsive-pg-grid" style="margin-top:14px;">
         <input id="pgDsnInput" type="text" placeholder="postgres://omniroute:omniroute_secret@postgres:5432/omniroute?sslmode=disable" style="font-family:monospace;font-size:12.5px;" />
         <button onclick="fillDefaultDockerPostgres()" title="Điền chuỗi kết nối PostgreSQL mặc định trong docker-compose.yml">🐳 Docker DSN</button>
         <button class="btn-primary" onclick="savePostgresConfig()">🔌 Lưu &amp; Kết Nối PostgreSQL</button>
@@ -797,7 +1138,7 @@ const gatewayUIHTML = `<!DOCTYPE html>
           <h2>📋 Nhật Ký Kết Nối &amp; Giám Sát Prompt Nhân Viên (PostgreSQL Audit)</h2>
           <div style="font-size:12.5px;color:var(--muted);">Kiểm tra chi tiết từng nhân viên đã gửi Prompt gì, dùng Model nào, tốn bao nhiêu Token và câu trả lời AI để hỗ trợ tốt hơn.</div>
         </div>
-        <div style="display:flex;align-items:center;gap:8px;">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
           <span id="logPgModeBadge" class="badge badge-antigravity">Local / PG</span>
           <label style="font-size:12px;color:var(--muted);display:flex;align-items:center;gap:5px;cursor:pointer;">
             <input type="checkbox" id="autoRefreshLogsCheckbox" onchange="toggleAutoRefreshLogs(this.checked)" checked /> Tự động làm mới (2s)
@@ -808,7 +1149,7 @@ const gatewayUIHTML = `<!DOCTYPE html>
       </div>
 
       <!-- Employee & Prompt Search Bar -->
-      <div style="display:grid;grid-template-columns:260px 1fr auto;gap:10px;margin-top:14px;align-items:center;">
+      <div class="responsive-search-3col" style="margin-top:14px;">
         <select id="logEmployeeFilterSelect" onchange="loadLogs()">
           <option value="all">👥 Tất cả Nhân viên / API Key</option>
         </select>
@@ -1022,58 +1363,58 @@ const gatewayUIHTML = `<!DOCTYPE html>
     </div>
 
     <!-- Sub-tabs: API | MCP | A2A | Nguồn ngữ cảnh -->
-    <div style="display:inline-flex;gap:4px;background:#111520;border:1px solid #242c3d;padding:4px;border-radius:10px;margin-bottom:18px;">
-      <button id="epSubBtn-api" class="btn" style="padding:6px 14px;font-size:12px;background:#1e2638;color:#fff;border-color:#334155;" onclick="switchEndpointSubTab('api')">🌐 API</button>
-      <button id="epSubBtn-mcp" class="btn" style="padding:6px 14px;font-size:12px;background:transparent;border-color:transparent;color:var(--muted);" onclick="switchEndpointSubTab('mcp')">🔌 MCP</button>
-      <button id="epSubBtn-a2a" class="btn" style="padding:6px 14px;font-size:12px;background:transparent;border-color:transparent;color:var(--muted);" onclick="switchEndpointSubTab('a2a')">🕸️ A2A</button>
-      <button id="epSubBtn-ctx" class="btn" style="padding:6px 14px;font-size:12px;background:transparent;border-color:transparent;color:var(--muted);" onclick="switchEndpointSubTab('ctx')">🗄️ Nguồn ngữ cảnh &amp; VPS</button>
+    <div class="ep-subtabs-bar" style="display:inline-flex;gap:4px;background:#111520;border:1px solid #242c3d;padding:4px;border-radius:10px;margin-bottom:18px;max-width:100%;">
+      <button id="epSubBtn-api" class="btn" style="padding:6px 12px;font-size:12px;background:#1e2638;color:#fff;border-color:#334155;white-space:nowrap;" onclick="switchEndpointSubTab('api')">🌐 API</button>
+      <button id="epSubBtn-mcp" class="btn" style="padding:6px 12px;font-size:12px;background:transparent;border-color:transparent;color:var(--muted);white-space:nowrap;" onclick="switchEndpointSubTab('mcp')">🔌 MCP</button>
+      <button id="epSubBtn-a2a" class="btn" style="padding:6px 12px;font-size:12px;background:transparent;border-color:transparent;color:var(--muted);white-space:nowrap;" onclick="switchEndpointSubTab('a2a')">🕸️ A2A</button>
+      <button id="epSubBtn-ctx" class="btn" style="padding:6px 12px;font-size:12px;background:transparent;border-color:transparent;color:var(--muted);white-space:nowrap;" onclick="switchEndpointSubTab('ctx')">🗄️ Nguồn ngữ cảnh &amp; VPS</button>
     </div>
 
     <!-- SUB-TAB 1: API ENDPOINT & TUNNELS -->
     <div id="epSubTab-api" class="ep-subtab">
-      <div class="card" style="background:#121620;border:1px solid #232a3b;padding:22px;">
+      <div class="card" style="background:#121620;border:1px solid #232a3b;padding:18px;">
         <h2 style="font-size:16px;font-weight:700;color:#fff;margin-bottom:14px;">Endpoint API</h2>
 
         <!-- ENDPOINT ĐANG HOẠT ĐỘNG BOX -->
-        <div style="background:rgba(127, 29, 29, 0.12);border:1px solid rgba(239, 68, 68, 0.28);border-radius:10px;padding:14px 16px;margin-bottom:16px;">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+        <div style="background:rgba(127, 29, 29, 0.12);border:1px solid rgba(239, 68, 68, 0.28);border-radius:10px;padding:13px 14px;margin-bottom:16px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px;">
             <span style="font-size:10.5px;font-weight:700;letter-spacing:0.06em;color:#f87171;text-transform:uppercase;">ENDPOINT ĐANG HOẠT ĐỘNG</span>
-            <button style="padding:3px 9px;font-size:11px;background:#1a202e;" onclick="editPublicDomainPrompt()">✏️ Đổi tên miền VPS</button>
+            <button style="padding:4px 10px;font-size:11px;background:#1a202e;white-space:nowrap;" onclick="editPublicDomainPrompt()">✏️ Đổi tên miền VPS</button>
           </div>
 
           <!-- Công khai -->
-          <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;gap:12px;">
-            <div style="display:flex;align-items:center;gap:10px;min-width:110px;">
-              <span style="width:7px;height:7px;border-radius:50%;background:#10b981;display:inline-block;"></span>
+          <div class="ep-url-row">
+            <div class="ep-url-label">
+              <span style="width:7px;height:7px;border-radius:50%;background:#10b981;display:inline-block;flex-shrink:0;"></span>
               <span style="font-size:12.5px;color:#cbd5e1;">Công khai</span>
             </div>
-            <div style="flex:1;font-family:monospace;font-size:13px;font-weight:700;color:#fff;word-break:break-all;" id="epActivePublicURL">https://omni.bucloud.vip/v1</div>
-            <button title="Sao chép Endpoint Công khai" style="padding:5px 9px;font-size:12px;" onclick="copyEndpointField('epActivePublicURL')">📋</button>
+            <div class="ep-url-value" id="epActivePublicURL">https://omni.bucloud.vip/v1</div>
+            <button title="Sao chép Endpoint Công khai" style="padding:5px 9px;font-size:12px;flex-shrink:0;" onclick="copyEndpointField('epActivePublicURL')">📋</button>
           </div>
 
           <!-- Cục bộ -->
-          <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;gap:12px;">
-            <div style="display:flex;align-items:center;gap:10px;min-width:110px;">
-              <span style="width:7px;height:7px;border-radius:50%;background:#10b981;display:inline-block;"></span>
+          <div class="ep-url-row">
+            <div class="ep-url-label">
+              <span style="width:7px;height:7px;border-radius:50%;background:#10b981;display:inline-block;flex-shrink:0;"></span>
               <span style="font-size:12.5px;color:#cbd5e1;">Cục bộ</span>
             </div>
-            <div style="flex:1;font-family:monospace;font-size:13px;font-weight:700;color:#fff;word-break:break-all;" id="epActiveLocalURL">http://localhost:8787/v1</div>
-            <button title="Sao chép Endpoint Cục bộ" style="padding:5px 9px;font-size:12px;" onclick="copyEndpointField('epActiveLocalURL')">📋</button>
+            <div class="ep-url-value" id="epActiveLocalURL">http://localhost:8787/v1</div>
+            <button title="Sao chép Endpoint Cục bộ" style="padding:5px 9px;font-size:12px;flex-shrink:0;" onclick="copyEndpointField('epActiveLocalURL')">📋</button>
           </div>
         </div>
 
         <!-- MÁY CHỦ CỤC BỘ ROW -->
-        <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 4px;border-bottom:1px solid rgba(255,255,255,0.06);margin-bottom:16px;flex-wrap:wrap;gap:10px;">
-          <div style="display:flex;align-items:center;gap:10px;">
+        <div class="ep-local-row" style="display:flex;justify-content:space-between;align-items:center;padding:12px 4px;border-bottom:1px solid rgba(255,255,255,0.06);margin-bottom:16px;flex-wrap:wrap;gap:10px;">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
             <span style="color:#10b981;font-size:16px;">🖥️</span>
-            <span style="font-weight:700;font-size:13.5px;color:#fff;">Máy chủ cục bộ</span>
-            <span id="epHostID" style="font-family:monospace;font-size:12px;color:#64748b;">569fb55e</span>
-            <span id="epLanServerURL" style="font-family:monospace;font-size:12.5px;color:#94a3b8;">172.17.0.2:8787/v1</span>
+            <span style="font-weight:700;font-size:13.5px;color:#fff;white-space:nowrap;">Máy chủ cục bộ</span>
+            <span id="epHostID" style="font-family:monospace;font-size:12px;color:#64748b;background:rgba(255,255,255,0.04);padding:2px 6px;border-radius:5px;">569fb55e</span>
+            <span id="epLanServerURL" style="font-family:monospace;font-size:12.5px;color:#94a3b8;white-space:nowrap;">172.17.0.2:8787/v1</span>
             <button title="Sao chép IP máy chủ" style="padding:2px 6px;font-size:11px;background:transparent;border:none;color:#94a3b8;" onclick="copyEndpointField('epLanServerURL')">📋</button>
           </div>
-          <div style="display:flex;align-items:center;gap:10px;">
-            <span class="badge badge-green" style="padding:4px 10px;">● Đang chạy</span>
-            <button style="padding:6px 12px;font-size:12px;" onclick="copyEndpointField('epLanServerURL')">📋 Sao chép</button>
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            <span class="badge badge-green" style="padding:4px 10px;white-space:nowrap;">● Đang chạy</span>
+            <button style="padding:6px 12px;font-size:12px;white-space:nowrap;" onclick="copyEndpointField('epLanServerURL')">📋 Sao chép</button>
           </div>
         </div>
 
@@ -1086,22 +1427,22 @@ const gatewayUIHTML = `<!DOCTYPE html>
         </div>
 
         <!-- 1. Cloud OmniRoute -->
-        <div style="display:flex;justify-content:space-between;align-items:center;padding:13px 4px;border-bottom:1px solid rgba(255,255,255,0.05);flex-wrap:wrap;gap:10px;">
+        <div class="ep-tunnel-row" style="display:flex;justify-content:space-between;align-items:center;padding:13px 4px;border-bottom:1px solid rgba(255,255,255,0.05);flex-wrap:wrap;gap:10px;">
           <div style="display:flex;align-items:center;gap:10px;">
             <span style="color:#38bdf8;font-size:16px;">☁️</span>
             <div>
               <div style="font-weight:600;font-size:13.5px;color:#f1f5f9;">Cloud OmniRoute</div>
-              <div id="epCloudSubUrl" style="font-size:11px;color:var(--muted);font-family:monospace;">https://omni.bucloud.vip/v1</div>
+              <div id="epCloudSubUrl" style="font-size:11px;color:var(--muted);font-family:monospace;word-break:break-all;">https://omni.bucloud.vip/v1</div>
             </div>
           </div>
-          <div style="display:flex;align-items:center;gap:10px;">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
             <span id="epBadgeCloud" class="badge badge-green">● Đang hoạt động</span>
-            <button id="epBtnCloud" style="padding:6px 12px;font-size:12px;background:rgba(239,68,68,0.14);color:#f87171;border-color:rgba(239,68,68,0.35);" onclick="toggleEndpointTunnel('cloud')">☁️ Tắt đám mây</button>
+            <button id="epBtnCloud" style="padding:6px 12px;font-size:12px;background:rgba(239,68,68,0.14);color:#f87171;border-color:rgba(239,68,68,0.35);white-space:nowrap;" onclick="toggleEndpointTunnel('cloud')">☁️ Tắt đám mây</button>
           </div>
         </div>
 
         <!-- 2. Cloudflare Quick Tunnel -->
-        <div style="display:flex;justify-content:space-between;align-items:center;padding:13px 4px;border-bottom:1px solid rgba(255,255,255,0.05);flex-wrap:wrap;gap:10px;">
+        <div class="ep-tunnel-row" style="display:flex;justify-content:space-between;align-items:center;padding:13px 4px;border-bottom:1px solid rgba(255,255,255,0.05);flex-wrap:wrap;gap:10px;">
           <div style="display:flex;align-items:center;gap:10px;">
             <span style="color:#f59e0b;font-size:16px;">🟠</span>
             <div>
@@ -1109,14 +1450,14 @@ const gatewayUIHTML = `<!DOCTYPE html>
               <div id="epCfSubUrl" style="font-size:11px;color:var(--muted);font-family:monospace;">Tự động cấp phát tên miền *.trycloudflare.com miễn phí</div>
             </div>
           </div>
-          <div style="display:flex;align-items:center;gap:10px;">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
             <span id="epBadgeCloudflare" class="badge" style="background:#1e293b;color:#94a3b8;">Đã đóng</span>
-            <button id="epBtnCloudflare" style="padding:6px 12px;font-size:12px;background:linear-gradient(90deg,#ec4899,#8b5cf6);border:none;color:#fff;" onclick="toggleEndpointTunnel('cloudflare')">☁️ Bật Tunnel</button>
+            <button id="epBtnCloudflare" style="padding:6px 12px;font-size:12px;background:linear-gradient(90deg,#ec4899,#8b5cf6);border:none;color:#fff;white-space:nowrap;" onclick="toggleEndpointTunnel('cloudflare')">☁️ Bật Tunnel</button>
           </div>
         </div>
 
         <!-- 3. Tailscale Funnel -->
-        <div style="display:flex;justify-content:space-between;align-items:center;padding:13px 4px;border-bottom:1px solid rgba(255,255,255,0.05);flex-wrap:wrap;gap:10px;">
+        <div class="ep-tunnel-row" style="display:flex;justify-content:space-between;align-items:center;padding:13px 4px;border-bottom:1px solid rgba(255,255,255,0.05);flex-wrap:wrap;gap:10px;">
           <div style="display:flex;align-items:center;gap:10px;">
             <span style="color:#818cf8;font-size:16px;">🟣</span>
             <div>
@@ -1124,15 +1465,15 @@ const gatewayUIHTML = `<!DOCTYPE html>
               <div id="epTsSubUrl" style="font-size:11px;color:var(--muted);font-family:monospace;"> Chia sẻ bảo mật qua mạng lưới Tailscale Funnel (*.ts.net)</div>
             </div>
           </div>
-          <div style="display:flex;align-items:center;gap:10px;">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
             <span id="epBadgeTailscale" class="badge" style="background:#1e293b;color:#94a3b8;">Chưa cài đặt</span>
-            <button id="epBtnTailscale" style="padding:6px 12px;font-size:12px;background:linear-gradient(90deg,#ec4899,#8b5cf6);border:none;color:#fff;" onclick="toggleEndpointTunnel('tailscale')">🚀 Cài đặt &amp; Bật</button>
+            <button id="epBtnTailscale" style="padding:6px 12px;font-size:12px;background:linear-gradient(90deg,#ec4899,#8b5cf6);border:none;color:#fff;white-space:nowrap;" onclick="toggleEndpointTunnel('tailscale')">🚀 Cài đặt &amp; Bật</button>
           </div>
         </div>
 
         <!-- 4. Đường hầm ngrok -->
         <div style="padding:13px 4px;border-bottom:1px solid rgba(255,255,255,0.06);">
-          <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
+          <div class="ep-tunnel-row" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
             <div style="display:flex;align-items:center;gap:10px;">
               <span style="color:#a855f7;font-size:16px;">🟣</span>
               <div>
@@ -1140,9 +1481,9 @@ const gatewayUIHTML = `<!DOCTYPE html>
                 <div id="epNgrokSubUrl" style="font-size:11px;color:var(--muted);font-family:monospace;">Cổng public tốc độ cao qua ngrok</div>
               </div>
             </div>
-            <div style="display:flex;align-items:center;gap:10px;">
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
               <span id="epBadgeNgrok" class="badge" style="background:rgba(245,158,11,0.15);color:#fbbf24;border:1px solid rgba(245,158,11,0.3);">Cần xác thực</span>
-              <button id="epBtnNgrok" style="padding:6px 12px;font-size:12px;background:linear-gradient(90deg,#ec4899,#8b5cf6);border:none;color:#fff;" onclick="toggleEndpointTunnel('ngrok')">🌐 Bật đường hầm</button>
+              <button id="epBtnNgrok" style="padding:6px 12px;font-size:12px;background:linear-gradient(90deg,#ec4899,#8b5cf6);border:none;color:#fff;white-space:nowrap;" onclick="toggleEndpointTunnel('ngrok')">🌐 Bật đường hầm</button>
               <button style="padding:4px 8px;font-size:11px;background:transparent;border:none;color:var(--muted);" onclick="toggleNgrokAuthBox()">⌄</button>
             </div>
           </div>
@@ -1277,7 +1618,7 @@ docker compose up -d --build</pre>
       </div>
 
       <!-- KPI Cards -->
-      <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(180px, 1fr));gap:12px;margin-top:16px;">
+      <div class="kpi-summary-grid" style="margin-top:16px;margin-bottom:0;">
         <div class="setting-card" style="padding:14px;border-left:3px solid #38bdf8;">
           <div style="font-size:11px;color:var(--muted);font-weight:600;">TỔNG VECTOR GHI NHỚ</div>
           <div id="vecStatTotal" style="font-size:25px;font-weight:700;color:#f1f5f9;margin-top:4px;">0</div>
@@ -1381,7 +1722,7 @@ docker compose up -d --build</pre>
         </div>
       </div>
 
-      <div style="display:grid;grid-template-columns:1fr auto;gap:8px;margin-top:12px;">
+      <div class="responsive-search-2col" style="margin-top:12px;">
         <input id="vecSearchQueryInput" type="text" placeholder="🔎 Nhập câu hỏi hoặc chủ đề để tìm kiếm Vector tương đồng Cosine..." onkeydown="if(event.key==='Enter')searchVectorMemoriesUI()" />
         <button class="btn-primary" onclick="searchVectorMemoriesUI()">🔍 Tìm Kiếm Vector</button>
       </div>
@@ -1529,7 +1870,7 @@ docker compose up -d --build</pre>
       </div>
 
       <!-- KPI Cards -->
-      <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(185px, 1fr));gap:12px;margin-top:16px;">
+      <div class="kpi-summary-grid" style="margin-top:16px;margin-bottom:0;">
         <div class="setting-card" style="padding:14px;border-left:3px solid #fb923c;">
           <div style="font-size:11px;color:var(--muted);font-weight:600;">TÀI KHOẢN ANTIGRAVITY PRO (MỤC TIÊU 50)</div>
           <div id="saKpiAgyCount" style="font-size:25px;font-weight:700;color:#fb923c;margin-top:4px;">0 / 50</div>
@@ -1741,6 +2082,30 @@ docker compose up -d --build</pre>
   </div>
     </main>
   </div>
+
+  <!-- MOBILE FIXED BOTTOM NAVIGATION BAR -->
+  <nav class="mobile-bottom-nav" aria-label="Điều hướng di động">
+    <button class="mobile-bnav-btn active" data-view="view-quota" onclick="switchNav('view-quota')">
+      <span class="bnav-icon">📊</span>
+      <span>Hạn Mức</span>
+    </button>
+    <button class="mobile-bnav-btn" data-view="view-subagents" onclick="switchNav('view-subagents')">
+      <span class="bnav-icon">🐝</span>
+      <span>50 Agents</span>
+    </button>
+    <button class="mobile-bnav-btn" data-view="view-combos" onclick="switchNav('view-combos')">
+      <span class="bnav-icon">🔗</span>
+      <span>Combo</span>
+    </button>
+    <button class="mobile-bnav-btn" data-view="view-endpoint" onclick="switchNav('view-endpoint')">
+      <span class="bnav-icon">🎯</span>
+      <span>Điểm Cuối</span>
+    </button>
+    <button class="mobile-bnav-btn" onclick="toggleMobileSidebar()">
+      <span class="bnav-icon">☰</span>
+      <span>Menu</span>
+    </button>
+  </nav>
 
   <!-- MODAL: THÊM BÍ DANH MÔ HÌNH -->
   <div id="addAliasModal" class="modal-backdrop">
@@ -2276,7 +2641,7 @@ docker compose up -d --build</pre>
             '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;padding-bottom:5px;border-bottom:1px dashed rgba(255,255,255,0.07);font-family:monospace;font-size:11px;">' +
               activeOrLastModelText +
             '</div>' +
-            '<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:6px;padding-top:2px;text-align:center;">' +
+            '<div class="acc-exec-grid">' +
               '<div>' +
                 '<div style="color:var(--muted);font-size:10px;">TOKEN ĐÃ CHẠY</div>' +
                 '<div style="color:#38bdf8;font-weight:700;font-size:12.5px;font-family:monospace;">' + realTokens + '</div>' +
@@ -2509,19 +2874,45 @@ docker compose up -d --build</pre>
       alert('Đã sao chép: ' + txt);
     }
 
-    // --- NAVIGATION FLOW ---
+    // --- NAVIGATION FLOW & MOBILE DRAWER ---
+
+    function toggleMobileSidebar() {
+      const sb = document.getElementById('mainSidebar');
+      const bd = document.getElementById('mobileDrawerBackdrop');
+      if (!sb) return;
+      const isOpen = sb.classList.toggle('mobile-open');
+      if (bd) bd.classList.toggle('show', isOpen);
+    }
+
+    function closeMobileSidebar() {
+      const sb = document.getElementById('mainSidebar');
+      const bd = document.getElementById('mobileDrawerBackdrop');
+      if (sb) sb.classList.remove('mobile-open');
+      if (bd) bd.classList.remove('show');
+    }
 
     function switchNav(viewId) {
       document.querySelectorAll('.view-content').forEach(el => el.classList.remove('active'));
       document.querySelectorAll('.nav-btn').forEach(el => el.classList.remove('active'));
+      document.querySelectorAll('.mobile-pill-btn').forEach(el => el.classList.remove('active'));
+      document.querySelectorAll('.mobile-bnav-btn[data-view]').forEach(el => el.classList.remove('active'));
+
       const target = document.getElementById(viewId);
       if (target) target.classList.add('active');
-      if (window.event && window.event.currentTarget && window.event.currentTarget.classList) {
-        window.event.currentTarget.classList.add('active');
-      } else {
-        const btn = document.querySelector('.nav-btn[onclick*="' + viewId + '"]');
-        if (btn) btn.classList.add('active');
+
+      const sideBtn = document.querySelector('.nav-btn[onclick*="' + viewId + '"]');
+      if (sideBtn) sideBtn.classList.add('active');
+
+      const pillBtn = document.querySelector('.mobile-pill-btn[data-view="' + viewId + '"]');
+      if (pillBtn) {
+        pillBtn.classList.add('active');
+        try { pillBtn.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' }); } catch (e) {}
       }
+
+      const bnavBtn = document.querySelector('.mobile-bnav-btn[data-view="' + viewId + '"]');
+      if (bnavBtn) bnavBtn.classList.add('active');
+
+      closeMobileSidebar();
 
       if (viewId === 'view-endpoint') loadEndpointStatus();
       if (viewId === 'view-quota') loadQuotaSummary();
