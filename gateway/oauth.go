@@ -29,7 +29,7 @@ const (
 	AgyOAuthClientSecret       = agySecretPartA + agySecretPartB
 	AgyOAuthDefaultRedirectURI = "http://127.0.0.1:20128/callback"
 	AgyOAuthScopes             = "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/cclog https://www.googleapis.com/auth/experimentsandconfigs"
-	AgyUserAgent               = "antigravity/1.5.5 windows/amd64"
+	AgyUserAgent               = "antigravity/2.6.0 windows/amd64"
 	ClaudeOAuthClientID        = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 	ClaudeOAuthRedirectURI     = "https://console.anthropic.com/oauth/code/callback"
 )
