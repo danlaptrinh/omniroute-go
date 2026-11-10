@@ -49,7 +49,7 @@ var (
 	CCPALoadCodeAssistEndpoint          = "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
 	CCPARetrieveUserQuotaEndpoint        = "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota"
 	CCPARetrieveUserQuotaSummaryEndpoint = "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
-	ClaudeTokenEndpoint                  = "https://console.anthropic.com/v1/oauth/token"
+	ClaudeTokenEndpoint                  = "https://platform.claude.com/v1/oauth/token"
 	ClaudeOAuthUsageEndpoint             = "https://api.anthropic.com/api/oauth/usage"
 )
 

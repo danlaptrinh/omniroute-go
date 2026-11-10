@@ -11,20 +11,45 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
+var claudeRefreshMu sync.Mutex
+
 // RefreshClaudeToken exchanges a Claude Code OAuth refresh_token for a fresh access_token.
+// Serialized via claudeRefreshMu because Anthropic refresh tokens are strictly single-use rotating.
 func RefreshClaudeToken(ctx context.Context, acc *ConnectedAccount) error {
 	if acc == nil {
 		return errors.New("nil account")
 	}
+	claudeRefreshMu.Lock()
+	defer claudeRefreshMu.Unlock()
+
 	refreshTok := strings.TrimSpace(acc.RefreshToken)
 	if refreshTok == "" {
 		return errors.New("missing claude refresh_token")
 	}
 	if strings.TrimSpace(ClaudeTokenEndpoint) == "" {
 		return errors.New("claude token endpoint is empty")
+	}
+
+	// Re-check persisted config in case a concurrent goroutine just rotated this single-use refresh_token.
+	savedCfg := LoadSavedAuthConfig()
+	for _, s := range savedCfg.Accounts {
+		if s.Provider == ProviderClaudeCode && ((acc.Email != "" && strings.EqualFold(s.Email, acc.Email)) || (acc.ID != "" && s.ID == acc.ID)) {
+			if st := strings.TrimSpace(s.RefreshToken); st != "" && st != refreshTok && strings.TrimSpace(s.AccessToken) != "" && s.ExpiresAt > time.Now().Unix()+60 {
+				acc.AccessToken = strings.TrimSpace(s.AccessToken)
+				acc.RefreshToken = st
+				acc.ExpiresAt = s.ExpiresAt
+				acc.UpdatedAt = s.UpdatedAt
+				return nil
+			}
+			if st := strings.TrimSpace(s.RefreshToken); st != "" {
+				refreshTok = st
+			}
+			break
+		}
 	}
 
 	payload, err := json.Marshal(map[string]string{
@@ -80,6 +105,7 @@ func RefreshClaudeToken(ctx context.Context, acc *ConnectedAccount) error {
 		acc.ExpiresAt = time.Now().Unix() + tr.ExpiresIn
 	}
 	acc.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	_, _ = UpsertConnectedAccount(*acc)
 	return nil
 }
 

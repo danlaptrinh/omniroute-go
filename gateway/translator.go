@@ -589,8 +589,8 @@ func (u *GatewayUpstream) handleDirectCCPA(
 		errBody, _ := io.ReadAll(io.LimitReader(r.Body, 4096))
 		_ = r.Body.Close()
 		lastCCPAErr = fmt.Errorf("CCPA HTTP %d (%s): %s", r.StatusCode, candidate, strings.TrimSpace(string(errBody)))
-		if r.StatusCode == http.StatusUnauthorized {
-			log.Printf("[omni-gateway] CCPA candidate %q returned HTTP 401; stopping tier fallback for reactive token refresh", candidate)
+		if r.StatusCode == http.StatusUnauthorized || (r.StatusCode == http.StatusForbidden && strings.Contains(string(errBody), "VALIDATION_REQUIRED")) {
+			log.Printf("[omni-gateway] CCPA candidate %q returned HTTP %d; stopping tier fallback for account recovery/failover", candidate, r.StatusCode)
 			break
 		}
 		log.Printf("[omni-gateway] CCPA candidate %q returned HTTP %d; trying next CCPA tier model", candidate, r.StatusCode)
