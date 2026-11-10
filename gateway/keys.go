@@ -2,12 +2,24 @@ package gateway
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
 )
+
+// ComputeAPIKeyHash returns the lowercase hex SHA-256 digest of the trimmed rawKey.
+func ComputeAPIKeyHash(rawKey string) string {
+	trimmed := strings.TrimSpace(rawKey)
+	if trimmed == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(trimmed))
+	return hex.EncodeToString(sum[:])
+}
 
 // GenerateRandomKey creates a new sk-omni- API key with 32 random bytes (64 hex chars).
 func GenerateRandomKey() (fullKey string, maskedKey string, id string, err error) {
@@ -25,7 +37,7 @@ func GenerateRandomKey() (fullKey string, maskedKey string, id string, err error
 	return fullKey, maskedKey, id, nil
 }
 
-// ListAPIKeys returns all saved client API keys.
+// ListAPIKeys returns all saved client API keys (including full keys for internal persistence and sync).
 func ListAPIKeys() []GatewayAPIKey {
 	cfg := LoadSavedAuthConfig()
 	if cfg.APIKeys == nil {
@@ -33,6 +45,20 @@ func ListAPIKeys() []GatewayAPIKey {
 	}
 	keys := make([]GatewayAPIKey, len(cfg.APIKeys))
 	copy(keys, cfg.APIKeys)
+	for i := range keys {
+		if keys[i].KeyHash == "" && strings.TrimSpace(keys[i].Key) != "" {
+			keys[i].KeyHash = ComputeAPIKeyHash(keys[i].Key)
+		}
+	}
+	return keys
+}
+
+// ListSanitizedAPIKeys returns a copy of ListAPIKeys() with every item's raw Key cleared for safe HTTP responses.
+func ListSanitizedAPIKeys() []GatewayAPIKey {
+	keys := ListAPIKeys()
+	for i := range keys {
+		keys[i].Key = ""
+	}
 	return keys
 }
 
@@ -54,6 +80,7 @@ func CreateAPIKey(name string, admin bool, selfUsage, sharedQuota, localUsageCmd
 		Name:               name,
 		Key:                fullKey,
 		MaskedKey:          maskedKey,
+		KeyHash:            ComputeAPIKeyHash(fullKey),
 		AdminAccess:        admin,
 		AllowSelfUsage:     selfUsage,
 		AllowSharedQuota:   sharedQuota,
@@ -91,7 +118,8 @@ func DeleteAPIKey(identifier string) error {
 	var deletedID string
 	found := false
 	for _, k := range cfg.APIKeys {
-		if k.ID == identifier || k.Key == identifier {
+		keyMatch := k.Key != "" && subtle.ConstantTimeCompare([]byte(k.Key), []byte(identifier)) == 1
+		if k.ID == identifier || keyMatch {
 			found = true
 			deletedID = k.ID
 			continue
@@ -122,21 +150,36 @@ func ValidateAPIKey(authHeader string) (bool, *GatewayAPIKey) {
 		return true, nil
 	}
 
-	raw := strings.TrimSpace(authHeader)
-	if len(raw) >= 7 && strings.EqualFold(raw[:7], "bearer ") {
-		raw = strings.TrimSpace(raw[7:])
-	} else if len(raw) >= 6 && strings.EqualFold(raw[:6], "bearer") {
-		raw = strings.TrimSpace(raw[6:])
+	token := strings.TrimSpace(authHeader)
+	if len(token) >= 7 && strings.EqualFold(token[:7], "bearer ") {
+		token = strings.TrimSpace(token[7:])
+	} else if len(token) >= 6 && strings.EqualFold(token[:6], "bearer") {
+		token = strings.TrimSpace(token[6:])
 	}
 
-	if raw == "" {
+	if token == "" {
 		return false, nil
 	}
 
+	tokenBytes := []byte(token)
+	var tokenHash string
 	for _, k := range cfg.APIKeys {
-		if k.Key == raw {
-			cp := k
-			return true, &cp
+		if k.Key != "" {
+			if subtle.ConstantTimeCompare([]byte(k.Key), tokenBytes) == 1 {
+				cp := k
+				if cp.KeyHash == "" {
+					cp.KeyHash = ComputeAPIKeyHash(cp.Key)
+				}
+				return true, &cp
+			}
+		} else if k.KeyHash != "" {
+			if tokenHash == "" {
+				tokenHash = ComputeAPIKeyHash(token)
+			}
+			if subtle.ConstantTimeCompare([]byte(k.KeyHash), []byte(tokenHash)) == 1 {
+				cp := k
+				return true, &cp
+			}
 		}
 	}
 
@@ -161,13 +204,18 @@ func RecordAPIKeyUsage(keyStr string, tokens int) {
 
 	now := time.Now().UTC().Format(time.RFC3339)
 	updated := false
+	keyBytes := []byte(keyStr)
 	for i := range cfg.APIKeys {
-		if cfg.APIKeys[i].Key == keyStr || cfg.APIKeys[i].ID == keyStr {
+		keyMatch := cfg.APIKeys[i].Key != "" && subtle.ConstantTimeCompare([]byte(cfg.APIKeys[i].Key), keyBytes) == 1
+		if keyMatch || cfg.APIKeys[i].ID == keyStr {
 			cfg.APIKeys[i].TotalRequests++
 			if tokens > 0 {
 				cfg.APIKeys[i].TotalTokens += int64(tokens)
 			}
 			cfg.APIKeys[i].LastUsedAt = now
+			if cfg.APIKeys[i].KeyHash == "" && cfg.APIKeys[i].Key != "" {
+				cfg.APIKeys[i].KeyHash = ComputeAPIKeyHash(cfg.APIKeys[i].Key)
+			}
 			updated = true
 			break
 		}

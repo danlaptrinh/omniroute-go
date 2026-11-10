@@ -114,3 +114,67 @@ func TestOmniParallelWorkers100Goroutines(t *testing.T) {
 	}
 }
 
+func TestOmniParallelWorkers_SecurityAndSafety(t *testing.T) {
+	baseDir := t.TempDir()
+
+	// 1. Path traversal must be rejected
+	if _, err := resolvePathSafe(baseDir, "../../evil.go"); err == nil {
+		t.Fatalf("expected path traversal ../.. to be rejected")
+	}
+	if _, err := resolvePathSafe(baseDir, "."); err == nil {
+		t.Fatalf("expected baseDir root '.' to be rejected as target file")
+	}
+	outsideFile := filepath.Join(filepath.Dir(baseDir), "outside_secret.go")
+	if _, err := resolvePathSafe(baseDir, outsideFile); err == nil {
+		t.Fatalf("expected absolute path outside baseDir to be rejected")
+	}
+	validInside, err := resolvePathSafe(baseDir, "sub/inside.go")
+	if err != nil || !strings.HasSuffix(validInside, filepath.Join("sub", "inside.go")) {
+		t.Fatalf("expected valid path inside baseDir, got path=%q err=%v", validInside, err)
+	}
+
+	// 2. Upstream unsupported client banner must NOT overwrite existing files
+	targetRel := "critical.go"
+	targetAbs := filepath.Join(baseDir, targetRel)
+	original := "package main\n\nfunc KeepMe() {}\n"
+	if err := os.WriteFile(targetAbs, []byte(original), 0644); err != nil {
+		t.Fatalf("write original failed: %v", err)
+	}
+
+	mockBannerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(ChatResponse{
+			Choices: []ChatChoice{
+				{
+					Message: ChatMessage{
+						Role:    "assistant",
+						Content: "This version of Antigravity is no longer supported. Please download and install the latest version at https://antigravity.google/download",
+					},
+				},
+			},
+		})
+	}))
+	defer mockBannerSrv.Close()
+
+	res := executeWorkerTask(0, baseDir, WorkerTask{
+		FilePath: targetRel,
+		Prompt:   "Update critical.go",
+	}, mockBannerSrv.URL+"/v1/chat/completions", "", DefaultModel, "Output code only.", "")
+
+	if res.Status != "error" || res.Err == nil {
+		t.Fatalf("expected banner response to fail worker task, got %+v", res)
+	}
+	afterBytes, err := os.ReadFile(targetAbs)
+	if err != nil || string(afterBytes) != original {
+		t.Fatalf("critical.go was overwritten despite banner error! got: %q", string(afterBytes))
+	}
+
+	// 3. UTF-8 rune-safe truncation must not corrupt Vietnamese text
+	vn := "Kiểm tra bảo mật tiếng Việt chuẩn UTF-8"
+	trunc := truncate(vn, 8)
+	if !strings.HasPrefix(trunc, "Kiểm tra") || !strings.HasSuffix(trunc, "...") {
+		t.Fatalf("unexpected UTF-8 truncation result: %q", trunc)
+	}
+}
+
+

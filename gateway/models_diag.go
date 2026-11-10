@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -40,6 +41,11 @@ var curatedDashboardModels = []struct {
 	ID       string
 	Provider ProviderID
 }{
+	// --- Provider 1 (Flagship Gen 4 Carbon): Google Antigravity ---
+	{"gemini-4-carbon-high", ProviderAntigravity},
+	{"gemini-4-carbon-medium", ProviderAntigravity},
+	{"gemini-4-carbon-low", ProviderAntigravity},
+
 	// --- Combos (Smart Routing & Collaborative Multi-Model Pipelines) ---
 	{"auto/seo-master", ProviderAutoCombo},
 	{"auto/best-coding", ProviderAutoCombo},
@@ -180,6 +186,17 @@ func GetModelDiagnosticsList(ctx context.Context) []ModelDiagnosticCard {
 func buildModelBadge(id string) string {
 	s := strings.ToLower(id)
 	switch {
+	case strings.Contains(s, "carbon"):
+		switch {
+		case strings.Contains(s, "high"):
+			return "BUILT-IN Gemini 4 Carbon (High)"
+		case strings.Contains(s, "medium"):
+			return "BUILT-IN Gemini 4 Carbon (Medium)"
+		case strings.Contains(s, "low"):
+			return "BUILT-IN Gemini 4 Carbon (Low)"
+		default:
+			return "BUILT-IN Gemini 4 Carbon"
+		}
 	case strings.Contains(s, "gemini-4-argon"):
 		return "BUILT-IN Gemini 4 Argon"
 	case strings.Contains(s, "qwen-image"):
@@ -354,6 +371,17 @@ func TestModel(ctx context.Context, modelID string) (int64, error) {
 		ttfb := dummyW.firstByteAt.Sub(start).Milliseconds()
 		if ttfb > 0 {
 			latency = ttfb
+		}
+	}
+	if err == nil && len(dummyW.buf) > 0 {
+		rawPreview := string(dummyW.buf)
+		agg := aggregateSSEToResponse(dummyW.buf, modelID)
+		preview := rawPreview
+		if len(agg.Choices) > 0 && agg.Choices[0].Message != nil && strings.TrimSpace(agg.Choices[0].Message.Content) != "" {
+			preview = agg.Choices[0].Message.Content
+		}
+		if IsUnsupportedClientBanner(preview) || IsUnsupportedClientBanner(rawPreview) {
+			err = fmt.Errorf("CCPA client version rejected by upstream (update OMNI_AGY_USER_AGENT): %s", TruncateUTF8(preview, 200))
 		}
 	}
 

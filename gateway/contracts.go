@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
+	"unicode/utf8"
 )
 
 // ProviderID identifies one of the 3 supported providers in OmniRoute-Go.
@@ -73,6 +75,7 @@ type ResolvedModel struct {
 	PlaceholderEnum string        `json:"placeholder_enum"`  // e.g. "MODEL_PLACEHOLDER_M417"
 	FallbackChain   []string      `json:"fallback_chain"`    // Ordered fallback models across the 3 providers
 	IsArgonFamily   bool          `json:"is_argon_family"`
+	IsCarbonFamily  bool          `json:"is_carbon_family"`
 	IsCombo         bool          `json:"is_combo"`
 	ComboMode       ComboMode     `json:"combo_mode,omitempty"`
 	ComboHandoff    string        `json:"combo_handoff,omitempty"`
@@ -204,8 +207,9 @@ type ModelResolver interface {
 type GatewayAPIKey struct {
 	ID                 string `json:"id"`
 	Name               string `json:"name"`
-	Key                string `json:"key"`        // Full key (sk-omni-...)
-	MaskedKey          string `json:"masked_key"` // Masked key (sk-omni-...xxxx)
+	Key                string `json:"key,omitempty"`      // Full key (sk-omni-...), omitted in sanitized list views
+	MaskedKey          string `json:"masked_key"`         // Masked key (sk-omni-...xxxx)
+	KeyHash            string `json:"key_hash,omitempty"` // SHA-256 hex digest of Key
 	AdminAccess        bool   `json:"admin_access"`
 	AllowSelfUsage     bool   `json:"allow_self_usage"`
 	AllowSharedQuota   bool   `json:"allow_shared_quota"`
@@ -308,4 +312,43 @@ type VectorMemoryEntry struct {
 // UpstreamHandler executes a resolved request across Antigravity, Claude Code, and Alibaba Token Plan.
 type UpstreamHandler interface {
 	HandleChatCompletion(ctx context.Context, w http.ResponseWriter, req OpenAIChatRequest, resolved ResolvedModel, incomingAuth string) error
+}
+
+// TruncateUTF8 sanitizes invalid UTF-8 sequences and NUL bytes (which PostgreSQL TEXT rejects)
+// and truncates s safely on UTF-8 rune boundaries up to maxRunes runes.
+func TruncateUTF8(s string, maxRunes int) string {
+	clean := strings.ToValidUTF8(s, "")
+	if strings.IndexByte(clean, 0) >= 0 {
+		clean = strings.ReplaceAll(clean, "\x00", "")
+	}
+	clean = strings.TrimSpace(clean)
+	if maxRunes <= 0 || utf8.RuneCountInString(clean) <= maxRunes {
+		return clean
+	}
+	count := 0
+	for idx := range clean {
+		if count == maxRunes {
+			return clean[:idx] + " ...[truncated]"
+		}
+		count++
+	}
+	return clean
+}
+
+// MaskSecretToken masks a sensitive token for safe UI/API display while keeping 4 prefix/suffix chars.
+func MaskSecretToken(tok string) string {
+	tok = strings.TrimSpace(tok)
+	if tok == "" {
+		return ""
+	}
+	if len(tok) <= 8 {
+		return "****"
+	}
+	return tok[:4] + "****" + tok[len(tok)-4:]
+}
+
+// IsUnsupportedClientBanner detects Google CCPA's HTTP 200 deprecation text when User-Agent is outdated.
+func IsUnsupportedClientBanner(text string) bool {
+	lower := strings.ToLower(strings.TrimSpace(text))
+	return strings.Contains(lower, "this version of antigravity is no longer supported")
 }

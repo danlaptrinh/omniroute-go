@@ -8,7 +8,11 @@ import (
 	"time"
 )
 
-const DefaultMaxLogEntries = 300
+const (
+	DefaultMaxLogEntries   = 300
+	MaxLogTextRunes        = 16000
+	MaxLogErrorDetailRunes = 4000
+)
 
 // GatewayLogger manages an in-memory ring buffer of request and error logs.
 type GatewayLogger struct {
@@ -30,7 +34,7 @@ func NewGatewayLogger(maxEntries int) *GatewayLogger {
 	}
 }
 
-// RecordLogEntry adds an entry to the ring buffer.
+// RecordLogEntry sanitizes text fields on UTF-8 boundaries and adds the entry to the ring buffer.
 func (l *GatewayLogger) RecordLogEntry(entry GatewayLogEntry) {
 	if entry.ID == "" {
 		b := make([]byte, 6)
@@ -40,6 +44,12 @@ func (l *GatewayLogger) RecordLogEntry(entry GatewayLogEntry) {
 	if entry.Timestamp == "" {
 		entry.Timestamp = time.Now().UTC().Format(time.RFC3339)
 	}
+
+	entry.PromptText = TruncateUTF8(entry.PromptText, MaxLogTextRunes)
+	entry.ResponseText = TruncateUTF8(entry.ResponseText, MaxLogTextRunes)
+	entry.ErrorMessage = TruncateUTF8(entry.ErrorMessage, MaxLogErrorDetailRunes)
+	entry.ErrorDetail = TruncateUTF8(entry.ErrorDetail, MaxLogErrorDetailRunes)
+
 	if !entry.IsError && (entry.StatusCode >= 400 || entry.ErrorMessage != "") {
 		entry.IsError = true
 	}
@@ -84,7 +94,7 @@ func (l *GatewayLogger) GetRecentLogs(limit int, providerFilter string, errorsOn
 	return result
 }
 
-// ClearLogs empties the log buffer.
+// ClearLogs empties the in-memory log buffer.
 func (l *GatewayLogger) ClearLogs() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -108,7 +118,8 @@ func GetRecentLogs(limit int, providerFilter string, errorsOnly bool) []GatewayL
 	return GlobalLogger.GetRecentLogs(limit, providerFilter, errorsOnly)
 }
 
-// ClearLogs resets the GlobalLogger singleton.
+// ClearLogs resets both the in-memory GlobalLogger ring buffer and PostgreSQL prompt logs.
 func ClearLogs() {
 	GlobalLogger.ClearLogs()
+	_ = ClearPromptLogsFromPostgres()
 }

@@ -1,13 +1,12 @@
 package gateway
 
 import (
-	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"regexp"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -23,8 +22,7 @@ var (
 	multiSpaces   = regexp.MustCompile(`[ \t]{2,}`)
 
 	// Global in-memory stats cache for compression
-	compStatsMu          sync.RWMutex
-	globalTokensSaved    int64
+	globalTokensSaved     int64
 	globalCallsCompressed int64
 )
 
@@ -237,7 +235,7 @@ func CompressTextRTK(text string, compressCode bool) string {
 		// Always keep head (first 8 lines) and tail (last 12 lines)
 		if i < 8 || i >= len(lines)-12 {
 			if omittedCount > 0 {
-				kept = append(kept, fmtSprintf("[... %d lines omitted by RTK log trimmer ...]", omittedCount))
+				kept = append(kept, fmt.Sprintf("[... %d lines omitted by RTK log trimmer ...]", omittedCount))
 				omittedCount = 0
 			}
 			kept = append(kept, l)
@@ -251,7 +249,7 @@ func CompressTextRTK(text string, compressCode bool) string {
 			strings.Contains(lower, "warning") || strings.Contains(lower, "fatal") ||
 			strings.Contains(lower, "assert") {
 			if omittedCount > 0 {
-				kept = append(kept, fmtSprintf("[... %d lines omitted by RTK log trimmer ...]", omittedCount))
+				kept = append(kept, fmt.Sprintf("[... %d lines omitted by RTK log trimmer ...]", omittedCount))
 				omittedCount = 0
 			}
 			kept = append(kept, l)
@@ -260,7 +258,7 @@ func CompressTextRTK(text string, compressCode bool) string {
 		}
 	}
 	if omittedCount > 0 {
-		kept = append(kept, fmtSprintf("[... %d lines omitted by RTK log trimmer ...]", omittedCount))
+		kept = append(kept, fmt.Sprintf("[... %d lines omitted by RTK log trimmer ...]", omittedCount))
 	}
 
 	return strings.Join(kept, "\n")
@@ -301,8 +299,8 @@ func compressUltraHistory(msgs []OpenAIChatMessage, maxTurns int) []OpenAIChatMe
 	// Middle turns are condensed into a summary placeholder
 	middleCount := len(nonSystem) - 1 - tailCount
 	summaryMsg := OpenAIChatMessage{
-		Role: "system",
-		Content: []byte(fmtSprintf(`"[OmniRoute Ultra-Compaction: %d previous conversational turns summarized and pruned to save context token budget]"`, middleCount)),
+		Role:    "system",
+		Content: []byte(fmt.Sprintf(`"[OmniRoute Ultra-Compaction: %d previous conversational turns summarized and pruned to save context token budget]"`, middleCount)),
 	}
 
 	var result []OpenAIChatMessage
@@ -325,56 +323,6 @@ func EstimateTokens(msgs []OpenAIChatMessage) int {
 		return 1
 	}
 	return tokens
-}
-
-func fmtSprintf(format string, args ...any) string {
-	b := &bytes.Buffer{}
-	var aIdx int
-	for i := 0; i < len(format); i++ {
-		if format[i] == '%' && i+1 < len(format) {
-			spec := format[i+1]
-			if spec == 'd' && aIdx < len(args) {
-				if d, ok := args[aIdx].(int); ok {
-					b.WriteString(intToString(d))
-					aIdx++
-					i++
-					continue
-				}
-			} else if spec == 's' && aIdx < len(args) {
-				if s, ok := args[aIdx].(string); ok {
-					b.WriteString(s)
-					aIdx++
-					i++
-					continue
-				}
-			}
-		}
-		b.WriteByte(format[i])
-	}
-	return b.String()
-}
-
-func intToString(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	neg := false
-	if n < 0 {
-		neg = true
-		n = -n
-	}
-	var buf [20]byte
-	pos := len(buf)
-	for n > 0 {
-		pos--
-		buf[pos] = byte('0' + (n % 10))
-		n /= 10
-	}
-	if neg {
-		pos--
-		buf[pos] = '-'
-	}
-	return string(buf[pos:])
 }
 
 // --- HTTP Transport Gzip Middleware ---

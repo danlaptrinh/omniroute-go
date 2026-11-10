@@ -1,20 +1,21 @@
 # Compiled binaries
 *.exe
-*.out
-*.test
-/omni-gateway
-/omni-parallel-mcp
+*.dll
+*.so
+*.dylib
+omni-gateway
+omni-parallel-mcp
 
-# Runtime data & credentials (never commit live OAuth tokens or API keys)
-data/
-.gemini/
+# Local runtime state & secrets
 gateway_config.json
-*.log
+*.bak
 .env
 .env.*
 
-# OS / IDE files
+# Go test & coverage artifacts
+coverage.out
+*.test
+
+# OS & editor files
 .DS_Store
 Thumbs.db
-.vscode/
-.idea/

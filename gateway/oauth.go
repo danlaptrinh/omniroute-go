@@ -29,10 +29,18 @@ const (
 	AgyOAuthClientSecret       = agySecretPartA + agySecretPartB
 	AgyOAuthDefaultRedirectURI = "http://127.0.0.1:20128/callback"
 	AgyOAuthScopes             = "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/cclog https://www.googleapis.com/auth/experimentsandconfigs"
-	AgyUserAgent               = "antigravity/1.4.10 windows/amd64"
+	AgyUserAgent               = "antigravity/1.5.5 windows/amd64"
 	ClaudeOAuthClientID        = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 	ClaudeOAuthRedirectURI     = "https://console.anthropic.com/oauth/code/callback"
 )
+
+// GetAgyUserAgent returns OMNI_AGY_USER_AGENT if non-empty, otherwise AgyUserAgent.
+func GetAgyUserAgent() string {
+	if env := strings.TrimSpace(os.Getenv("OMNI_AGY_USER_AGENT")); env != "" {
+		return env
+	}
+	return AgyUserAgent
+}
 
 // Package-level configurable endpoints (can be overridden by tests)
 var (
@@ -204,6 +212,11 @@ func loadSavedAuthConfigLocked() SavedGatewayAuth {
 			cfg.Accounts[i].Provider = ProviderAntigravity
 		}
 	}
+	for i := range cfg.APIKeys {
+		if cfg.APIKeys[i].KeyHash == "" && strings.TrimSpace(cfg.APIKeys[i].Key) != "" {
+			cfg.APIKeys[i].KeyHash = ComputeAPIKeyHash(cfg.APIKeys[i].Key)
+		}
+	}
 
 	cloned := cloneAuthConfig(cfg)
 	cachedAuthCfg = &cloned
@@ -250,11 +263,12 @@ func saveAuthConfigAsyncLocked(cfg SavedGatewayAuth) {
 	go func() {
 		time.Sleep(400 * time.Millisecond)
 		configMu.Lock()
-		asyncFlushPending = false
-		if cachedAuthCfg == nil {
+		if !asyncFlushPending || cachedAuthCfg == nil {
+			asyncFlushPending = false
 			configMu.Unlock()
 			return
 		}
+		asyncFlushPending = false
 		toWrite := cloneAuthConfig(*cachedAuthCfg)
 		targetPath := cachedAuthPath
 		configMu.Unlock()
@@ -273,6 +287,17 @@ func saveAuthConfigAsyncLocked(cfg SavedGatewayAuth) {
 			}
 		}
 	}()
+}
+
+// FlushPendingConfigSave synchronously writes any pending asynchronous config update to disk.
+func FlushPendingConfigSave() {
+	configMu.Lock()
+	defer configMu.Unlock()
+	if cachedAuthCfg == nil || !asyncFlushPending {
+		return
+	}
+	_ = saveAuthConfigLocked(*cachedAuthCfg)
+	asyncFlushPending = false
 }
 
 // LoadSavedAuthConfig loads and normalizes saved gateway authentication.
@@ -509,7 +534,7 @@ func ExchangeOAuthInput(ctx context.Context, rawInput string, defaultRedirectURI
 		ccpaReq, err := http.NewRequestWithContext(ctx, http.MethodPost, CCPALoadCodeAssistEndpoint, bytes.NewReader(reqBody))
 		if err == nil {
 			ccpaReq.Header.Set("Authorization", "Bearer "+tokenResp.AccessToken)
-			ccpaReq.Header.Set("User-Agent", AgyUserAgent)
+			ccpaReq.Header.Set("User-Agent", GetAgyUserAgent())
 			ccpaReq.Header.Set("Content-Type", "application/json")
 			if ccpaResp, err := oauthHTTPClient.Do(ccpaReq); err == nil {
 				defer ccpaResp.Body.Close()
@@ -1119,6 +1144,8 @@ var defaultBuiltinAliases = map[string]string{
 	"claude-mythos-5":       "claude-code/claude-mythos-5",
 	"claude-fable-5-1":      "claude-code/claude-fable-5-1",
 	"claude-opus-5-5":       "claude-code/claude-opus-5-5",
+	"carbon":                "antigravity/gemini-4-carbon-high",
+	"carbon-high":           "antigravity/gemini-4-carbon-high",
 }
 
 // ResolveModelAlias resolves a model ID against custom aliases and built-in industry aliases.

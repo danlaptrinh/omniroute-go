@@ -1,17 +1,13 @@
 {
   "mcpServers": {
     "omni-parallel-dispatcher": {
-      "command": "C:/Users/cloud/.gemini/bin/omni-parallel-mcp.exe",
+      "command": "omni-parallel-mcp",
       "args": [],
       "env": {
-        "OMNI_GATEWAY_URL": "https://omni.bucloud.vip/v1/chat/completions",
-        "GATEWAY_BASE_URL": "https://omni.bucloud.vip/v1",
-        "OMNIROUTE_BASE_URL": "https://omni.bucloud.vip/v1",
-        "OMNI_API_KEY": "sk-omni-1a3fbd3d0aaa37401bb556381d91796ad200219da8f3db1d04233062aed5d33d",
-        "OMNIROUTE_API_KEY": "sk-omni-1a3fbd3d0aaa37401bb556381d91796ad200219da8f3db1d04233062aed5d33d",
-        "OMNI_DEFAULT_MODEL": "antigravity/gemini-4-argon-high",
-        "OMNIROUTE_MODEL": "antigravity/gemini-4-argon-high",
-        "OMNIROUTE_MAX_CONCURRENCY": "0"
+        "OMNI_GATEWAY_URL": "http://127.0.0.1:8787/v1/chat/completions",
+        "OMNI_API_KEY": "${OMNI_API_KEY}",
+        "OMNI_DEFAULT_MODEL": "antigravity/gemini-4-carbon-high",
+        "OMNI_MAX_CONCURRENCY": "0"
       }
     }
   }

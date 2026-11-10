@@ -6,6 +6,7 @@ import (
 
 // defaultFallbackModels defines the default cross-provider fallback models across the 3 supported providers.
 var defaultFallbackModels = []string{
+	"antigravity/gemini-4-carbon-high",
 	"antigravity/gemini-4-argon-high",
 	"claude-code/claude-opus-4-6-thinking",
 	"alibaba/deepseek-v4-pro",
@@ -18,6 +19,7 @@ var defaultFallbackModels = []string{
 // DefaultCombos returns the built-in OmniRoute-Go multi-provider combo stacks and collaborative multi-model pipelines.
 func DefaultCombos() []ComboModel {
 	seoModels := []string{
+		"antigravity/gemini-4-carbon-high",
 		"antigravity/gemini-4-argon-high",
 		"claude-code/claude-opus-5-5",
 		"alibaba/qwen3.8-max",
@@ -25,7 +27,8 @@ func DefaultCombos() []ComboModel {
 		"antigravity/gemini-3.8-flash-high",
 	}
 	seoRoles := []string{
-		"👑 Quản Lý Dự Án SEO (Ban ngày: Argon 4 High)",
+		"👑 Quản Lý Dự Án SEO (Ban ngày: Carbon 4 High)",
+		"👑 Quản Lý Dự Án SEO (Đồng quản lý: Argon 4 High)",
 		"👑 Quản Lý Dự Án SEO (Đồng quản lý: Claude Opus 5.5)",
 		"🌙 Quản Lý Dự Án SEO (Buổi tối: Qwen 3.8 Max ⚡ 40% Off)",
 		"✍️ Sub-Agent Viết Bài SEO (Antigravity Pro: Gemini 3.1 Pro High)",
@@ -34,6 +37,7 @@ func DefaultCombos() []ComboModel {
 	if isVietnamNightHours() {
 		seoModels = []string{
 			"alibaba/qwen3.8-max",
+			"antigravity/gemini-4-carbon-high",
 			"antigravity/gemini-4-argon-high",
 			"claude-code/claude-opus-5-5",
 			"antigravity/gemini-3.1-pro-high",
@@ -41,6 +45,7 @@ func DefaultCombos() []ComboModel {
 		}
 		seoRoles = []string{
 			"🌙 Quản Lý Dự Án SEO Đang Bật (Buổi tối: Qwen 3.8 Max ⚡ 40% Off)",
+			"👑 Quản Lý Dự Án SEO Dự Phòng (Carbon 4 High)",
 			"👑 Quản Lý Dự Án SEO Dự Phòng (Argon 4 High)",
 			"👑 Quản Lý Dự Án SEO Dự Phòng (Claude Opus 5.5)",
 			"✍️ Sub-Agent Viết Bài SEO (Antigravity Pro: Gemini 3.1 Pro High)",
@@ -51,9 +56,9 @@ func DefaultCombos() []ComboModel {
 	return []ComboModel{
 		{
 			ID:          "auto/seo-master",
-			Name:        "👑 Quản Lý Dự Án SEO & Đàn Antigravity Pro (Argon 4 / Opus 5.5 / Tối Qwen 3.8 Max ➔ Gemini 3.1 Pro High Viết Bài & 3.8 Flash High Code)",
+			Name:        "👑 Quản Lý Dự Án SEO & Đàn Antigravity Pro (Carbon 4 / Argon 4 / Opus 5.5 / Tối Qwen 3.8 Max ➔ Gemini 3.1 Pro High Viết Bài & 3.8 Flash High Code)",
 			Mode:        ComboModePipeline,
-			Description: "Phân tầng thông minh cho dàn 50 tài khoản Antigravity Pro: Quản lý dự án SEO bằng Gemini 4 Argon High & Claude Opus 5.5 (buổi tối tự chuyển sang Alibaba Qwen 3.8 Max ⚡ 40% Off Nights) ➔ Điều phối Gemini 3.1 Pro High viết bài chuẩn SEO và Gemini 3.8 Flash High viết code kỹ thuật.",
+			Description: "Phân tầng thông minh cho dàn 50 tài khoản Antigravity Pro: Quản lý dự án SEO bằng Gemini 4 Carbon High, Argon High & Claude Opus 5.5 (buổi tối tự chuyển sang Alibaba Qwen 3.8 Max ⚡ 40% Off Nights) ➔ Điều phối Gemini 3.1 Pro High viết bài chuẩn SEO và Gemini 3.8 Flash High viết code kỹ thuật.",
 			Models:      seoModels,
 			Roles:       seoRoles,
 			HandoffPrompt: "Dựa trên Bản Kế Hoạch Quản Lý Dự Án SEO ở Bước 1, hãy triển khai bài viết chuẩn SEO chuyên sâu (bằng Gemini 3.1 Pro High) hoặc mã nguồn kỹ thuật hoàn chỉnh (bằng Gemini 3.8 Flash High).",
@@ -61,70 +66,76 @@ func DefaultCombos() []ComboModel {
 		},
 		{
 			ID:          "auto/best-coding",
-			Name:        "Best Coding Failover (Gemini 4 Argon ➔ Claude Opus ➔ Qwen3 Coder)",
+			Name:        "Best Coding Failover (Gemini 4 Argon & Carbon ➔ Claude Opus ➔ Qwen3 Coder)",
 			Mode:        ComboModeFailover,
-			Description: "Ưu tiên Gemini 4 Argon High trên Antigravity, tự động failover sang Claude Code Opus và Alibaba Token Plan Qwen3 Coder Plus",
+			Description: "Ưu tiên Gemini 4 Argon/Carbon High trên Antigravity, tự động failover sang Claude Code Opus và Alibaba Token Plan Qwen3 Coder Plus",
 			Models: []string{
 				"antigravity/gemini-4-argon-high",
 				"claude-code/claude-opus-4-6-thinking",
 				"alibaba/qwen3-coder-plus",
+				"antigravity/gemini-4-carbon-high",
 				"claude-code/claude-opus-5-5",
 				"alibaba/qwen3.8-max",
 				"antigravity/claude-opus-4-6-thinking",
 			},
-			Roles:   []string{"Primary Coder", "Fallback 1 (Claude Code)", "Fallback 2 (Alibaba)", "Fallback 3 (Opus 5.5)", "Fallback 4 (Qwen 3.8 Max)", "Fallback 5 (Antigravity Claude)"},
+			Roles:   []string{"Primary Coder (Argon 4)", "Fallback 1 (Claude Code)", "Fallback 2 (Alibaba)", "Fallback 3 (Carbon 4 High)", "Fallback 4 (Opus 5.5)", "Fallback 5 (Qwen 3.8 Max)", "Fallback 6 (Antigravity Claude)"},
 			BuiltIn: true,
 		},
 		{
 			ID:          "auto/team-coding",
-			Name:        "Team Coding Pipeline: Kiến Trúc Sư ➔ Lập Trình Viên (Opus 5.5 ➔ Argon 4 ➔ Qwen 3.8 Max)",
+			Name:        "Team Coding Pipeline: Kiến Trúc Sư ➔ Lập Trình Viên (Opus 5.5 ➔ Carbon 4 / Argon 4 ➔ Qwen 3.8 Max)",
 			Mode:        ComboModePipeline,
-			Description: "Kết nối nhiều model cùng làm việc nối tiếp: Model 1 (Claude Opus 5.5 / DeepSeek V4 Pro) lập kiến trúc & phân tích thuật toán ➔ Model 2 (Gemini 4 Argon High / Qwen 3.8 Max) triển khai code hoàn chỉnh.",
+			Description: "Kết nối nhiều model cùng làm việc nối tiếp: Model 1 (Claude Opus 5.5 / DeepSeek V4 Pro) lập kiến trúc & phân tích thuật toán ➔ Model 2 (Gemini 4 Carbon High / Argon High / Qwen 3.8 Max) triển khai code hoàn chỉnh.",
 			Models: []string{
 				"claude-code/claude-opus-5-5",
+				"antigravity/gemini-4-carbon-high",
 				"antigravity/gemini-4-argon-high",
 				"alibaba/qwen3.8-max",
 				"alibaba/deepseek-v4-pro-0813",
 			},
 			Roles: []string{
 				"Bước 1: Kiến trúc sư & Phân tích (Architect)",
-				"Bước 2: Lập trình viên triển khai (Executor)",
-				"Bước 3: Chuyên gia tối ưu & Dự phòng (Synthesizer)",
-				"Bước 4: Suy luận dự phòng (DeepSeek V4 Pro)",
+				"Bước 2: Lập trình viên triển khai chính (Carbon 4 High)",
+				"Bước 3: Lập trình viên triển khai dự phòng (Argon 4 High)",
+				"Bước 4: Chuyên gia tối ưu & Dự phòng (Synthesizer)",
+				"Bước 5: Suy luận dự phòng (DeepSeek V4 Pro)",
 			},
 			HandoffPrompt: "Dựa trên bản thiết kế kiến trúc và phân tích kỹ thuật từ Model Bước 1 ở trên, hãy viết mã nguồn hoàn chỉnh, sạch, tối ưu hiệu năng và trả lời đầy đủ yêu cầu của người dùng.",
 			BuiltIn:       true,
 		},
 		{
 			ID:          "auto/council-pro",
-			Name:        "Hội Đồng Đa Mô Hình Song Song (Mixture of Agents: Argon 4 + Opus 5.5 + Qwen 3.8 Max)",
+			Name:        "Hội Đồng Đa Mô Hình Song Song (Mixture of Agents: Carbon 4 + Argon 4 + Opus 5.5 + Qwen 3.8 Max)",
 			Mode:        ComboModeConsensus,
-			Description: "Chạy song song 100% bằng Goroutines qua cả 3 nhà cung cấp (Antigravity Argon 4 + Claude Opus 5.5 + Alibaba Qwen 3.8 Max), sau đó tổng hợp câu trả lời thông minh và chính xác nhất.",
+			Description: "Chạy song song 100% bằng Goroutines qua cả 3 nhà cung cấp (Antigravity Carbon 4 / Argon 4 + Claude Opus 5.5 + Alibaba Qwen 3.8 Max), sau đó tổng hợp câu trả lời thông minh và chính xác nhất.",
 			Models: []string{
+				"antigravity/gemini-4-carbon-high",
 				"antigravity/gemini-4-argon-high",
 				"claude-code/claude-opus-5-5",
 				"alibaba/qwen3.8-max",
 				"alibaba/deepseek-v4-pro-0813",
 			},
 			Roles: []string{
-				"Chuyên gia 1 & Tổng hợp (Antigravity Argon 4)",
-				"Chuyên gia 2 (Claude Opus 5.5)",
-				"Chuyên gia 3 (Alibaba Qwen 3.8 Max)",
-				"Chuyên gia 4 (DeepSeek V4 Pro)",
+				"Chuyên gia 1 & Tổng hợp (Antigravity Carbon 4)",
+				"Chuyên gia 2 (Antigravity Argon 4)",
+				"Chuyên gia 3 (Claude Opus 5.5)",
+				"Chuyên gia 4 (Alibaba Qwen 3.8 Max)",
+				"Chuyên gia 5 (DeepSeek V4 Pro)",
 			},
 			HandoffPrompt: "Bạn là Chủ tịch Hội đồng AI (Synthesizer). Hãy tổng hợp các góc nhìn và lời giải từ các mô hình chuyên gia ở trên để đưa ra câu trả lời cuối cùng chính xác, toàn diện và tối ưu nhất.",
 			BuiltIn:       true,
 		},
 		{
 			ID:          "auto/night-coding",
-			Name:        "Combo Tối Ưu Giảm Giá Ban Đêm (⚡ 40%-50% Off Nights: Qwen 3.8 Max ➔ DeepSeek V4.1 ➔ Argon 4)",
+			Name:        "Combo Tối Ưu Giảm Giá Ban Đêm (⚡ 40%-50% Off Nights: Qwen 3.8 Max ➔ DeepSeek V4.1 ➔ Carbon 4 / Argon 4)",
 			Mode:        ComboModeNightSaver,
-			Description: "Ưu tiên các model giảm 40%-50% token ban đêm của Alibaba Cloud (Qwen 3.8 Max, DeepSeek V4.1 Flash 1017, DeepSeek V4 Pro 0813) kết hợp dự phòng sang Gemini 4 Argon High và Claude Opus 5.5.",
+			Description: "Ưu tiên các model giảm 40%-50% token ban đêm của Alibaba Cloud (Qwen 3.8 Max, DeepSeek V4.1 Flash 1017, DeepSeek V4 Pro 0813) kết hợp dự phòng sang Gemini 4 Carbon/Argon High và Claude Opus 5.5.",
 			Models: []string{
 				"alibaba/qwen3.8-max",
 				"alibaba/deepseek-v4-pro-0813",
 				"alibaba/deepseek-v4.1-flash-1017",
 				"alibaba/qwen3.8-flash",
+				"antigravity/gemini-4-carbon-high",
 				"antigravity/gemini-4-argon-high",
 				"claude-code/claude-opus-5-5",
 			},
@@ -133,8 +144,9 @@ func DefaultCombos() []ComboModel {
 				"Ưu tiên 2 (⚡ Night 50% Off)",
 				"Ưu tiên 3 (⚡ 50% Off Nights)",
 				"Ưu tiên 4 (⚡ 40% Off Nights)",
-				"Dự phòng 5 (Antigravity Argon 4)",
-				"Dự phòng 6 (Claude Opus 5.5)",
+				"Dự phòng 5 (Antigravity Carbon 4)",
+				"Dự phòng 6 (Antigravity Argon 4)",
+				"Dự phòng 7 (Claude Opus 5.5)",
 			},
 			BuiltIn: true,
 		},
@@ -155,7 +167,7 @@ func DefaultCombos() []ComboModel {
 		},
 		{
 			ID:          "auto/reasoning",
-			Name:        "Deep Reasoning Pipeline (Argon 4 High ➔ Claude Opus Thinking ➔ DeepSeek V4 Pro / R1)",
+			Name:        "Deep Reasoning Pipeline (Argon 4 & Carbon 4 High ➔ Claude Opus Thinking ➔ DeepSeek V4 Pro / R1)",
 			Mode:        ComboModePipeline,
 			Description: "Chuyên suy luận sâu đa tầng nối tiếp qua 3 nhà cung cấp",
 			Models: []string{
@@ -163,6 +175,7 @@ func DefaultCombos() []ComboModel {
 				"claude-code/claude-opus-4-6-thinking",
 				"alibaba/qwq-plus",
 				"alibaba/deepseek-r1",
+				"antigravity/gemini-4-carbon-high",
 				"alibaba/deepseek-v4-pro-0813",
 				"claude-code/claude-opus-5-5-thinking",
 			},
@@ -171,8 +184,9 @@ func DefaultCombos() []ComboModel {
 				"Bước 2: Phản biện & Tổng hợp (Claude Opus Thinking)",
 				"Bước 3: Kiểm chứng (Alibaba QwQ)",
 				"Bước 4: DeepSeek R1",
-				"Bước 5: DeepSeek V4 Pro (0813)",
-				"Bước 6: Claude Opus 5.5 Thinking",
+				"Bước 5: Suy luận Gemini 4 Carbon High",
+				"Bước 6: DeepSeek V4 Pro (0813)",
+				"Bước 7: Claude Opus 5.5 Thinking",
 			},
 			HandoffPrompt: "Hãy kiểm chứng, bổ sung lập luận chặt chẽ và hoàn thiện câu trả lời dựa trên phân tích suy luận của Model Bước 1.",
 			BuiltIn:       true,
@@ -536,6 +550,45 @@ func (r *DefaultResolver) Resolve(modelID string, defaultFallbacks []string) Res
 
 	switch norm {
 	// -------------------------------------------------------------------------
+	// Gemini 4 Carbon Family
+	// -------------------------------------------------------------------------
+	case "gemini-4-carbon-high", "gemini-4-carbon:high", "gemini 4 carbon high",
+		"gemini-4-carbon", "gemini 4 carbon", "carbon", "carbon-high", "carbon:high":
+		res.CanonicalID = "antigravity/gemini-4-carbon-high"
+		res.UpstreamModelID = "gemini-4-carbon"
+		res.CCPAModelID = "gemini-4-carbon"
+		res.OmniBaseModelID = "antigravity/gemini-4-carbon"
+		res.ThinkingLevel = ThinkingLevelHigh
+		res.ReasoningEffort = "high"
+		res.IncludeThoughts = true
+		res.PlaceholderEnum = "MODEL_PLACEHOLDER_M420"
+		res.IsCarbonFamily = true
+
+	case "gemini-4-carbon-medium", "gemini-4-carbon:medium", "gemini 4 carbon medium",
+		"carbon-medium", "carbon:medium":
+		res.CanonicalID = "antigravity/gemini-4-carbon-medium"
+		res.UpstreamModelID = "gemini-4-carbon"
+		res.CCPAModelID = "gemini-4-carbon"
+		res.OmniBaseModelID = "antigravity/gemini-4-carbon"
+		res.ThinkingLevel = ThinkingLevelMedium
+		res.ReasoningEffort = "medium"
+		res.IncludeThoughts = true
+		res.PlaceholderEnum = "MODEL_PLACEHOLDER_M421"
+		res.IsCarbonFamily = true
+
+	case "gemini-4-carbon-low", "gemini-4-carbon:low", "gemini 4 carbon low",
+		"carbon-low", "carbon:low":
+		res.CanonicalID = "antigravity/gemini-4-carbon-low"
+		res.UpstreamModelID = "gemini-4-carbon"
+		res.CCPAModelID = "gemini-4-carbon"
+		res.OmniBaseModelID = "antigravity/gemini-4-carbon"
+		res.ThinkingLevel = ThinkingLevelLow
+		res.ReasoningEffort = "low"
+		res.IncludeThoughts = true
+		res.PlaceholderEnum = "MODEL_PLACEHOLDER_M422"
+		res.IsCarbonFamily = true
+
+	// -------------------------------------------------------------------------
 	// Gemini 4 Argon Family
 	// -------------------------------------------------------------------------
 	case "gemini-4-argon-high", "gemini-4-argon:high", "gemini 4 argon high", "model_placeholder_m417", "m417",
@@ -842,6 +895,14 @@ func (r *DefaultResolver) ListModels() []OpenAIModelCard {
 		{"auto/reasoning", "omniroute-go", "auto", "combo"},
 
 		// --- Provider 1: Antigravity (ONLY Gen 4, Gen 3 & Claude) ---
+		{"antigravity/gemini-4-carbon-high", "antigravity", "antigravity", "gen4-carbon"},
+		{"antigravity/gemini-4-carbon-medium", "antigravity", "antigravity", "gen4-carbon"},
+		{"antigravity/gemini-4-carbon-low", "antigravity", "antigravity", "gen4-carbon"},
+		{"antigravity/gemini-4-carbon", "antigravity", "antigravity", "gen4-carbon"},
+		{"gemini-4-carbon-high", "antigravity", "antigravity", "alias"},
+		{"gemini-4-carbon-medium", "antigravity", "antigravity", "alias"},
+		{"gemini-4-carbon-low", "antigravity", "antigravity", "alias"},
+		{"gemini-4-carbon", "antigravity", "antigravity", "alias"},
 		{"gemini-4-argon-high", "antigravity", "antigravity", "gen4-argon"},
 		{"gemini-4-argon-medium", "antigravity", "antigravity", "gen4-argon"},
 		{"gemini-4-argon-low", "antigravity", "antigravity", "gen4-argon"},

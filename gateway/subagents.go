@@ -26,7 +26,6 @@ var (
 	recentSwarmRuns      []SwarmRunSummary
 	scheduledAutomations []ScheduledAutomation
 	vaultLoadedFromDisk  bool
-	automationScheduler  int32
 	totalSubAgentsRun    int64
 	activeSubAgentsNow   int64
 )
@@ -286,8 +285,8 @@ func isVietnamNightHours() bool {
 }
 
 // selectSEOProjectManagerChain returns the ordered Manager model chain:
-// - Night hours (or forceNight): alibaba/qwen3.8-max (⚡40% Off) -> antigravity/gemini-4-argon-high -> claude-code/claude-opus-5-5
-// - Day hours: antigravity/gemini-4-argon-high -> claude-code/claude-opus-5-5 -> alibaba/qwen3.8-max
+// - Night hours (or forceNight): alibaba/qwen3.8-max (⚡40% Off) -> antigravity/gemini-4-carbon-high -> antigravity/gemini-4-argon-high -> claude-code/claude-opus-5-5
+// - Day hours: antigravity/gemini-4-carbon-high -> antigravity/gemini-4-argon-high -> claude-code/claude-opus-5-5 -> alibaba/qwen3.8-max
 func selectSEOProjectManagerChain(preferredManager string, forceNight bool) ([]string, bool) {
 	night := forceNight || isVietnamNightHours()
 	pref := strings.TrimSpace(preferredManager)
@@ -298,11 +297,13 @@ func selectSEOProjectManagerChain(preferredManager string, forceNight bool) ([]s
 	if night {
 		chain = append(chain,
 			"alibaba/qwen3.8-max",
+			"antigravity/gemini-4-carbon-high",
 			"antigravity/gemini-4-argon-high",
 			"claude-code/claude-opus-5-5",
 		)
 	} else {
 		chain = append(chain,
+			"antigravity/gemini-4-carbon-high",
 			"antigravity/gemini-4-argon-high",
 			"claude-code/claude-opus-5-5",
 			"alibaba/qwen3.8-max",
@@ -1025,7 +1026,7 @@ func (s *Server) handleSubAgents(w http.ResponseWriter, r *http.Request) {
 			"ready_accounts":       readyCount,
 			"max_parallel_target":  50,
 			"is_night_mode":        isVietnamNightHours(),
-			"day_manager_models":   []string{"antigravity/gemini-4-argon-high", "claude-code/claude-opus-5-5"},
+			"day_manager_models":   []string{"antigravity/gemini-4-carbon-high", "antigravity/gemini-4-argon-high", "claude-code/claude-opus-5-5"},
 			"night_manager_model":  "alibaba/qwen3.8-max",
 			"seo_writer_model":     "antigravity/gemini-3.1-pro-high",
 			"coding_worker_model":  "antigravity/gemini-3.8-flash-high",

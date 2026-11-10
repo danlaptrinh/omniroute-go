@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -27,11 +28,19 @@ const (
 )
 
 var (
-	vectorMu          sync.RWMutex
-	vectorMemories    []VectorMemoryEntry
-	vectorLoadedLocal bool
-	pgVectorExtension bool
+	vectorMu            sync.RWMutex
+	vectorMemories      []VectorMemoryEntry
+	vectorLoadedLocal   bool
+	pgVectorExtension   bool
+	pgVectorNativeReady bool
 )
+
+func resetPgVectorState() {
+	vectorMu.Lock()
+	pgVectorExtension = false
+	pgVectorNativeReady = false
+	vectorMu.Unlock()
+}
 
 // defaultVectorDBConfig returns the default VectorDBConfig without acquiring configMu.
 func defaultVectorDBConfig() VectorDBConfig {
@@ -139,11 +148,58 @@ func defaultSeededPinnedMemories() []VectorMemoryEntry {
 	}
 }
 
+// capVectorMemories enforces maxItems without ever evicting Pinned == true entries.
+func capVectorMemories(items []VectorMemoryEntry, maxItems int) []VectorMemoryEntry {
+	if maxItems <= 0 || len(items) <= maxItems {
+		return items
+	}
+	pinnedCount := 0
+	for _, m := range items {
+		if m.Pinned {
+			pinnedCount++
+		}
+	}
+	allowedNonPinned := maxItems - pinnedCount
+	if allowedNonPinned < 0 {
+		allowedNonPinned = 0
+	}
+	capacity := maxItems
+	if pinnedCount > capacity {
+		capacity = pinnedCount
+	}
+	compacted := make([]VectorMemoryEntry, 0, capacity)
+	keptNonPinned := 0
+	for _, m := range items {
+		if m.Pinned {
+			compacted = append(compacted, m)
+		} else if keptNonPinned < allowedNonPinned {
+			compacted = append(compacted, m)
+			keptNonPinned++
+		}
+	}
+	return compacted
+}
+
+// ensureVectorMemoriesLoaded safely checks vectorLoadedLocal under RLock and upgrades
+// to a full write Lock with double-checking when initial loading/seeding is required.
+func ensureVectorMemoriesLoaded() {
+	vectorMu.RLock()
+	loaded := vectorLoadedLocal
+	vectorMu.RUnlock()
+	if loaded {
+		return
+	}
+
+	vectorMu.Lock()
+	defer vectorMu.Unlock()
+	ensureVectorMemoriesLoadedLocked()
+}
+
+// ensureVectorMemoriesLoadedLocked MUST only be called while holding vectorMu.Lock() (exclusive write lock).
 func ensureVectorMemoriesLoadedLocked() {
 	if vectorLoadedLocal {
 		return
 	}
-	vectorLoadedLocal = true
 	data, err := os.ReadFile(vectorFallbackFilePath())
 	var list []VectorMemoryEntry
 	if err == nil {
@@ -162,7 +218,8 @@ func ensureVectorMemoriesLoadedLocked() {
 			seenIDs[seed.ID] = true
 		}
 	}
-	vectorMemories = list
+	vectorMemories = capVectorMemories(list, MaxInMemoryVectors)
+	vectorLoadedLocal = true
 }
 
 func saveVectorMemoriesLocalAsync() {
@@ -179,6 +236,37 @@ func saveVectorMemoriesLocalAsync() {
 			_ = os.WriteFile(path, b, 0o600)
 		}
 	}(snapshot)
+}
+
+// formatPgVectorLiteral formats a float32 vector into pgvector text literal syntax "[0.123400,-0.045600,...]".
+func formatPgVectorLiteral(vec []float32) string {
+	if len(vec) == 0 {
+		return "[]"
+	}
+	var sb strings.Builder
+	sb.Grow(len(vec)*10 + 2)
+	sb.WriteByte('[')
+	for i, v := range vec {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		fv := float64(v)
+		if math.IsNaN(fv) || math.IsInf(fv, 0) {
+			fv = 0
+		}
+		sb.WriteString(strconv.FormatFloat(fv, 'f', 6, 64))
+	}
+	sb.WriteByte(']')
+	return sb.String()
+}
+
+func hasNonZeroEmbedding(vec []float32) bool {
+	for _, v := range vec {
+		if v != 0 && !math.IsNaN(float64(v)) && !math.IsInf(float64(v), 0) {
+			return true
+		}
+	}
+	return false
 }
 
 // ComputeSemanticEmbedding generates a unit-normalized 256-dimensional dense vector embedding
@@ -278,7 +366,7 @@ func CosineSimilarity(a, b []float32) float64 {
 	for i := range a {
 		dot += float64(a[i]) * float64(b[i])
 	}
-	if dot < 0 {
+	if math.IsNaN(dot) || dot < 0 {
 		return 0
 	}
 	if dot > 1.0 {
@@ -287,17 +375,34 @@ func CosineSimilarity(a, b []float32) float64 {
 	return dot
 }
 
-// migratePostgresVectorTables creates the omni_vector_memories table (and pgvector extension if available) in PostgreSQL.
+// InitVectorDBSchema initializes omni_vector_memories, enables native pgvector (vector(256) + HNSW index)
+// when available, backfills missing native vector columns, and synchronizes memories bidirectionally.
+func InitVectorDBSchema(db *sql.DB) {
+	if db == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	migratePostgresVectorTables(ctx, db)
+}
+
+// migratePostgresVectorTables creates the omni_vector_memories table (and native pgvector column/index if available) in PostgreSQL.
 func migratePostgresVectorTables(ctx context.Context, db *sql.DB) {
 	if db == nil {
 		return
 	}
-	// Attempt to enable pgvector extension if the PostgreSQL server has pgvector installed
+	resetPgVectorState()
+
+	hasExt := false
 	if _, err := db.ExecContext(ctx, `CREATE EXTENSION IF NOT EXISTS vector;`); err == nil {
-		vectorMu.Lock()
-		pgVectorExtension = true
-		vectorMu.Unlock()
+		hasExt = true
 		log.Printf("[omniroute-vectordb] PostgreSQL pgvector extension enabled!")
+	} else {
+		var extExists bool
+		if qErr := db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector')`).Scan(&extExists); qErr == nil && extExists {
+			hasExt = true
+			log.Printf("[omniroute-vectordb] PostgreSQL pgvector extension detected!")
+		}
 	}
 
 	_, err := db.ExecContext(ctx, `
@@ -324,7 +429,88 @@ func migratePostgresVectorTables(ctx context.Context, db *sql.DB) {
 		return
 	}
 
+	nativeReady := false
+	if hasExt {
+		if _, colErr := db.ExecContext(ctx, `ALTER TABLE omni_vector_memories ADD COLUMN IF NOT EXISTS embedding vector(256);`); colErr == nil {
+			nativeReady = true
+		} else {
+			var colExists bool
+			if checkErr := db.QueryRowContext(
+				ctx,
+				`SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'omni_vector_memories' AND column_name = 'embedding')`,
+			).Scan(&colExists); checkErr == nil && colExists {
+				nativeReady = true
+			} else {
+				log.Printf("[omniroute-vectordb] vector(256) column migration note: %v", colErr)
+			}
+		}
+
+		if nativeReady {
+			if _, hnswErr := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_omni_vec_embedding_hnsw ON omni_vector_memories USING hnsw (embedding vector_cosine_ops);`); hnswErr != nil {
+				if _, ivfErr := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_omni_vec_embedding_ivfflat ON omni_vector_memories USING ivfflat (embedding vector_cosine_ops) WITH (lists = 16);`); ivfErr != nil {
+					log.Printf("[omniroute-vectordb] vector index note (native column active without ANN index): %v", hnswErr)
+				}
+			}
+		}
+	}
+
+	vectorMu.Lock()
+	pgVectorExtension = hasExt
+	pgVectorNativeReady = nativeReady
+	vectorMu.Unlock()
+
+	if nativeReady {
+		backfillPgVectorEmbeddings(ctx, db)
+	}
 	syncVectorMemoriesBidirectional(ctx, db)
+}
+
+func backfillPgVectorEmbeddings(ctx context.Context, db *sql.DB) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT id, title, prompt_text, answer_text, embedding_json
+		FROM omni_vector_memories
+		WHERE embedding IS NULL
+		LIMIT 2000
+	`)
+	if err != nil {
+		return
+	}
+
+	type pendingBackfill struct {
+		id      string
+		embJSON string
+		vecLit  string
+	}
+	var updates []pendingBackfill
+
+	for rows.Next() {
+		var id, title, promptText, answerText, embJSON string
+		if scanErr := rows.Scan(&id, &title, &promptText, &answerText, &embJSON); scanErr != nil {
+			continue
+		}
+		var emb []float32
+		_ = json.Unmarshal([]byte(embJSON), &emb)
+		if len(emb) != VectorEmbeddingDim {
+			emb = ComputeSemanticEmbedding(title + "\n" + promptText + "\n" + answerText)
+			if b, mErr := json.Marshal(emb); mErr == nil {
+				embJSON = string(b)
+			}
+		}
+		updates = append(updates, pendingBackfill{
+			id:      id,
+			embJSON: embJSON,
+			vecLit:  formatPgVectorLiteral(emb),
+		})
+	}
+	_ = rows.Close()
+
+	for _, u := range updates {
+		_, _ = db.ExecContext(
+			ctx,
+			`UPDATE omni_vector_memories SET embedding = $1::vector, embedding_json = $2 WHERE id = $3`,
+			u.vecLit, u.embJSON, u.id,
+		)
+	}
 }
 
 func syncVectorMemoriesBidirectional(ctx context.Context, db *sql.DB) {
@@ -340,7 +526,7 @@ func syncVectorMemoriesBidirectional(ctx context.Context, db *sql.DB) {
 		SELECT id, created_at_str, title, category, employee_name, api_key_id, model, prompt_text, answer_text, pinned, hit_count, embedding_json
 		FROM omni_vector_memories
 		ORDER BY pinned DESC, created_at DESC
-		LIMIT 1500
+		LIMIT 2000
 	`)
 	if err == nil {
 		defer rows.Close()
@@ -366,25 +552,70 @@ func syncVectorMemoriesBidirectional(ctx context.Context, db *sql.DB) {
 		for id, localMem := range localByID {
 			if !seen[id] {
 				merged = append(merged, localMem)
-				upsertVectorMemoryToPostgres(ctx, db, localMem)
+				upsertVectorMemoryPG(ctx, db, localMem)
 			}
 		}
 
+		compacted := capVectorMemories(merged, MaxInMemoryVectors)
 		vectorMu.Lock()
-		vectorMemories = merged
+		vectorMemories = compacted
 		vectorMu.Unlock()
 		saveVectorMemoriesLocalAsync()
 	}
 }
 
 func upsertVectorMemoryToPostgres(ctx context.Context, db *sql.DB, m VectorMemoryEntry) {
+	upsertVectorMemoryPG(ctx, db, m)
+}
+
+func upsertVectorMemoryPG(ctx context.Context, db *sql.DB, m VectorMemoryEntry) {
 	if db == nil {
 		return
 	}
-	embBytes, _ := json.Marshal(m.Embedding)
+
+	m.Title = TruncateUTF8(m.Title, 200)
+	m.Category = TruncateUTF8(m.Category, 80)
+	m.EmployeeName = TruncateUTF8(m.EmployeeName, 256)
+	m.Model = TruncateUTF8(m.Model, 256)
+	m.PromptText = TruncateUTF8(m.PromptText, 4000)
+	m.AnswerText = TruncateUTF8(m.AnswerText, 6000)
+
+	emb := m.Embedding
+	if len(emb) != VectorEmbeddingDim {
+		emb = ComputeSemanticEmbedding(m.Title + "\n" + m.PromptText + "\n" + m.AnswerText)
+	}
+	embBytes, _ := json.Marshal(emb)
+
+	vectorMu.RLock()
+	nativeReady := pgVectorNativeReady
+	vectorMu.RUnlock()
+
+	if nativeReady {
+		vecLit := formatPgVectorLiteral(emb)
+		_, err := db.ExecContext(ctx, `
+			INSERT INTO omni_vector_memories (
+				id, created_at_str, title, category, employee_name, api_key_id, model,
+				prompt_text, answer_text, pinned, hit_count, embedding_json, embedding
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::vector)
+			ON CONFLICT (id) DO UPDATE SET
+				title = EXCLUDED.title,
+				category = EXCLUDED.category,
+				prompt_text = EXCLUDED.prompt_text,
+				answer_text = EXCLUDED.answer_text,
+				pinned = EXCLUDED.pinned,
+				hit_count = GREATEST(omni_vector_memories.hit_count, EXCLUDED.hit_count),
+				embedding_json = EXCLUDED.embedding_json,
+				embedding = EXCLUDED.embedding
+		`, m.ID, m.CreatedAt, m.Title, m.Category, m.EmployeeName, m.APIKeyID, m.Model, m.PromptText, m.AnswerText, m.Pinned, m.HitCount, string(embBytes), vecLit)
+		if err == nil {
+			return
+		}
+	}
+
 	_, _ = db.ExecContext(ctx, `
 		INSERT INTO omni_vector_memories (
-			id, created_at_str, title, category, employee_name, api_key_id, model, prompt_text, answer_text, pinned, hit_count, embedding_json
+			id, created_at_str, title, category, employee_name, api_key_id, model,
+			prompt_text, answer_text, pinned, hit_count, embedding_json
 		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
 		ON CONFLICT (id) DO UPDATE SET
 			title = EXCLUDED.title,
@@ -399,19 +630,24 @@ func upsertVectorMemoryToPostgres(ctx context.Context, db *sql.DB, m VectorMemor
 
 // AddVectorMemory adds or updates a semantic memory in the Vector Database (both in-memory index and PostgreSQL).
 func AddVectorMemory(title, category, promptText, answerText, employeeName, apiKeyID, model string, pinned bool) (VectorMemoryEntry, error) {
-	promptText = strings.TrimSpace(promptText)
-	answerText = strings.TrimSpace(answerText)
-	title = strings.TrimSpace(title)
+	promptText = TruncateUTF8(promptText, 4000)
+	answerText = TruncateUTF8(answerText, 6000)
+	title = TruncateUTF8(title, 200)
 	if promptText == "" && answerText == "" {
 		return VectorMemoryEntry{}, fmt.Errorf("nội dung ghi nhớ không được để trống")
 	}
 	if title == "" {
-		firstLine := promptText
+		source := promptText
+		if source == "" {
+			source = answerText
+		}
+		firstLine := source
 		if idx := strings.IndexByte(firstLine, '\n'); idx > 0 {
 			firstLine = firstLine[:idx]
 		}
-		title = truncateAuditText(firstLine, 90)
+		title = TruncateUTF8(firstLine, 90)
 	}
+	category = TruncateUTF8(category, 80)
 	if category == "" {
 		if pinned {
 			category = "knowledge"
@@ -419,6 +655,8 @@ func AddVectorMemory(title, category, promptText, answerText, employeeName, apiK
 			category = "auto_qa"
 		}
 	}
+	employeeName = TruncateUTF8(employeeName, 256)
+	model = TruncateUTF8(model, 256)
 
 	emb := ComputeSemanticEmbedding(title + "\n" + promptText + "\n" + answerText)
 
@@ -429,21 +667,23 @@ func AddVectorMemory(title, category, promptText, answerText, employeeName, apiK
 	for i := range vectorMemories {
 		sim := CosineSimilarity(emb, vectorMemories[i].Embedding)
 		if sim >= 0.93 && vectorMemories[i].Pinned == pinned {
-			vectorMemories[i].AnswerText = truncateAuditText(answerText, 6000)
+			if answerText != "" {
+				vectorMemories[i].AnswerText = answerText
+			}
+			vectorMemories[i].Embedding = ComputeSemanticEmbedding(vectorMemories[i].Title + "\n" + vectorMemories[i].PromptText + "\n" + vectorMemories[i].AnswerText)
 			vectorMemories[i].HitCount++
 			updated := vectorMemories[i]
 			vectorMu.Unlock()
 
 			saveVectorMemoriesLocalAsync()
 			pgMu.RLock()
+			connected := pgConnected
 			db := pgDB
 			pgMu.RUnlock()
-			if db != nil {
-				go func(m VectorMemoryEntry) {
-					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-					defer cancel()
-					upsertVectorMemoryToPostgres(ctx, db, m)
-				}(updated)
+			if connected && db != nil {
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				upsertVectorMemoryPG(ctx, db, updated)
+				cancel()
 			}
 			return updated, nil
 		}
@@ -459,30 +699,26 @@ func AddVectorMemory(title, category, promptText, answerText, employeeName, apiK
 		EmployeeName: employeeName,
 		APIKeyID:     apiKeyID,
 		Model:        model,
-		PromptText:   truncateAuditText(promptText, 4000),
-		AnswerText:   truncateAuditText(answerText, 6000),
+		PromptText:   promptText,
+		AnswerText:   answerText,
 		Pinned:       pinned,
 		HitCount:     1,
 		Embedding:    emb,
 	}
 
-	// Prepend newest memory and cap size while preserving pinned entries
-	vectorMemories = append([]VectorMemoryEntry{entry}, vectorMemories...)
-	if len(vectorMemories) > MaxInMemoryVectors {
-		vectorMemories = vectorMemories[:MaxInMemoryVectors]
-	}
+	// Prepend newest memory and cap size without ever evicting pinned entries
+	vectorMemories = capVectorMemories(append([]VectorMemoryEntry{entry}, vectorMemories...), MaxInMemoryVectors)
 	vectorMu.Unlock()
 
 	saveVectorMemoriesLocalAsync()
 	pgMu.RLock()
+	connected := pgConnected
 	db := pgDB
 	pgMu.RUnlock()
-	if db != nil {
-		go func(m VectorMemoryEntry) {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			upsertVectorMemoryToPostgres(ctx, db, m)
-		}(entry)
+	if connected && db != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		upsertVectorMemoryPG(ctx, db, entry)
+		cancel()
 	}
 
 	return entry, nil
@@ -497,14 +733,19 @@ func AutoLearnFromPromptLog(entry GatewayLogEntry) {
 	if !cfg.Enabled || !cfg.AutoLearnPrompts {
 		return
 	}
-	q := extractLastUserQuestion(entry.PromptText)
-	ans := strings.TrimSpace(entry.ResponseText)
+	q := TruncateUTF8(extractLastUserQuestion(entry.PromptText), 4000)
+	ans := TruncateUTF8(entry.ResponseText, 6000)
 	if len(q) < 12 || len(ans) < 20 {
 		return
 	}
 	go func() {
 		_, _ = AddVectorMemory("", "auto_qa", q, ans, entry.EmployeeName, entry.APIKeyID, entry.ResolvedModel, false)
 	}()
+}
+
+// AutoLearnFromCompletion is an alias for AutoLearnFromPromptLog using UTF-8 safe truncation.
+func AutoLearnFromCompletion(entry GatewayLogEntry) {
+	AutoLearnFromPromptLog(entry)
 }
 
 func extractLastUserQuestion(formattedPrompt string) string {
@@ -515,7 +756,8 @@ func extractLastUserQuestion(formattedPrompt string) string {
 	return strings.TrimSpace(formattedPrompt)
 }
 
-// SearchVectorMemories performs semantic cosine similarity search across the Vector Database.
+// SearchVectorMemories performs hybrid/native pgvector cosine similarity search when PostgreSQL + pgvector
+// are active, falling back seamlessly to the fast in-memory cosine scan when offline.
 func SearchVectorMemories(query string, topK int, minSim float64) []VectorMemoryEntry {
 	query = strings.TrimSpace(query)
 	if topK <= 0 {
@@ -525,8 +767,24 @@ func SearchVectorMemories(query string, topK int, minSim float64) []VectorMemory
 		minSim = 0.10
 	}
 
+	ensureVectorMemoriesLoaded()
+
+	pgMu.RLock()
+	connected := pgConnected
+	db := pgDB
+	pgMu.RUnlock()
+
 	vectorMu.RLock()
-	ensureVectorMemoriesLoadedLocked()
+	nativeReady := pgVectorNativeReady
+	vectorMu.RUnlock()
+
+	if connected && db != nil && nativeReady {
+		if pgOut, ok := searchVectorMemoriesNativePG(db, query, topK, minSim); ok {
+			return pgOut
+		}
+	}
+
+	vectorMu.RLock()
 	snapshot := make([]VectorMemoryEntry, len(vectorMemories))
 	copy(snapshot, vectorMemories)
 	vectorMu.RUnlock()
@@ -590,6 +848,141 @@ func SearchVectorMemories(query string, topK int, minSim float64) []VectorMemory
 	return out
 }
 
+func searchVectorMemoriesNativePG(db *sql.DB, query string, topK int, minSim float64) ([]VectorMemoryEntry, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+
+	if query == "" {
+		rows, err := db.QueryContext(ctx, `
+			SELECT id, created_at_str, title, category, employee_name, api_key_id, model,
+			       prompt_text, answer_text, pinned, hit_count
+			FROM omni_vector_memories
+			ORDER BY pinned DESC, created_at DESC
+			LIMIT $1
+		`, topK)
+		if err != nil {
+			return nil, false
+		}
+		defer rows.Close()
+		out := make([]VectorMemoryEntry, 0, topK)
+		for rows.Next() {
+			var m VectorMemoryEntry
+			if scanErr := rows.Scan(
+				&m.ID, &m.CreatedAt, &m.Title, &m.Category, &m.EmployeeName, &m.APIKeyID, &m.Model,
+				&m.PromptText, &m.AnswerText, &m.Pinned, &m.HitCount,
+			); scanErr == nil {
+				out = append(out, m)
+			}
+		}
+		if len(out) == 0 {
+			return nil, false
+		}
+		return out, true
+	}
+
+	qVec := ComputeSemanticEmbedding(query)
+	if !hasNonZeroEmbedding(qVec) {
+		return nil, false
+	}
+	vecLit := formatPgVectorLiteral(qVec)
+	candidateLimit := topK * 8
+	if candidateLimit < 40 {
+		candidateLimit = 40
+	}
+
+	rows, err := db.QueryContext(ctx, `
+		SELECT
+			id, created_at_str, title, category, employee_name, api_key_id, model,
+			prompt_text, answer_text, pinned, hit_count,
+			1 - (embedding <=> $1::vector) AS similarity
+		FROM omni_vector_memories
+		WHERE embedding IS NOT NULL
+		ORDER BY pinned DESC, embedding <=> $1::vector ASC
+		LIMIT $2
+	`, vecLit, candidateLimit)
+	if err != nil {
+		return nil, false
+	}
+	defer rows.Close()
+
+	type scored struct {
+		entry VectorMemoryEntry
+		score float64
+	}
+	var candidates []scored
+	seenIDs := make(map[string]bool, candidateLimit)
+	qLower := strings.ToLower(query)
+
+	for rows.Next() {
+		var m VectorMemoryEntry
+		var rawSim sql.NullFloat64
+		if scanErr := rows.Scan(
+			&m.ID, &m.CreatedAt, &m.Title, &m.Category, &m.EmployeeName, &m.APIKeyID, &m.Model,
+			&m.PromptText, &m.AnswerText, &m.Pinned, &m.HitCount, &rawSim,
+		); scanErr != nil {
+			continue
+		}
+		seenIDs[m.ID] = true
+		sim := 0.0
+		if rawSim.Valid && !math.IsNaN(rawSim.Float64) && !math.IsInf(rawSim.Float64, 0) {
+			sim = rawSim.Float64
+		}
+		if sim < 0 {
+			sim = 0
+		} else if sim > 1.0 {
+			sim = 1.0
+		}
+
+		// Hybrid keyword + pinned boosts consistent with in-memory scorer
+		if strings.Contains(strings.ToLower(m.Title+" "+m.PromptText), qLower) {
+			sim = math.Min(1.0, sim+0.25)
+		}
+		if m.Pinned && sim >= minSim*0.75 {
+			sim = math.Min(1.0, sim+0.08)
+		}
+		if sim >= minSim {
+			m.Similarity = math.Round(sim*1000) / 1000
+			candidates = append(candidates, scored{entry: m, score: sim})
+		}
+	}
+
+	// Also check exact keyword matches in memory not yet in candidate pool
+	vectorMu.RLock()
+	for _, m := range vectorMemories {
+		if seenIDs[m.ID] {
+			continue
+		}
+		sim := CosineSimilarity(qVec, m.Embedding)
+		if strings.Contains(strings.ToLower(m.Title+" "+m.PromptText), qLower) {
+			sim = math.Min(1.0, sim+0.25)
+		}
+		if m.Pinned && sim >= minSim*0.75 {
+			sim = math.Min(1.0, sim+0.08)
+		}
+		if sim >= minSim {
+			cp := m
+			cp.Similarity = math.Round(sim*1000) / 1000
+			cp.Embedding = nil
+			candidates = append(candidates, scored{entry: cp, score: sim})
+		}
+	}
+	vectorMu.RUnlock()
+
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].score > candidates[j].score
+	})
+
+	if len(candidates) > topK {
+		candidates = candidates[:topK]
+	}
+
+	out := make([]VectorMemoryEntry, len(candidates))
+	for i, c := range candidates {
+		out[i] = c.entry
+	}
+	return out, true
+}
+
 // ApplyVectorMemoryRAG retrieves the Top-K relevant long-term vector memories and injects them into the system prompt.
 func ApplyVectorMemoryRAG(req OpenAIChatRequest) (OpenAIChatRequest, int) {
 	cfg := GetVectorDBConfig()
@@ -625,10 +1018,10 @@ func ApplyVectorMemoryRAG(req OpenAIChatRequest) (OpenAIChatRequest, int) {
 		}
 		ragBuilder.WriteString(fmt.Sprintf("\n--- Memory #%d (%s | Độ tương đồng Cosine: %.0f%%) ---\n", i+1, tag, m.Similarity*100))
 		if m.PromptText != "" {
-			ragBuilder.WriteString("Ngữ cảnh / Câu hỏi: " + truncateAuditText(m.PromptText, 600) + "\n")
+			ragBuilder.WriteString("Ngữ cảnh / Câu hỏi: " + TruncateUTF8(m.PromptText, 600) + "\n")
 		}
 		if m.AnswerText != "" {
-			ragBuilder.WriteString("Kiến thức / Giải pháp: " + truncateAuditText(m.AnswerText, 1200) + "\n")
+			ragBuilder.WriteString("Kiến thức / Giải pháp: " + TruncateUTF8(m.AnswerText, 1200) + "\n")
 		}
 	}
 
@@ -684,18 +1077,17 @@ func DeleteVectorMemory(id string) error {
 	saveVectorMemoriesLocalAsync()
 
 	pgMu.RLock()
+	connected := pgConnected
 	db := pgDB
 	pgMu.RUnlock()
-	if db != nil {
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			if id == "all_auto" {
-				_, _ = db.ExecContext(ctx, `DELETE FROM omni_vector_memories WHERE pinned = FALSE`)
-			} else {
-				_, _ = db.ExecContext(ctx, `DELETE FROM omni_vector_memories WHERE id = $1`, id)
-			}
-		}()
+	if connected && db != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if id == "all_auto" {
+			_, _ = db.ExecContext(ctx, `DELETE FROM omni_vector_memories WHERE pinned = FALSE`)
+		} else {
+			_, _ = db.ExecContext(ctx, `DELETE FROM omni_vector_memories WHERE id = $1`, id)
+		}
 	}
 	return nil
 }
@@ -705,8 +1097,9 @@ func ListVectorMemories(limit int) []VectorMemoryEntry {
 	if limit <= 0 || limit > 300 {
 		limit = 100
 	}
+	ensureVectorMemoriesLoaded()
+
 	vectorMu.RLock()
-	ensureVectorMemoriesLoadedLocked()
 	n := len(vectorMemories)
 	if n > limit {
 		n = limit
@@ -723,8 +1116,9 @@ func ListVectorMemories(limit int) []VectorMemoryEntry {
 
 // GetVectorDBStatus returns comprehensive statistics and configuration of the Vector Database.
 func GetVectorDBStatus() map[string]any {
+	ensureVectorMemoriesLoaded()
+
 	vectorMu.RLock()
-	ensureVectorMemoriesLoadedLocked()
 	total := len(vectorMemories)
 	pinnedCount := 0
 	autoCount := 0
@@ -736,16 +1130,24 @@ func GetVectorDBStatus() map[string]any {
 		}
 	}
 	hasPgVec := pgVectorExtension
+	nativeReady := pgVectorNativeReady
 	vectorMu.RUnlock()
 
 	pgStatus := GetPostgresStatus()
-	pgConnected, _ := pgStatus["connected"].(bool)
+	pgConn, _ := pgStatus["connected"].(bool)
+	pgVer, _ := pgStatus["server_version"].(string)
+	pgTitle := "PostgreSQL 18"
+	if strings.TrimSpace(pgVer) != "" {
+		pgTitle = "PostgreSQL " + strings.TrimSpace(pgVer)
+	}
 
 	engineLabel := "Hybrid Cosine Vector Index (256-dim L2 + Local JSON)"
-	if pgConnected && hasPgVec {
-		engineLabel = "PostgreSQL 16 pgvector + Hybrid Cosine Index (256-dim)"
-	} else if pgConnected {
-		engineLabel = "PostgreSQL 16 + Hybrid Cosine Vector Index (256-dim)"
+	if pgConn && nativeReady {
+		engineLabel = pgTitle + " pgvector HNSW Native + Hybrid Cosine Index (256-dim)"
+	} else if pgConn && hasPgVec {
+		engineLabel = pgTitle + " pgvector + Hybrid Cosine Index (256-dim)"
+	} else if pgConn {
+		engineLabel = pgTitle + " + Hybrid Cosine Vector Index (256-dim)"
 	}
 
 	vc := GetVectorDBConfig()
@@ -754,10 +1156,10 @@ func GetVectorDBStatus() map[string]any {
 		"total_memories":     total,
 		"pinned_count":       pinnedCount,
 		"auto_learned_count": autoCount,
-		"pg_connected":       pgConnected,
+		"pg_connected":       pgConn,
 		"pgvector_extension": hasPgVec,
+		"pgvector_native":    nativeReady,
 		"embedding_dim":      VectorEmbeddingDim,
 		"engine":             engineLabel,
 	}
 }
-

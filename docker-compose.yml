@@ -1,41 +1,57 @@
 services:
-  postgres:
-    image: pgvector/pgvector:pg16
-    container_name: omniroute-postgres
+  omni-postgres:
+    image: pgvector/pgvector:pg18
+    container_name: omni-postgres
+    hostname: omni-postgres
     restart: unless-stopped
+    command:
+      - "postgres"
+      - "-c"
+      - "io_method=worker"
+      - "-c"
+      - "shared_buffers=256MB"
+      - "-c"
+      - "work_mem=8MB"
+      - "-c"
+      - "maintenance_work_mem=128MB"
     environment:
-      - POSTGRES_USER=omniroute
-      - POSTGRES_PASSWORD=omniroute_secret
-      - POSTGRES_DB=omniroute
-      - TZ=Asia/Ho_Chi_Minh
+      - POSTGRES_USER=${POSTGRES_USER:-omniroute}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-omniroute_secret}
+      - POSTGRES_DB=${POSTGRES_DB:-omniroute}
+      - TZ=${TZ:-Asia/Ho_Chi_Minh}
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      # PostgreSQL 18+ mounts at /var/lib/postgresql (PGDATA=/var/lib/postgresql/18/docker)
+      - omni_pg18_data:/var/lib/postgresql
+    networks:
+      default:
+        aliases:
+          - postgres
+          - omni-postgres
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U omniroute -d omniroute"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-omniroute} -d ${POSTGRES_DB:-omniroute}"]
       interval: 5s
       timeout: 5s
       retries: 5
 
-  omniroute-gateway:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: omniroute-gateway
+  omni-gateway:
+    build: .
+    container_name: omni-gateway
     restart: unless-stopped
     depends_on:
-      postgres:
+      omni-postgres:
         condition: service_healthy
     ports:
       - "8787:8787"
-      - "20128:20128"
     environment:
-      - GATEWAY_LISTEN_ADDR=0.0.0.0:8787
-      - GATEWAY_OAUTH_CALLBACK_ADDR=0.0.0.0:20128
+      - OMNI_GATEWAY_ADDR=0.0.0.0:8787
       - GATEWAY_CONFIG_FILE=/data/gateway_config.json
-      - DATABASE_URL=postgres://omniroute:omniroute_secret@postgres:5432/omniroute?sslmode=disable
-      - TZ=Asia/Ho_Chi_Minh
+      - POSTGRES_DSN=postgres://${POSTGRES_USER:-omniroute}:${POSTGRES_PASSWORD:-omniroute_secret}@omni-postgres:5432/${POSTGRES_DB:-omniroute}?sslmode=disable
+      - OMNI_ROUTING_STRATEGY=round-robin
+      - OMNI_FALLBACK_MODELS=antigravity/gemini-4-carbon-high,antigravity/gemini-4-argon-high,claude-code/claude-opus-4-6-thinking,alibaba/qwen3-coder-plus
+      - TZ=${TZ:-Asia/Ho_Chi_Minh}
     volumes:
-      - ./data:/data
+      - omni_data:/data
 
 volumes:
-  pgdata:
+  omni_pg18_data:
+  omni_data:

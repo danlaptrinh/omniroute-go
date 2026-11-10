@@ -13,9 +13,12 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"omni-parallel-mcp/gateway"
 )
+
+const DefaultModel = "antigravity/gemini-4-argon-high"
 
 // --- JSON-RPC 2.0 & MCP Types ---
 
@@ -50,6 +53,7 @@ type ParallelArgs struct {
 	SystemPrompt   string       `json:"system_prompt,omitempty"`
 	Model          string       `json:"model,omitempty"`
 	Endpoint       string       `json:"endpoint,omitempty"`
+	APIKey         string       `json:"api_key,omitempty"`
 	MaxConcurrency int          `json:"max_concurrency,omitempty"`
 	Tasks          []WorkerTask `json:"tasks"`
 }
@@ -63,6 +67,8 @@ type WorkerTask struct {
 type TaskResult struct {
 	Index    int
 	FilePath string
+	Status   string
+	Error    string
 	Bytes    int
 	Lines    int
 	Duration time.Duration
@@ -187,13 +193,13 @@ func main() {
 func toolDefinition() map[string]any {
 	return map[string]any{
 		"name":        "omni_parallel_workers",
-		"description": "Spawn N parallel Goroutines (e.g. 100 workers at 100% concurrency) hitting OmniRoute (/v1/chat/completions) simultaneously to generate code and write files directly to disk in a single turn.",
+		"description": "Spawn N parallel Goroutines (e.g. 100 workers at 100% concurrency) hitting OmniRoute (/v1/chat/completions) simultaneously (supporting antigravity/gemini-4-carbon-high, antigravity/gemini-4-argon-high, Claude, and Qwen) to generate code and write files directly to disk in a single turn.",
 		"inputSchema": map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"base_dir": map[string]any{
 					"type":        "string",
-					"description": "Optional base directory for resolving relative file_path and context_files.",
+					"description": "Optional base directory for resolving and confining relative file_path and context_files.",
 				},
 				"shared_context": map[string]any{
 					"type":        "string",
@@ -210,7 +216,11 @@ func toolDefinition() map[string]any {
 				},
 				"model": map[string]any{
 					"type":        "string",
-					"description": "Optional model name override for OmniRoute (defaults to OMNIROUTE_MODEL env var).",
+					"description": "Optional model name override for OmniRoute (e.g. 'antigravity/gemini-4-carbon-high' or 'antigravity/gemini-4-argon-high'; defaults to OMNI_DEFAULT_MODEL / OMNIROUTE_MODEL env var).",
+				},
+				"endpoint": map[string]any{
+					"type":        "string",
+					"description": "Optional OmniRoute /v1/chat/completions endpoint URL override (defaults to OMNI_GATEWAY_URL / OMNIROUTE_BASE_URL).",
 				},
 				"max_concurrency": map[string]any{
 					"type":        "integer",
@@ -263,17 +273,12 @@ func handleToolCall(req RPCRequest) RPCResponse {
 
 	startWall := time.Now()
 	endpoint := resolveEndpoint(args.Endpoint)
-	apiKey := firstNonEmpty(
-		os.Getenv("OMNI_API_KEY"),
-		os.Getenv("OMNIROUTE_API_KEY"),
-		os.Getenv("AGY_OAUTH_TOKEN"),
-		"sk-omni-1a3fbd3d0aaa37401bb556381d91796ad200219da8f3db1d04233062aed5d33d",
-	)
+	apiKey := resolveAPIKey(args.APIKey)
 	defaultModel := firstNonEmpty(
 		args.Model,
 		os.Getenv("OMNI_DEFAULT_MODEL"),
 		os.Getenv("OMNIROUTE_MODEL"),
-		"antigravity/gemini-4-argon-high",
+		DefaultModel,
 	)
 	sysPrompt := firstNonEmpty(args.SystemPrompt,
 		"You are an elite software engineer worker. Output ONLY the raw, complete, compilable source code for the requested file. Do NOT wrap output in markdown fences (no ```go or ```), and do NOT include explanations outside code comments.")
@@ -305,40 +310,7 @@ func handleToolCall(req RPCRequest) RPCResponse {
 				sem <- struct{}{}
 				defer func() { <-sem }()
 			}
-
-			tStart := time.Now()
-			targetPath := resolvePath(args.BaseDir, t.FilePath)
-			model := firstNonEmpty(t.Model, defaultModel)
-
-			userPrompt := fmt.Sprintf("Target File: %s\n\nTask Instructions:\n%s", t.FilePath, t.Prompt)
-			if sharedCtx != "" {
-				userPrompt = fmt.Sprintf("=== SHARED CONTRACTS & CONTEXT ===\n%s\n\n=== TARGET FILE TASK ===\n%s", sharedCtx, userPrompt)
-			}
-
-			code, err := callOmniRoute(endpoint, apiKey, model, sysPrompt, userPrompt)
-			if err != nil {
-				results[idx] = TaskResult{Index: idx, FilePath: targetPath, Duration: time.Since(tStart), Err: err}
-				return
-			}
-
-			cleanCode := stripCodeFences(code)
-			if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
-				results[idx] = TaskResult{Index: idx, FilePath: targetPath, Duration: time.Since(tStart), Err: err}
-				return
-			}
-			if err := os.WriteFile(targetPath, []byte(cleanCode), 0644); err != nil {
-				results[idx] = TaskResult{Index: idx, FilePath: targetPath, Duration: time.Since(tStart), Err: err}
-				return
-			}
-
-			lines := strings.Count(cleanCode, "\n") + 1
-			results[idx] = TaskResult{
-				Index:    idx,
-				FilePath: targetPath,
-				Bytes:    len(cleanCode),
-				Lines:    lines,
-				Duration: time.Since(tStart),
-			}
+			results[idx] = executeWorkerTask(idx, args.BaseDir, t, endpoint, apiKey, defaultModel, sysPrompt, sharedCtx)
 		}(i, task)
 	}
 
@@ -524,13 +496,104 @@ func parseOmniRouteResponse(body []byte) (string, error) {
 	return chatResp.Choices[0].Message.Content, nil
 }
 
+func buildUserPrompt(filePath, taskPrompt, sharedCtx string) string {
+	userPrompt := fmt.Sprintf("Target File: %s\n\nTask Instructions:\n%s", filePath, taskPrompt)
+	if sharedCtx != "" {
+		userPrompt = fmt.Sprintf("=== SHARED CONTRACTS & CONTEXT ===\n%s\n\n=== TARGET FILE TASK ===\n%s", sharedCtx, userPrompt)
+	}
+	return userPrompt
+}
+
+func executeWorkerTask(idx int, baseDir string, t WorkerTask, endpoint, apiKey, defaultModel, sysPrompt, sharedCtx string) TaskResult {
+	tStart := time.Now()
+	targetPath, err := resolvePathSafe(baseDir, t.FilePath)
+	if err != nil {
+		return TaskResult{
+			Index:    idx,
+			FilePath: t.FilePath,
+			Status:   "error",
+			Error:    err.Error(),
+			Duration: time.Since(tStart),
+			Err:      err,
+		}
+	}
+
+	model := firstNonEmpty(t.Model, defaultModel)
+	userPrompt := buildUserPrompt(t.FilePath, t.Prompt, sharedCtx)
+
+	rawOutput, err := callOmniRoute(endpoint, apiKey, model, sysPrompt, userPrompt)
+	if err != nil {
+		return TaskResult{
+			Index:    idx,
+			FilePath: targetPath,
+			Status:   "error",
+			Error:    err.Error(),
+			Duration: time.Since(tStart),
+			Err:      err,
+		}
+	}
+
+	cleanCode := stripMarkdownFences(rawOutput)
+	if strings.Contains(strings.ToLower(cleanCode), "this version of antigravity is no longer supported") {
+		bannerErr := fmt.Errorf("upstream gateway returned unsupported Antigravity client banner; refusing to overwrite file")
+		return TaskResult{
+			Index:    idx,
+			FilePath: targetPath,
+			Status:   "error",
+			Error:    bannerErr.Error(),
+			Duration: time.Since(tStart),
+			Err:      bannerErr,
+		}
+	}
+
+	if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
+		return TaskResult{
+			Index:    idx,
+			FilePath: targetPath,
+			Status:   "error",
+			Error:    err.Error(),
+			Duration: time.Since(tStart),
+			Err:      err,
+		}
+	}
+	if err := os.WriteFile(targetPath, []byte(cleanCode), 0644); err != nil {
+		return TaskResult{
+			Index:    idx,
+			FilePath: targetPath,
+			Status:   "error",
+			Error:    err.Error(),
+			Duration: time.Since(tStart),
+			Err:      err,
+		}
+	}
+
+	lines := strings.Count(cleanCode, "\n") + 1
+	return TaskResult{
+		Index:    idx,
+		FilePath: targetPath,
+		Status:   "ok",
+		Bytes:    len(cleanCode),
+		Lines:    lines,
+		Duration: time.Since(tStart),
+	}
+}
+
 func buildSharedContext(baseDir, inlineCtx string, files []string) (string, error) {
 	var parts []string
 	if strings.TrimSpace(inlineCtx) != "" {
 		parts = append(parts, inlineCtx)
 	}
 	for _, f := range files {
-		p := resolvePath(baseDir, f)
+		var p string
+		if strings.TrimSpace(baseDir) != "" && !filepath.IsAbs(filepath.FromSlash(strings.TrimSpace(f))) {
+			safePath, err := resolvePathSafe(baseDir, f)
+			if err != nil {
+				return "", err
+			}
+			p = safePath
+		} else {
+			p = resolvePath(baseDir, f)
+		}
 		b, err := os.ReadFile(p)
 		if err != nil {
 			return "", fmt.Errorf("%s: %w", p, err)
@@ -538,6 +601,16 @@ func buildSharedContext(baseDir, inlineCtx string, files []string) (string, erro
 		parts = append(parts, fmt.Sprintf("// --- File: %s ---\n%s", f, string(b)))
 	}
 	return strings.Join(parts, "\n\n"), nil
+}
+
+func resolveAPIKey(argsKey string) string {
+	return firstNonEmpty(
+		argsKey,
+		os.Getenv("OMNI_API_KEY"),
+		os.Getenv("OMNIROUTE_API_KEY"),
+		os.Getenv("OPENAI_API_KEY"),
+		os.Getenv("AGY_OAUTH_TOKEN"),
+	)
 }
 
 func resolveEndpoint(override string) string {
@@ -559,10 +632,47 @@ func resolveEndpoint(override string) string {
 }
 
 func resolvePath(baseDir, target string) string {
-	if filepath.IsAbs(target) || baseDir == "" {
+	if filepath.IsAbs(target) || strings.TrimSpace(baseDir) == "" {
 		return filepath.Clean(target)
 	}
 	return filepath.Join(baseDir, target)
+}
+
+func resolvePathSafe(baseDir, p string) (string, error) {
+	trimmedPath := strings.TrimSpace(p)
+	if trimmedPath == "" {
+		return "", fmt.Errorf("file path cannot be empty")
+	}
+	normalized := filepath.FromSlash(trimmedPath)
+	if strings.TrimSpace(baseDir) == "" {
+		return filepath.Clean(normalized), nil
+	}
+
+	var target string
+	if filepath.IsAbs(normalized) {
+		target = filepath.Clean(normalized)
+	} else {
+		target = filepath.Join(baseDir, normalized)
+	}
+
+	absBase, err := filepath.Abs(baseDir)
+	if err != nil {
+		return "", fmt.Errorf("invalid base_dir %q: %w", baseDir, err)
+	}
+	absTarget, err := filepath.Abs(target)
+	if err != nil {
+		return "", fmt.Errorf("invalid target path %q: %w", p, err)
+	}
+
+	rel, err := filepath.Rel(absBase, absTarget)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("security error: path %q escapes base_dir %q", p, baseDir)
+	}
+	return absTarget, nil
+}
+
+func stripMarkdownFences(s string) string {
+	return stripCodeFences(s)
 }
 
 func stripCodeFences(s string) string {
@@ -589,11 +699,21 @@ func firstNonEmpty(vals ...string) string {
 	return ""
 }
 
-func truncate(s string, max int) string {
-	if len(s) <= max {
+func truncate(s string, maxLen int) string {
+	if maxLen < 0 {
+		maxLen = 0
+	}
+	if utf8.RuneCountInString(s) <= maxLen {
 		return s
 	}
-	return s[:max] + "..."
+	count := 0
+	for idx := range s {
+		if count == maxLen {
+			return s[:idx] + "..."
+		}
+		count++
+	}
+	return s
 }
 
 func rpcErr(id json.RawMessage, code int, msg string) RPCResponse {

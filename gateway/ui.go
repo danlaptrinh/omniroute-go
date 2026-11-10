@@ -886,7 +886,7 @@ const gatewayUIHTML = `<!DOCTYPE html>
     <div class="setting-card" style="padding:12px 14px;margin-bottom:16px;">
       <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
         <div style="display:flex;gap:8px;align-items:center;flex:1;max-width:380px;">
-          <input id="modelSearchInput" type="text" placeholder="🔍 Lọc mô hình (argon, image, opus, qwen)..." oninput="filterModelsGrid()" style="padding:6px 12px;font-size:12px;" />
+          <input id="modelSearchInput" type="text" placeholder="🔍 Lọc mô hình (carbon, argon, image, opus, qwen)..." oninput="filterModelsGrid()" style="padding:6px 12px;font-size:12px;" />
         </div>
         <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
           <button id="pillFilterModAll" class="btn" style="padding:4px 9px;font-size:11px;background:#242d3d;color:#fff;" onclick="setModelVisibilityFilter('all')">Tất cả</button>
@@ -934,7 +934,7 @@ const gatewayUIHTML = `<!DOCTYPE html>
       <!-- Tab Antigravity -->
       <div id="tab-antigravity" class="prov-tab">
         <p class="hint" style="margin:0 0 10px 0;">
-          Hỗ trợ Gemini 3 Flash/Pro, Gemini 4 Argon, <strong>Gemini 3 Pro Image (Imagen 3)</strong> và Claude 4.5/4.6 trên Antigravity CCPA.
+          Hỗ trợ Gemini 3 Flash/Pro, Gemini 4 Carbon/Argon, <strong>Gemini 3 Pro Image (Imagen 3)</strong> và Claude 4.5/4.6 trên Antigravity CCPA.
         </p>
         <div style="font-size:12.5px;color:var(--muted);margin-bottom:6px;">Bước 1: Mở URL xác thực Google OAuth</div>
         <div id="agyOAuthUrlBox" style="background:var(--card-inner);border:1px solid var(--border);padding:10px;border-radius:8px;font-family:monospace;font-size:11.5px;word-break:break-all;">Đang tạo URL...</div>
@@ -1039,12 +1039,12 @@ const gatewayUIHTML = `<!DOCTYPE html>
       </div>
 
       <div class="responsive-pg-grid" style="margin-top:14px;">
-        <input id="pgDsnInput" type="text" placeholder="postgres://omniroute:omniroute_secret@postgres:5432/omniroute?sslmode=disable" style="font-family:monospace;font-size:12.5px;" />
-        <button onclick="fillDefaultDockerPostgres()" title="Điền chuỗi kết nối PostgreSQL mặc định trong docker-compose.yml">🐳 Docker DSN</button>
+        <input id="pgDsnInput" type="text" placeholder="postgres://omniroute:omniroute_secret@omni-postgres:5432/omniroute?sslmode=disable" style="font-family:monospace;font-size:12.5px;" />
+        <button onclick="fillDefaultDockerPostgres()" title="Điền chuỗi kết nối PostgreSQL 18 mặc định trong docker-compose.yml">🐳 Docker DSN</button>
         <button class="btn-primary" onclick="savePostgresConfig()">🔌 Lưu &amp; Kết Nối PostgreSQL</button>
       </div>
       <div id="pgStatusDetail" class="hint" style="margin-top:8px;">
-        Khi chạy trên VPS bằng <code>docker compose up -d</code>, container PostgreSQL 16 sẽ tự động kết nối và tạo bảng <code>omni_api_keys</code> &amp; <code>omni_prompt_logs</code>.
+        Khi chạy trên VPS bằng <code>docker compose up -d</code>, container PostgreSQL 18 (<code>pgvector:pg18</code>) sẽ tự động kết nối và tạo bảng <code>omni_api_keys</code>, <code>omni_prompt_logs</code> &amp; <code>omni_vector_memories</code>.
       </div>
     </div>
 
@@ -1183,6 +1183,8 @@ const gatewayUIHTML = `<!DOCTYPE html>
               <option value="imagen-3">imagen-3</option>
             </optgroup>
             <optgroup label="Google Antigravity (Gen 3 & 4)">
+              <option value="gemini-4-carbon-high">gemini-4-carbon-high (Carbon 4 High Thinking)</option>
+              <option value="gemini-4-carbon-medium">gemini-4-carbon-medium</option>
               <option value="gemini-4-argon-high">gemini-4-argon-high (Argon High Thinking)</option>
               <option value="gemini-4-argon-medium">gemini-4-argon-medium</option>
               <option value="gemini-3.1-pro-high">gemini-3.1-pro-high (Gemini 3.1 Pro High)</option>
@@ -1701,7 +1703,7 @@ docker compose up -d --build</pre>
         </div>
         <div>
           <label class="form-label">Kiến thức chuẩn / Giải pháp AI cần ghi nhớ</label>
-          <textarea id="vecAddAnswer" rows="3" placeholder="Ví dụ: Hệ thống sử dụng PostgreSQL 16 (pgvector), cổng 8787 cho AI Gateway, xác thực bằng Bearer sk-omni-..."></textarea>
+          <textarea id="vecAddAnswer" rows="3" placeholder="Ví dụ: Hệ thống sử dụng PostgreSQL 18 (pgvector), cổng 8787 cho AI Gateway, xác thực bằng Bearer sk-omni-..."></textarea>
         </div>
       </div>
       <div class="btn-row" style="justify-content:flex-end;margin-top:10px;">
@@ -1964,7 +1966,8 @@ docker compose up -d --build</pre>
       <div style="margin-top:10px;">
         <label class="form-label">👑 Model Quản Lý Dự Án SEO (Tier 1 Lead Manager — Lập kế hoạch &amp; Điều phối)</label>
         <select id="saModelSelect">
-          <option value="auto-manager" selected>👑 Tự động theo giờ: Ngày (gemini-4-argon-high &amp; claude-opus-5-5) | Tối (alibaba/qwen3.8-max ⚡ 40% Off)</option>
+          <option value="auto-manager" selected>👑 Tự động theo giờ: Ngày (gemini-4-carbon-high / gemini-4-argon-high &amp; claude-opus-5-5) | Tối (alibaba/qwen3.8-max ⚡ 40% Off)</option>
+          <option value="antigravity/gemini-4-carbon-high">antigravity/gemini-4-carbon-high (Gemini 4 Carbon High - Quản Lý Dự Án SEO)</option>
           <option value="antigravity/gemini-4-argon-high">antigravity/gemini-4-argon-high (Gemini 4 Argon High - Quản Lý Dự Án SEO)</option>
           <option value="claude-code/claude-opus-5-5">claude-code/claude-opus-5-5 (Claude Opus 5.5 - Quản Lý Dự Án SEO)</option>
           <option value="alibaba/qwen3.8-max">alibaba/qwen3.8-max (Alibaba Qwen 3.8 Max ⚡ 40% Off Nights - Quản Lý SEO Buổi Tối)</option>
@@ -2027,6 +2030,7 @@ docker compose up -d --build</pre>
             <label class="form-label">Model Quản Lý Dự Án (Lead Orchestrator)</label>
             <select id="autoSchedModelSelect">
               <option value="alibaba/qwen3.8-max" selected>alibaba/qwen3.8-max (⚡ 40% Off Nights - Tối ưu chi phí)</option>
+              <option value="antigravity/gemini-4-carbon-high">antigravity/gemini-4-carbon-high (Carbon High Thinking)</option>
               <option value="antigravity/gemini-4-argon-high">antigravity/gemini-4-argon-high (Argon High Thinking)</option>
               <option value="claude-code/claude-opus-5-5">claude-code/claude-opus-5-5 (Claude Opus 5.5)</option>
             </select>
@@ -2385,6 +2389,13 @@ docker compose up -d --build</pre>
       }
     }
 
+    function handleSessionExpired() {
+      const overlay = document.getElementById('loginOverlay');
+      if (overlay && !overlay.classList.contains('open')) {
+        checkAuthStatus();
+      }
+    }
+
     async function doLoginOrSetup() {
       const pass = document.getElementById('adminPasswordInput').value.trim();
       const errBox = document.getElementById('loginErrorMsg');
@@ -2457,6 +2468,7 @@ docker compose up -d --build</pre>
       const box = document.getElementById('quotaCardsGrid');
       try {
         const r = await fetch('/v1/quota' + (force ? '?refresh=true' : ''));
+        if (r.status === 401) { handleSessionExpired(); return; }
         const d = await r.json();
         currentQuotaSummary = d;
 
@@ -2742,6 +2754,7 @@ docker compose up -d --build</pre>
       const box = document.getElementById('modelsCardsGrid');
       try {
         const r = await fetch('/v1/models/diagnostics');
+        if (r.status === 401) { handleSessionExpired(); return; }
         const d = await r.json();
         allDiagnosticsModels = d.data || [];
         renderModelsGrid();
@@ -3085,6 +3098,7 @@ docker compose up -d --build</pre>
       const box = document.getElementById('apiKeysTableBox');
       try {
         const r = await fetch('/v1/keys');
+        if (r.status === 401) { handleSessionExpired(); return; }
         const d = await r.json();
         if (d.postgres) {
           renderPostgresBanner(d.postgres);
@@ -3136,16 +3150,17 @@ docker compose up -d --build</pre>
       }
 
       if (pg.connected) {
+        const verTag = pg.server_version ? ('PostgreSQL ' + pg.server_version) : 'PostgreSQL 18';
         if (badge) {
           badge.className = 'badge badge-green';
-          badge.textContent = '🟢 PostgreSQL Connected (' + (pg.total_prompt_logs || 0) + ' prompts)';
+          badge.textContent = '🟢 ' + verTag + ' Connected (' + (pg.total_prompt_logs || 0) + ' prompts)';
         }
         if (logBadge) {
           logBadge.className = 'badge badge-green';
-          logBadge.textContent = '🐘 PostgreSQL (' + (pg.total_prompt_logs || 0) + ' bản ghi)';
+          logBadge.textContent = '🐘 ' + verTag + ' (' + (pg.total_prompt_logs || 0) + ' bản ghi)';
         }
         if (detail) {
-          detail.innerHTML = '<span style="color:#34d399;">✔ Đã kết nối PostgreSQL: <code>' + htmlEscape(pg.dsn_masked || '') + '</code> — Đang lưu trữ bền vững <strong>' +
+          detail.innerHTML = '<span style="color:#34d399;">✔ Đã kết nối ' + htmlEscape(verTag) + ': <code>' + htmlEscape(pg.dsn_masked || '') + '</code> — Đang lưu trữ bền vững <strong>' +
             (pg.total_keys_in_db || 0) + ' khóa nhân viên</strong> và <strong>' + (pg.total_prompt_logs || 0) + ' lịch sử Prompt</strong>.</span>';
         }
       } else {
@@ -3166,7 +3181,7 @@ docker compose up -d --build</pre>
     function fillDefaultDockerPostgres() {
       const inp = document.getElementById('pgDsnInput');
       if (inp) {
-        inp.value = 'postgres://omniroute:omniroute_secret@postgres:5432/omniroute?sslmode=disable';
+        inp.value = 'postgres://omniroute:omniroute_secret@omni-postgres:5432/omniroute?sslmode=disable';
       }
     }
 
@@ -3309,6 +3324,7 @@ docker compose up -d --build</pre>
 
       try {
         const r = await fetch(url);
+        if (r.status === 401) { handleSessionExpired(); return; }
         const d = await r.json();
         if (d.postgres) {
           renderPostgresBanner(d.postgres);
@@ -3595,6 +3611,7 @@ docker compose up -d --build</pre>
       if (!box) return;
       try {
         const r = await fetch('/v1/providers');
+        if (r.status === 401) { handleSessionExpired(); return; }
         const d = await r.json();
         if (d.routing_strategy) {
           const sb = document.getElementById('activeStrategyBadge');
@@ -3864,6 +3881,7 @@ docker compose up -d --build</pre>
     async function loadEndpointStatus() {
       try {
         const r = await fetch('/v1/endpoint');
+        if (r.status === 401) { handleSessionExpired(); return; }
         const d = await r.json();
         renderEndpointStatus(d);
       } catch (e) {
@@ -4149,6 +4167,7 @@ docker compose up -d --build</pre>
       const box = document.getElementById('vectorMemoriesListBox');
       try {
         const r = await fetch('/v1/vector');
+        if (r.status === 401) { handleSessionExpired(); return; }
         const d = await r.json();
         renderVectorDBStatus(d);
         renderVectorMemoriesList(d.memories || []);
@@ -4349,8 +4368,10 @@ docker compose up -d --build</pre>
 
     const comboSelectModelGroups = [
       {
-        label: 'Google Antigravity (Gen 4 Argon & Gen 3)',
+        label: 'Google Antigravity (Gen 4 Carbon, Argon & Gen 3)',
         models: [
+          {id: 'antigravity/gemini-4-carbon-high', name: 'antigravity/gemini-4-carbon-high (Carbon 4 High Thinking)'},
+          {id: 'antigravity/gemini-4-carbon-medium', name: 'antigravity/gemini-4-carbon-medium'},
           {id: 'antigravity/gemini-4-argon-high', name: 'antigravity/gemini-4-argon-high (Argon 4 High Thinking)'},
           {id: 'antigravity/gemini-4-argon-medium', name: 'antigravity/gemini-4-argon-medium'},
           {id: 'antigravity/gemini-3.1-pro-high', name: 'antigravity/gemini-3.1-pro-high'},
@@ -4434,6 +4455,7 @@ docker compose up -d --build</pre>
       const box = document.getElementById('combosGridBox');
       try {
         const r = await fetch('/v1/combos');
+        if (r.status === 401) { handleSessionExpired(); return; }
         const d = await r.json();
         currentCombosList = d.combos || [];
         renderCombosGrid(currentCombosList);
@@ -4631,6 +4653,7 @@ docker compose up -d --build</pre>
     async function loadSubAgentsView() {
       try {
         const r = await fetch('/v1/subagents');
+        if (r.status === 401) { handleSessionExpired(); return; }
         const d = await r.json();
         const agyEl = document.getElementById('saKpiAgyCount');
         const rdyEl = document.getElementById('saKpiReadyCount');

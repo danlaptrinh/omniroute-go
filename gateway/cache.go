@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"sync"
 	"time"
@@ -233,12 +234,14 @@ func (s *Server) handleCacheStats(w http.ResponseWriter, r *http.Request) {
 			Enabled *bool `json:"enabled"`
 			Clear   bool  `json:"clear"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err == nil {
-			if req.Clear {
-				cache.Clear()
-			}
-			if req.Enabled != nil {
-				cache.SetEnabled(*req.Enabled)
+		if r.Body != nil {
+			if err := json.NewDecoder(io.LimitReader(r.Body, 64*1024)).Decode(&req); err == nil {
+				if req.Clear {
+					cache.Clear()
+				}
+				if req.Enabled != nil {
+					cache.SetEnabled(*req.Enabled)
+				}
 			}
 		}
 		w.Header().Set("Content-Type", "application/json")

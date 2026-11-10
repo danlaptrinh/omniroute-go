@@ -15,8 +15,7 @@ import (
 )
 
 const (
-	DefaultCCPAEndpoint      = "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse"
-	DefaultGatewayConfigPath = `C:\Users\cloud\.gemini\gateway_config.json`
+	DefaultCCPAEndpoint = "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse"
 )
 
 // SharedHTTPTransport and SharedHTTPClient reuse warm HTTP/2 connections across all requests,
@@ -141,6 +140,7 @@ func (u *GatewayUpstream) HandleChatCompletion(
 	}
 
 	var lastErr error
+	var firstUpstreamErr error
 
 	hedgedEnabled, hedgeDelayMs := GetHedgedConfig()
 	if hedgedEnabled && len(targets) > 1 && !req.Stream {
@@ -154,6 +154,9 @@ func (u *GatewayUpstream) HandleChatCompletion(
 			return nil
 		} else {
 			lastErr = err
+			if firstUpstreamErr == nil && !isMissingAccountErr(err) {
+				firstUpstreamErr = err
+			}
 		}
 	}
 
@@ -161,10 +164,11 @@ func (u *GatewayUpstream) HandleChatCompletion(
 		return u.handleOmniRouteWithFallback(ctx, w, req, resolved, cleanAuth)
 	}
 
-	if lastErr != nil && !strings.Contains(lastErr.Error(), "no ") {
-		writeOpenAIError(w, http.StatusBadGateway, fmt.Sprintf("direct Antigravity CCPA error for model %q (%s): %v", resolved.RequestedID, resolved.CCPAModelID, lastErr), "upstream_error")
-		return lastErr
+	if firstUpstreamErr != nil {
+		writeOpenAIError(w, http.StatusBadGateway, fmt.Sprintf("direct Antigravity CCPA error for model %q (%s): %v", resolved.RequestedID, resolved.CCPAModelID, firstUpstreamErr), "upstream_error")
+		return firstUpstreamErr
 	}
+	_ = lastErr
 
 	msg := fmt.Sprintf(
 		"OmniRoute-Go v2.0: To call %q (provider=%s, model=%s), please connect an account (Antigravity OAuth, Claude Code, or Alibaba Token Plan) at http://127.0.0.1:8787/ui (config: %s)",
@@ -175,6 +179,19 @@ func (u *GatewayUpstream) HandleChatCompletion(
 	)
 	writeOpenAIError(w, http.StatusUnauthorized, msg, "authentication_required")
 	return fmt.Errorf("%s", msg)
+}
+
+func isMissingAccountErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.HasPrefix(msg, "no valid ") ||
+		strings.HasPrefix(msg, "no antigravity ") ||
+		strings.HasPrefix(msg, "no claude ") ||
+		strings.HasPrefix(msg, "no alibaba ") ||
+		strings.Contains(msg, "oauth token configured") ||
+		strings.Contains(msg, "api key configured")
 }
 
 func (u *GatewayUpstream) tryTarget(
@@ -676,7 +693,7 @@ func (u *GatewayUpstream) handleDirectCCPA(
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
 		httpReq.Header.Set("Accept", "text/event-stream")
-		httpReq.Header.Set("User-Agent", AgyUserAgent)
+		httpReq.Header.Set("User-Agent", GetAgyUserAgent())
 		httpReq.Header.Set("Authorization", "Bearer "+oauthToken)
 
 		r, err := u.client.Do(httpReq)
@@ -688,9 +705,6 @@ func (u *GatewayUpstream) handleDirectCCPA(
 		if r.StatusCode >= 200 && r.StatusCode < 300 {
 			resp = r
 			activeCCPAModel = candidate
-			if useFastCache && !noThinking && resolved.CanonicalID != "" {
-				workingCCPAModelCache.Store(resolved.CanonicalID, candidate)
-			}
 			break
 		}
 
@@ -708,16 +722,86 @@ func (u *GatewayUpstream) handleDirectCCPA(
 	}
 	defer resp.Body.Close()
 
-	w.Header().Set("X-Omni-Gateway-Resolved-Model", activeCCPAModel)
-	w.Header().Set("X-Omni-Gateway-Route", "ccpa-direct")
-	if resolved.ThinkingLevel != ThinkingLevelNone {
-		w.Header().Set("X-Omni-Gateway-Thinking-Level", string(resolved.ThinkingLevel))
-	}
-
 	created := time.Now().Unix()
 	respID := fmt.Sprintf("chatcmpl-ccpa-%d", time.Now().UnixNano())
 
 	if req.Stream {
+		var streamedText strings.Builder
+		var streamedThoughts strings.Builder
+		var lastUsage *ccpaUsageMetadata
+		var rawNonSSE strings.Builder
+
+		scanner := bufio.NewScanner(resp.Body)
+		scanner.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)
+
+		// Buffer and inspect the first meaningful SSE chunk(s) BEFORE calling w.WriteHeader(http.StatusOK)
+		// so an outdated Antigravity client banner returns an error and triggers cross-provider failover.
+		var initialText strings.Builder
+		var initialThoughts strings.Builder
+		foundSSE := false
+		for scanner.Scan() {
+			rawLine := scanner.Text()
+			line := strings.TrimSpace(rawLine)
+			if !strings.HasPrefix(line, "data:") {
+				if line != "" {
+					rawNonSSE.WriteString(rawLine)
+					rawNonSSE.WriteByte('\n')
+				}
+				continue
+			}
+			foundSSE = true
+			dataStr := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+			if dataStr == "" || dataStr == "[DONE]" {
+				continue
+			}
+			textDelta, thoughtDelta, uMeta := extractCCPAPartsAndUsage(dataStr)
+			if uMeta != nil && (uMeta.TotalTokenCount > 0 || uMeta.PromptTokenCount > 0 || uMeta.CandidatesTokenCount > 0) {
+				lastUsage = uMeta
+			}
+			if textDelta == "" && thoughtDelta == "" {
+				continue
+			}
+			initialText.WriteString(textDelta)
+			initialThoughts.WriteString(thoughtDelta)
+
+			probe := initialText.String()
+			if IsUnsupportedClientBanner(probe) {
+				return fmt.Errorf("CCPA client version rejected by upstream (update OMNI_AGY_USER_AGENT): %s", TruncateUTF8(probe, 200))
+			}
+			lowerProbe := strings.ToLower(strings.TrimSpace(probe))
+			if initialThoughts.Len() == 0 && lowerProbe != "" && len(lowerProbe) < 60 &&
+				strings.HasPrefix("this version of antigravity is no longer supported", lowerProbe) {
+				continue
+			}
+			break
+		}
+
+		if !foundSSE && rawNonSSE.Len() > 0 {
+			tDelta, thDelta, uMeta := extractCCPAPartsAndUsage(rawNonSSE.String())
+			if uMeta != nil && (uMeta.TotalTokenCount > 0 || uMeta.PromptTokenCount > 0 || uMeta.CandidatesTokenCount > 0) {
+				lastUsage = uMeta
+			}
+			initialText.WriteString(tDelta)
+			initialThoughts.WriteString(thDelta)
+		}
+
+		if IsUnsupportedClientBanner(initialText.String()) || IsUnsupportedClientBanner(rawNonSSE.String()) {
+			banner := initialText.String()
+			if strings.TrimSpace(banner) == "" {
+				banner = rawNonSSE.String()
+			}
+			return fmt.Errorf("CCPA client version rejected by upstream (update OMNI_AGY_USER_AGENT): %s", TruncateUTF8(banner, 200))
+		}
+
+		if useFastCache && !noThinking && resolved.CanonicalID != "" {
+			workingCCPAModelCache.Store(resolved.CanonicalID, activeCCPAModel)
+		}
+
+		w.Header().Set("X-Omni-Gateway-Resolved-Model", activeCCPAModel)
+		w.Header().Set("X-Omni-Gateway-Route", "ccpa-direct")
+		if resolved.ThinkingLevel != ThinkingLevelNone {
+			w.Header().Set("X-Omni-Gateway-Thinking-Level", string(resolved.ThinkingLevel))
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
@@ -747,12 +831,32 @@ func (u *GatewayUpstream) handleDirectCCPA(
 			}
 		}()
 
-		var streamedText strings.Builder
-		var streamedThoughts strings.Builder
-		var lastUsage *ccpaUsageMetadata
+		if initialText.Len() > 0 || initialThoughts.Len() > 0 {
+			streamedText.WriteString(initialText.String())
+			streamedThoughts.WriteString(initialThoughts.String())
+			firstChunk := OpenAIChatResponse{
+				ID:      respID,
+				Object:  "chat.completion.chunk",
+				Created: created,
+				Model:   resolved.RequestedID,
+				Choices: []OpenAIChatChoice{
+					{
+						Index: 0,
+						Delta: &OpenAIOutputMessage{
+							Role:             "assistant",
+							Content:          initialText.String(),
+							ReasoningContent: initialThoughts.String(),
+						},
+					},
+				},
+			}
+			b, _ := json.Marshal(firstChunk)
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", b)
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
 
-		scanner := bufio.NewScanner(resp.Body)
-		scanner.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)
 		for scanner.Scan() {
 			line := strings.TrimSpace(scanner.Text())
 			if !strings.HasPrefix(line, "data:") {
@@ -820,7 +924,7 @@ func (u *GatewayUpstream) handleDirectCCPA(
 			flusher.Flush()
 		}
 
-		if streamedText.Len() > 0 {
+		if streamedText.Len() > 0 && !IsUnsupportedClientBanner(streamedText.String()) {
 			cachedResp := OpenAIChatResponse{
 				ID:      respID,
 				Object:  "chat.completion",
@@ -883,6 +987,24 @@ func (u *GatewayUpstream) handleDirectCCPA(
 		fullThoughts.WriteString(thDelta)
 	}
 
+	if IsUnsupportedClientBanner(fullText.String()) || IsUnsupportedClientBanner(string(rawBytes)) {
+		banner := fullText.String()
+		if strings.TrimSpace(banner) == "" {
+			banner = string(rawBytes)
+		}
+		return fmt.Errorf("CCPA client version rejected by upstream (update OMNI_AGY_USER_AGENT): %s", TruncateUTF8(banner, 200))
+	}
+
+	if useFastCache && !noThinking && resolved.CanonicalID != "" {
+		workingCCPAModelCache.Store(resolved.CanonicalID, activeCCPAModel)
+	}
+
+	w.Header().Set("X-Omni-Gateway-Resolved-Model", activeCCPAModel)
+	w.Header().Set("X-Omni-Gateway-Route", "ccpa-direct")
+	if resolved.ThinkingLevel != ThinkingLevelNone {
+		w.Header().Set("X-Omni-Gateway-Thinking-Level", string(resolved.ThinkingLevel))
+	}
+
 	usage := computeCCPAUsage(req, fullText.Len(), fullThoughts.Len(), lastUsage)
 	w.Header().Set("X-Omni-Gateway-Tokens", fmt.Sprintf("%d", usage.TotalTokens))
 	SetAuditResponse(ctx, fullText.String(), usage.PromptTokens, usage.CompletionTokens)
@@ -912,37 +1034,60 @@ func (u *GatewayUpstream) handleDirectCCPA(
 	return json.NewEncoder(w).Encode(outResp)
 }
 
-func buildCCPACandidates(resolved ResolvedModel) []string {
-	return buildCCPACandidatesWithCache(resolved, false, false)
-}
-
 func buildCCPACandidatesWithCache(resolved ResolvedModel, useFastCache bool, noThinking bool) []string {
 	var raw []string
-	if useFastCache {
-		if !noThinking && resolved.CanonicalID != "" {
-			if cached, ok := workingCCPAModelCache.Load(resolved.CanonicalID); ok {
-				if s, ok := cached.(string); ok && s != "" {
-					raw = append(raw, s)
-				}
+	if useFastCache && !noThinking && resolved.CanonicalID != "" {
+		if cached, ok := workingCCPAModelCache.Load(resolved.CanonicalID); ok {
+			if s, ok := cached.(string); ok && s != "" {
+				raw = append(raw, s)
 			}
 		}
-		// Put known live CCPA identifiers before unmapped OmniRoute aliases to avoid cold-start 404s
-		isFastOrLow := noThinking ||
-			resolved.ThinkingLevel == ThinkingLevelLow ||
-			strings.Contains(resolved.CanonicalID, "lite") ||
-			strings.Contains(resolved.RequestedID, "fast")
-		switch {
-		case isFastOrLow && !strings.HasPrefix(resolved.CCPAModelID, "claude-"):
-			raw = append(raw, "gemini-3-flash", "gemini-3.8-flash-tiered")
-		case resolved.IsArgonFamily || strings.HasPrefix(resolved.CCPAModelID, "gemini-4-argon") || strings.HasPrefix(resolved.CCPAModelID, "gemini-3.8-flash"):
-			raw = append(raw, "gemini-3.8-flash-tiered", "gemini-3-flash")
-		}
 	}
-	if resolved.CCPAModelID != "" {
-		raw = append(raw, resolved.CCPAModelID)
-	}
+
 	switch {
-	case resolved.IsArgonFamily || resolved.CCPAModelID == "gemini-4-argon":
+	case resolved.IsCarbonFamily || strings.HasPrefix(resolved.CCPAModelID, "gemini-4-carbon"):
+		switch resolved.ThinkingLevel {
+		case ThinkingLevelMedium:
+			raw = append(raw,
+				"gemini-4-carbon-medium",
+				"gemini-4-carbon",
+				"gemini-4-argon",
+				"gemini-3.8-flash-tiered",
+				"gemini-3-flash",
+			)
+		case ThinkingLevelLow:
+			raw = append(raw,
+				"gemini-4-carbon-low",
+				"gemini-4-carbon",
+				"gemini-4-argon",
+				"gemini-3.8-flash-tiered",
+				"gemini-3-flash",
+			)
+		default:
+			raw = append(raw,
+				"gemini-4-carbon-high",
+				"gemini-4-carbon",
+				"gemini-4-argon-high",
+				"gemini-4-argon",
+				"gemini-3.8-flash-tiered",
+				"claude-opus-4-6-thinking",
+				"claude-sonnet-4-6",
+				"gemini-3-flash",
+			)
+		}
+
+	case resolved.IsArgonFamily || strings.HasPrefix(resolved.CCPAModelID, "gemini-4-argon"):
+		if resolved.CCPAModelID != "" {
+			raw = append(raw, resolved.CCPAModelID)
+		}
+		switch resolved.ThinkingLevel {
+		case ThinkingLevelHigh:
+			raw = append(raw, "gemini-4-argon-high")
+		case ThinkingLevelMedium:
+			raw = append(raw, "gemini-4-argon-medium")
+		case ThinkingLevelLow:
+			raw = append(raw, "gemini-4-argon-low")
+		}
 		raw = append(raw,
 			"gemini-4-argon",
 			"gemini-3.8-flash-tiered",
@@ -950,7 +1095,11 @@ func buildCCPACandidatesWithCache(resolved ResolvedModel, useFastCache bool, noT
 			"claude-opus-4-6-thinking",
 			"gemini-3-flash",
 		)
+
 	case strings.HasPrefix(resolved.CCPAModelID, "gemini-3.1-pro") || strings.Contains(resolved.CanonicalID, "gemini-3.1-pro"):
+		if resolved.CCPAModelID != "" {
+			raw = append(raw, resolved.CCPAModelID)
+		}
 		raw = append(raw,
 			"gemini-3.1-pro-preview",
 			"gemini-3.1-pro",
@@ -958,26 +1107,54 @@ func buildCCPACandidatesWithCache(resolved ResolvedModel, useFastCache bool, noT
 			"claude-sonnet-4-6",
 			"gemini-3-flash",
 		)
+
 	case strings.HasPrefix(resolved.CCPAModelID, "gemini-3.8-flash"):
+		if useFastCache {
+			raw = append(raw, "gemini-3.8-flash-tiered")
+		}
+		if resolved.CCPAModelID != "" {
+			raw = append(raw, resolved.CCPAModelID)
+		}
 		raw = append(raw,
 			"gemini-3.8-flash-tiered",
 			"claude-sonnet-4-6",
 			"gemini-3-flash",
 			"gemini-3.5-flash-lite",
 		)
+
+	case strings.Contains(resolved.CanonicalID, "lite") || resolved.CCPAModelID == "gemini-3-flash":
+		if resolved.CCPAModelID != "" {
+			raw = append(raw, resolved.CCPAModelID)
+		}
+		raw = append(raw,
+			"gemini-3-flash",
+			"gemini-3.8-flash-tiered",
+		)
+
 	case strings.HasPrefix(resolved.CCPAModelID, "claude-opus"):
+		if resolved.CCPAModelID != "" {
+			raw = append(raw, resolved.CCPAModelID)
+		}
 		raw = append(raw,
 			"claude-opus-4-6-thinking",
 			"claude-sonnet-4-6",
 			"gemini-3.8-flash-tiered",
 		)
+
 	case strings.HasPrefix(resolved.CCPAModelID, "claude-sonnet"):
+		if resolved.CCPAModelID != "" {
+			raw = append(raw, resolved.CCPAModelID)
+		}
 		raw = append(raw,
 			"claude-sonnet-4-6",
 			"claude-opus-4-6-thinking",
 			"gemini-3.8-flash-tiered",
 		)
+
 	default:
+		if resolved.CCPAModelID != "" {
+			raw = append(raw, resolved.CCPAModelID)
+		}
 		raw = append(raw,
 			"claude-sonnet-4-6",
 			"gemini-3.8-flash-tiered",
@@ -999,12 +1176,12 @@ func buildCCPACandidatesWithCache(resolved ResolvedModel, useFastCache bool, noT
 		return deduped
 	}
 
-	// Filter out candidates that recently returned HTTP 404 on live CCPA (TTL: 30 minutes)
+	// Filter out candidates that recently returned HTTP 404 on live CCPA (TTL: 10 minutes)
 	now := time.Now()
 	alive := make([]string, 0, len(deduped))
 	for _, m := range deduped {
 		if deadVal, isDead := deadCCPAModelCache.Load(m); isDead {
-			if deadAt, ok := deadVal.(time.Time); ok && now.Sub(deadAt) < 30*time.Minute {
+			if deadAt, ok := deadVal.(time.Time); ok && now.Sub(deadAt) < 10*time.Minute {
 				continue
 			}
 			deadCCPAModelCache.Delete(m)
@@ -1015,11 +1192,6 @@ func buildCCPACandidatesWithCache(resolved ResolvedModel, useFastCache bool, noT
 		return alive
 	}
 	return deduped
-}
-
-func extractCCPAParts(dataStr string) (text string, thought string) {
-	t, th, _ := extractCCPAPartsAndUsage(dataStr)
-	return t, th
 }
 
 func extractCCPAPartsAndUsage(dataStr string) (text string, thought string, usage *ccpaUsageMetadata) {
@@ -1240,7 +1412,7 @@ func (u *GatewayUpstream) handleOmniRouteWithFallback(
 			}
 			lastErrBody = bodyStr
 			log.Printf("[omni-gateway] candidate %d/%d (%s) returned retryable body (%s); trying next fallback",
-				idx+1, len(candidates), candidateModel, truncateLog(bodyStr, 180))
+				idx+1, len(candidates), candidateModel, TruncateUTF8(bodyStr, 180))
 			continue
 		}
 
@@ -1519,8 +1691,5 @@ func writeOpenAIError(w http.ResponseWriter, statusCode int, message string, err
 }
 
 func truncateLog(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen] + "..."
+	return TruncateUTF8(s, maxLen)
 }

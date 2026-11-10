@@ -162,6 +162,8 @@ func EstimateModelCostUSD(modelID string, tokens int64) float64 {
 		ratePerMillion = 0.35
 	case strings.Contains(s, "haiku-4-5"):
 		ratePerMillion = 2.2
+	case strings.Contains(s, "gemini-4-carbon"), strings.Contains(s, "carbon"):
+		ratePerMillion = 10.0 // Gemini 4 Carbon High flagship ($2.00 in / $10.00 out per 1M tokens)
 	case strings.Contains(s, "gemini-4-argon"):
 		ratePerMillion = 8.5 // Gemini 4 Argon High flagship
 	case strings.Contains(s, "gemini-3.1-pro"):
@@ -310,6 +312,7 @@ func buildInstantQuotaSummary(auth SavedGatewayAuth) *QuotaSummary {
 			detail.SessionPercent = 98
 			detail.WeeklyPercent = geminiWeekly
 			detail.SupportedModels = []string{
+				"antigravity/gemini-4-carbon-high",
 				"antigravity/gemini-4-argon-high",
 				"antigravity/gemini-3.1-pro-high",
 				"antigravity/gemini-3.8-flash-high",
@@ -319,6 +322,7 @@ func buildInstantQuotaSummary(auth SavedGatewayAuth) *QuotaSummary {
 			detail.ModelQuotas = []ModelQuotaInfo{
 				{ModelID: "group-gemini-5h", DisplayName: "Gemini Models (Giới hạn 5h)", RemainingPercent: 98, ResetTime: resetText, Status: "good"},
 				{ModelID: "group-gemini-weekly", DisplayName: "Gemini Models (Giới hạn Tuần)", RemainingPercent: geminiWeekly, ResetTime: "⏱️ Đặt lại sau 5d", Status: getQuotaStatus(geminiWeekly)},
+				{ModelID: "antigravity/gemini-4-carbon-high", DisplayName: "Gemini 4 Carbon (High)", RemainingPercent: 98, ResetTime: resetText, Status: "good"},
 				{ModelID: "gemini-4-argon-high", DisplayName: "Gemini 4 Argon (High)", RemainingPercent: 98, ResetTime: resetText, Status: "good"},
 				{ModelID: "gemini-3.1-pro-high", DisplayName: "Gemini 3.1 Pro (High / Low)", RemainingPercent: 98, ResetTime: resetText, Status: "good"},
 			}
@@ -912,7 +916,7 @@ func inspectAntigravityAccount(ctx context.Context, acc *ConnectedAccount, detai
 		}
 		req.Header.Set("Authorization", "Bearer "+acc.AccessToken)
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("User-Agent", AgyUserAgent)
+		req.Header.Set("User-Agent", GetAgyUserAgent())
 		return client.Do(req)
 	}
 
@@ -992,7 +996,7 @@ func inspectAntigravityAccount(ctx context.Context, acc *ConnectedAccount, detai
 	if errSum == nil {
 		reqSummary.Header.Set("Authorization", "Bearer "+acc.AccessToken)
 		reqSummary.Header.Set("Content-Type", "application/json")
-		reqSummary.Header.Set("User-Agent", AgyUserAgent)
+		reqSummary.Header.Set("User-Agent", GetAgyUserAgent())
 		respSummary, errSumDo := client.Do(reqSummary)
 		if errSumDo == nil && respSummary.StatusCode == http.StatusOK {
 			defer respSummary.Body.Close()
@@ -1041,7 +1045,7 @@ func inspectAntigravityAccount(ctx context.Context, acc *ConnectedAccount, detai
 	if errQuota == nil {
 		reqQuota.Header.Set("Authorization", "Bearer "+acc.AccessToken)
 		reqQuota.Header.Set("Content-Type", "application/json")
-		reqQuota.Header.Set("User-Agent", AgyUserAgent)
+		reqQuota.Header.Set("User-Agent", GetAgyUserAgent())
 		respQuota, errQuotaDo := client.Do(reqQuota)
 		if errQuotaDo == nil && respQuota.StatusCode == http.StatusOK {
 			defer respQuota.Body.Close()
@@ -1057,7 +1061,7 @@ func inspectAntigravityAccount(ctx context.Context, acc *ConnectedAccount, detai
 					rst := formatResetDuration(b.ResetTime, defaultResetText)
 
 					switch b.ModelID {
-					case "gemini-3.8-flash-tiered", "gemini-2.5-flash":
+					case "gemini-4-carbon", "gemini-4-carbon-high", "gemini-4-argon", "gemini-3.8-flash-tiered", "gemini-2.5-flash":
 						geminiPercent = pct
 						geminiReset = rst
 					case "claude-opus-4-6-thinking":
@@ -1101,6 +1105,8 @@ func inspectAntigravityAccount(ctx context.Context, acc *ConnectedAccount, detai
 	detail.WeeklyPercent = geminiWeeklyPercent
 
 	detail.SupportedModels = []string{
+		"antigravity/gemini-4-carbon-high",
+		"antigravity/gemini-4-carbon-medium",
 		"antigravity/gemini-4-argon-high",
 		"antigravity/gemini-4-argon-medium",
 		"antigravity/gemini-3.8-flash-high",
@@ -1141,6 +1147,13 @@ func inspectAntigravityAccount(ctx context.Context, acc *ConnectedAccount, detai
 			RemainingPercent: claudeWeeklyPercent,
 			ResetTime:        claudeWeeklyReset,
 			Status:           getQuotaStatus(claudeWeeklyPercent),
+		},
+		{
+			ModelID:          "antigravity/gemini-4-carbon-high",
+			DisplayName:      "Gemini 4 Carbon (High)",
+			RemainingPercent: geminiPercent,
+			ResetTime:        geminiReset,
+			Status:           getQuotaStatus(geminiPercent),
 		},
 		{
 			ModelID:          "gemini-4-argon-high",

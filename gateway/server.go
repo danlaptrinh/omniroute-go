@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -35,10 +36,55 @@ func NewServer(cfg GatewayConfig, resolver ModelResolver, upstream UpstreamHandl
 	return s
 }
 
+// IsManagementAuthRequired returns true when either an admin password or at least one API key is configured.
+func IsManagementAuthRequired() bool {
+	return IsAdminConfigured() || len(ListAPIKeys()) > 0
+}
+
+func isAdminAuthorized(r *http.Request) bool {
+	if !IsManagementAuthRequired() {
+		return true
+	}
+	if r == nil {
+		return false
+	}
+	if IsAdminConfigured() {
+		if authed, _ := IsAdminRequestAuthenticated(r); authed {
+			return true
+		}
+	}
+	if tok := GetTokenFromRequest(r); tok != "" && ValidateSession(tok) {
+		return true
+	}
+	authHeader := r.Header.Get("Authorization")
+	if strings.TrimSpace(authHeader) == "" {
+		authHeader = r.Header.Get("X-API-Key")
+	}
+	if strings.TrimSpace(authHeader) == "" {
+		authHeader = r.Header.Get("X-Admin-Token")
+	}
+	valid, matched := ValidateAPIKey(authHeader)
+	if valid && matched != nil && matched.AdminAccess {
+		return true
+	}
+	return false
+}
+
+func (s *Server) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !isAdminAuthorized(r) {
+			writeOpenAIError(w, http.StatusUnauthorized, "admin authentication required", "unauthorized")
+			return
+		}
+		next(w, r)
+	}
+}
+
 // Handler returns the root http.Handler with CORS and GZIP middleware applied.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleRootOrHealth)
+	mux.HandleFunc("/health", s.handleRootOrHealth)
 	mux.HandleFunc("/healthz", s.handleRootOrHealth)
 	mux.HandleFunc("/v1/health", s.handleRootOrHealth)
 	mux.HandleFunc("/ui", s.handleUI)
@@ -46,44 +92,50 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/dashboard/", s.handleUI)
 	mux.HandleFunc("/dashboard/endpoint", s.handleUI)
 	mux.HandleFunc("/callback", s.handleOAuthCallback)
-	mux.HandleFunc("/v1/endpoint", s.handleEndpointAPI)
-	mux.HandleFunc("/v1/endpoint/tunnel", s.handleEndpointTunnel)
+	mux.HandleFunc("/oauth/callback", s.handleOAuthCallback)
+	mux.HandleFunc("/v1/endpoint", s.requireAdmin(s.handleEndpointAPI))
+	mux.HandleFunc("/v1/endpoint/tunnel", s.requireAdmin(s.handleEndpointTunnel))
 	mux.HandleFunc("/v1/a2a", s.handleA2ADiscovery)
 	mux.HandleFunc("/.well-known/agent.json", s.handleA2ADiscovery)
 	mux.HandleFunc("/v1/mcp/info", s.handleMCPInfo)
-	mux.HandleFunc("/v1/oauth/url", s.handleOAuthURL)
-	mux.HandleFunc("/v1/oauth/exchange", s.handleOAuthExchange)
-	mux.HandleFunc("/v1/oauth/claude/url", s.handleClaudeOAuthURL)
-	mux.HandleFunc("/v1/oauth/claude/exchange", s.handleClaudeOAuthExchange)
-	mux.HandleFunc("/v1/oauth/account", s.handleOAuthAccountDelete)
-	mux.HandleFunc("/v1/providers/alibaba", s.handleAlibabaProviderSave)
-	mux.HandleFunc("/v1/providers/strategy", s.handleRoutingStrategy)
-	mux.HandleFunc("/v1/providers", s.handleProvidersList)
-	mux.HandleFunc("/v1/auth/config", s.handleAuthConfig)
+	mux.HandleFunc("/v1/oauth/url", s.requireAdmin(s.handleOAuthURL))
+	mux.HandleFunc("/v1/oauth/exchange", s.requireAdmin(s.handleOAuthExchange))
+	mux.HandleFunc("/v1/oauth/claude/url", s.requireAdmin(s.handleClaudeOAuthURL))
+	mux.HandleFunc("/v1/oauth/claude/exchange", s.requireAdmin(s.handleClaudeOAuthExchange))
+	mux.HandleFunc("/v1/oauth/account", s.requireAdmin(s.handleOAuthAccountDelete))
+	mux.HandleFunc("/v1/providers/antigravity", s.requireAdmin(s.handleOAuthExchange))
+	mux.HandleFunc("/v1/providers/claude", s.requireAdmin(s.handleClaudeOAuthExchange))
+	mux.HandleFunc("/v1/providers/alibaba", s.requireAdmin(s.handleAlibabaProviderSave))
+	mux.HandleFunc("/v1/providers/import-openclaw", s.requireAdmin(s.handleProvidersList))
+	mux.HandleFunc("/v1/providers/strategy", s.requireAdmin(s.handleRoutingStrategy))
+	mux.HandleFunc("/v1/providers", s.requireAdmin(s.handleProvidersList))
+	mux.HandleFunc("/v1/auth/config", s.requireAdmin(s.handleAuthConfig))
 	mux.HandleFunc("/v1/auth/status", s.handleAuthStatus)
 	mux.HandleFunc("/v1/auth/setup", s.handleAuthSetup)
 	mux.HandleFunc("/v1/auth/login", s.handleAuthLogin)
 	mux.HandleFunc("/v1/auth/logout", s.handleAuthLogout)
 	mux.HandleFunc("/v1/auth/password", s.handleAuthPasswordChange)
-	mux.HandleFunc("/v1/compression", s.handleCompression)
+	mux.HandleFunc("/v1/compression", s.requireAdmin(s.handleCompression))
 	mux.HandleFunc("/v1/models", s.handleModels)
 	mux.HandleFunc("/models", s.handleModels)
-	mux.HandleFunc("/v1/models/diagnostics", s.handleModelDiagnostics)
-	mux.HandleFunc("/v1/models/test", s.handleModelTest)
-	mux.HandleFunc("/v1/models/toggle-visibility", s.handleModelToggleVisibility)
-	mux.HandleFunc("/v1/keys", s.handleAPIKeys)
-	mux.HandleFunc("/v1/logs", s.handleLogs)
-	mux.HandleFunc("/v1/database", s.handleDatabaseConfig)
-	mux.HandleFunc("/v1/vector", s.handleVectorDB)
-	mux.HandleFunc("/v1/quota", s.handleQuotaSummary)
-	mux.HandleFunc("/v1/quota/toggle", s.handleQuotaToggle)
-	mux.HandleFunc("/v1/quota/threshold", s.handleQuotaThreshold)
-	mux.HandleFunc("/v1/cache", s.handleCacheStats)
-	mux.HandleFunc("/v1/aliases", s.handleAliases)
-	mux.HandleFunc("/v1/hedging", s.handleHedgingConfig)
-	mux.HandleFunc("/v1/combos", s.handleCombos)
-	mux.HandleFunc("/v1/subagents", s.handleSubAgents)
-	mux.HandleFunc("/v1/subagents/swarm", s.handleSubAgents)
+	mux.HandleFunc("/v1/models/diagnostics", s.requireAdmin(s.handleModelDiagnostics))
+	mux.HandleFunc("/v1/models/test", s.requireAdmin(s.handleModelTest))
+	mux.HandleFunc("/v1/models/toggle-visibility", s.requireAdmin(s.handleModelToggleVisibility))
+	mux.HandleFunc("/v1/keys", s.requireAdmin(s.handleAPIKeys))
+	mux.HandleFunc("/v1/logs", s.requireAdmin(s.handleLogs))
+	mux.HandleFunc("/v1/database", s.requireAdmin(s.handleDatabaseConfig))
+	mux.HandleFunc("/v1/vector", s.requireAdmin(s.handleVectorDB))
+	mux.HandleFunc("/v1/quota", s.requireAdmin(s.handleQuotaSummary))
+	mux.HandleFunc("/v1/quota/refresh", s.requireAdmin(s.handleQuotaRefresh))
+	mux.HandleFunc("/v1/quota/toggle", s.requireAdmin(s.handleQuotaToggle))
+	mux.HandleFunc("/v1/quota/threshold", s.requireAdmin(s.handleQuotaThreshold))
+	mux.HandleFunc("/v1/cache", s.requireAdmin(s.handleCacheStats))
+	mux.HandleFunc("/v1/aliases", s.requireAdmin(s.handleAliases))
+	mux.HandleFunc("/v1/hedging", s.requireAdmin(s.handleHedgingConfig))
+	mux.HandleFunc("/v1/combos", s.requireAdmin(s.handleCombos))
+	mux.HandleFunc("/v1/subagents", s.requireAdmin(s.handleSubAgents))
+	mux.HandleFunc("/v1/subagents/swarm", s.requireAdmin(s.handleSubAgents))
+	mux.HandleFunc("/v1/subagents/automations", s.requireAdmin(s.handleSubAgents))
 	mux.HandleFunc("/v1/images/generations", s.handleImageGenerations)
 	mux.HandleFunc("/v1/chat/completions", s.handleChatCompletions)
 	mux.HandleFunc("/chat/completions", s.handleChatCompletions)
@@ -93,12 +145,23 @@ func (s *Server) Handler() http.Handler {
 	return withGzip(withCORS(mux))
 }
 
+func (s *Server) handleQuotaRefresh(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodPost && r.Method != http.MethodHead {
+		writeOpenAIError(w, http.StatusMethodNotAllowed, "method not allowed", "invalid_request_error")
+		return
+	}
+	summary := GetQuotaSummary(r.Context(), true)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(summary)
+}
+
 func (s *Server) handleRootOrHealth(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/" && r.URL.Query().Get("format") != "json" {
 		s.handleUI(w, r)
 		return
 	}
-	if r.URL.Path != "/" && r.URL.Path != "/healthz" && r.URL.Path != "/v1/health" {
+	if r.URL.Path != "/" && r.URL.Path != "/health" && r.URL.Path != "/healthz" && r.URL.Path != "/v1/health" {
 		writeOpenAIError(w, http.StatusNotFound, "endpoint not found: "+r.URL.Path, "invalid_request_error")
 		return
 	}
@@ -377,7 +440,7 @@ func (s *Server) handleAlibabaProviderSave(w http.ResponseWriter, r *http.Reques
 func (s *Server) handleAPIKeys(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		keys := ListAPIKeys()
+		keys := ListSanitizedAPIKeys()
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -472,6 +535,38 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func validatePostgresDSN(rawDSN string) error {
+	dsn := strings.TrimSpace(rawDSN)
+	if dsn == "" {
+		return nil
+	}
+	lower := strings.ToLower(dsn)
+	if !strings.HasPrefix(lower, "postgres://") && !strings.HasPrefix(lower, "postgresql://") {
+		return fmt.Errorf("invalid DSN: must start with postgres:// or postgresql://")
+	}
+	u, err := url.Parse(dsn)
+	if err != nil || u.Host == "" {
+		return fmt.Errorf("invalid PostgreSQL DSN URL")
+	}
+	host := strings.ToLower(strings.TrimSpace(u.Hostname()))
+	if host == "" {
+		return fmt.Errorf("missing host in PostgreSQL DSN")
+	}
+	if host == "169.254.169.254" ||
+		host == "metadata.google.internal" ||
+		strings.HasSuffix(host, ".metadata.google.internal") ||
+		host == "metadata" ||
+		host == "100.100.100.200" {
+		return fmt.Errorf("forbidden host in PostgreSQL DSN: cloud metadata endpoints are not allowed")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+			return fmt.Errorf("forbidden link-local address in PostgreSQL DSN")
+		}
+	}
+	return nil
+}
+
 func (s *Server) handleDatabaseConfig(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -483,6 +578,10 @@ func (s *Server) handleDatabaseConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := json.NewDecoder(io.LimitReader(r.Body, 16*1024)).Decode(&req); err != nil {
 			writeOpenAIError(w, http.StatusBadRequest, "invalid JSON payload: "+err.Error(), "invalid_request_error")
+			return
+		}
+		if err := validatePostgresDSN(req.DSN); err != nil {
+			writeOpenAIError(w, http.StatusBadRequest, err.Error(), "invalid_dsn")
 			return
 		}
 		err := ConfigurePostgresDSN(req.DSN)
@@ -765,25 +864,51 @@ func (s *Server) handleOAuthExchange(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func isLoopbackHostname(hostname string) bool {
+	h := strings.ToLower(strings.TrimSpace(hostname))
+	return h == "localhost" || h == "127.0.0.1" || h == "::1"
+}
+
+func parseSafeCallbackOrigin(rawOrigin string, requestHost string) (*url.URL, bool) {
+	rawOrigin = strings.TrimSpace(rawOrigin)
+	if rawOrigin == "" {
+		return nil, false
+	}
+	parsedOrigin, err := url.Parse(rawOrigin)
+	if err != nil || parsedOrigin.Host == "" || parsedOrigin.User != nil {
+		return nil, false
+	}
+	scheme := strings.ToLower(parsedOrigin.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return nil, false
+	}
+	if isLoopbackHostname(parsedOrigin.Hostname()) {
+		return parsedOrigin, true
+	}
+	if requestHost != "" && strings.EqualFold(parsedOrigin.Host, requestHost) {
+		return parsedOrigin, true
+	}
+	return nil, false
+}
+
 func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	state := strings.TrimSpace(r.URL.Query().Get("state"))
 	origin := ""
 	if strings.HasPrefix(state, "origin=") {
 		origin = strings.TrimSpace(strings.TrimPrefix(state, "origin="))
 	}
-	if origin != "" && r.URL.Query().Get("forwarded") != "1" {
-		if u, err := url.Parse(origin); err == nil && u.Host != "" && !strings.EqualFold(u.Host, r.Host) {
-			target := strings.TrimRight(origin, "/") + "/callback?" + r.URL.RawQuery + "&forwarded=1"
-			http.Redirect(w, r, target, http.StatusFound)
-			return
-		}
+
+	parsedOrigin, trustedOrigin := parseSafeCallbackOrigin(origin, r.Host)
+	if trustedOrigin && r.URL.Query().Get("forwarded") != "1" && !strings.EqualFold(parsedOrigin.Host, r.Host) {
+		baseOrigin := strings.ToLower(parsedOrigin.Scheme) + "://" + parsedOrigin.Host
+		target := baseOrigin + "/callback?" + r.URL.RawQuery + "&forwarded=1"
+		http.Redirect(w, r, target, http.StatusFound)
+		return
 	}
 
-	returnUI := "/ui?connected=1"
-	if origin != "" {
-		returnUI = strings.TrimRight(origin, "/") + "/ui?connected=1"
-	} else if strings.HasPrefix(r.Host, "127.0.0.1:20128") || strings.HasPrefix(r.Host, "localhost:20128") {
-		returnUI = "http://127.0.0.1:8787/ui?connected=1"
+	returnUI := "/ui"
+	if trustedOrigin && r.Host != "" && strings.EqualFold(parsedOrigin.Host, r.Host) {
+		returnUI = strings.ToLower(parsedOrigin.Scheme) + "://" + parsedOrigin.Host + "/ui"
 	}
 
 	fullURL := fmt.Sprintf("http://%s%s", r.Host, r.URL.RequestURI())
@@ -791,12 +916,13 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 		fullURL = AgyOAuthDefaultRedirectURI + "?" + r.URL.RawQuery
 	}
 
+	escapedReturnUI := html.EscapeString(returnUI)
 	acc, err := ExchangeOAuthInput(r.Context(), fullURL, AgyOAuthDefaultRedirectURI)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = fmt.Fprintf(w, `<!DOCTYPE html><html><body style="background:#0b0f19;color:#f87171;font-family:sans-serif;padding:40px;text-align:center;">
-<h2>Kết nối OAuth thất bại</h2><p>%s</p><p><a href="%s" style="color:#60a5fa;">Quay lại AI Gateway UI</a></p></body></html>`, html.EscapeString(err.Error()), html.EscapeString(returnUI))
+<h2>Kết nối OAuth thất bại</h2><p>%s</p><p><a href="%s" style="color:#60a5fa;">Quay lại AI Gateway UI</a></p></body></html>`, html.EscapeString(err.Error()), escapedReturnUI)
 		return
 	}
 
@@ -811,7 +937,7 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 <h2>Đã kết nối thành công tài khoản Antigravity!</h2>
 <p style="color:#e2e8f0;">Email: <strong>%s</strong> | Project ID: <code>%s</code></p>
 <p><a href="%s" style="color:#60a5fa;">Đang chuyển hướng về AI Gateway Dashboard...</a></p>
-</body></html>`, html.EscapeString(returnUI), html.EscapeString(acc.Email), html.EscapeString(acc.ProjectID), html.EscapeString(returnUI))
+</body></html>`, escapedReturnUI, html.EscapeString(acc.Email), html.EscapeString(acc.ProjectID), escapedReturnUI)
 }
 
 func (s *Server) handleOAuthAccountDelete(w http.ResponseWriter, r *http.Request) {
@@ -1175,9 +1301,12 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 
 func withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS, HEAD")
-		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Accept, X-API-Key, x-api-key, anthropic-version, anthropic-beta, OpenAI-Organization, OpenAI-Project")
+		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Accept, X-API-Key, x-api-key, X-Admin-Token, anthropic-version, anthropic-beta, OpenAI-Organization, OpenAI-Project")
 		w.Header().Set("Access-Control-Expose-Headers", "X-Omni-Gateway-Provider, X-Omni-Gateway-Resolved-Model, X-Omni-Gateway-Requested-Model, X-Omni-Gateway-Route, X-Omni-Gateway-Thinking-Level, X-Omni-Gateway-Account, X-Omni-Gateway-Tokens")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)

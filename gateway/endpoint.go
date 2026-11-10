@@ -23,9 +23,6 @@ var (
 	cfTunnelCmd      *exec.Cmd
 	cfTunnelCancel   context.CancelFunc
 	cfLiveURL        string
-	ngrokTunnelCmd   *exec.Cmd
-	ngrokCancel      context.CancelFunc
-	ngrokLiveURL     string
 	tryCloudflareRgx = regexp.MustCompile(`https://[a-zA-Z0-9-]+\.trycloudflare\.com`)
 )
 
@@ -75,11 +72,22 @@ func GetEndpointConfig() EndpointConfig {
 	return res
 }
 
+// EndpointConfigPatch defines partial fields for updating EndpointConfig safely without clobbering masked secrets.
+type EndpointConfigPatch struct {
+	PublicURL            *string `json:"public_url"`
+	CustomSystemPromptOn *bool   `json:"custom_system_prompt_on"`
+	CustomSystemPrompt   *string `json:"custom_system_prompt"`
+	NgrokAuthToken       *string `json:"ngrok_auth_token"`
+}
+
 // SaveEndpointConfig persists updated EndpointConfig to gateway_config.json.
 func SaveEndpointConfig(newCfg EndpointConfig) error {
 	configMu.Lock()
 	defer configMu.Unlock()
 	cfg := loadSavedAuthConfigLocked()
+	if strings.Contains(strings.TrimSpace(newCfg.NgrokAuthToken), "****") && cfg.EndpointConfig != nil {
+		newCfg.NgrokAuthToken = cfg.EndpointConfig.NgrokAuthToken
+	}
 	if strings.TrimSpace(newCfg.PublicURL) == "" {
 		newCfg.PublicURL = "https://omni.bucloud.vip/v1"
 	} else {
@@ -92,6 +100,30 @@ func SaveEndpointConfig(newCfg EndpointConfig) error {
 	cfg.EndpointConfig = &newCfg
 	cfg.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 	return saveAuthConfigLocked(cfg)
+}
+
+// UpdateEndpointConfig applies partial updates to EndpointConfig while ignoring masked NgrokAuthToken values.
+func UpdateEndpointConfig(patch EndpointConfigPatch) (EndpointConfig, error) {
+	epCfg := GetEndpointConfig()
+	if patch.PublicURL != nil {
+		epCfg.PublicURL = strings.TrimSpace(*patch.PublicURL)
+	}
+	if patch.CustomSystemPromptOn != nil {
+		epCfg.CustomSystemPromptOn = *patch.CustomSystemPromptOn
+	}
+	if patch.CustomSystemPrompt != nil {
+		epCfg.CustomSystemPrompt = *patch.CustomSystemPrompt
+	}
+	if patch.NgrokAuthToken != nil {
+		trimmedTok := strings.TrimSpace(*patch.NgrokAuthToken)
+		if !strings.Contains(trimmedTok, "****") {
+			epCfg.NgrokAuthToken = trimmedTok
+		}
+	}
+	if err := SaveEndpointConfig(epCfg); err != nil {
+		return EndpointConfig{}, err
+	}
+	return GetEndpointConfig(), nil
 }
 
 // ApplyCustomSystemPrompt injects the global Custom System Prompt into an OpenAIChatRequest
@@ -221,7 +253,7 @@ func startCloudflareQuickTunnel(port string) (string, error) {
 	}
 }
 
-func stopCloudflareQuickTunnel() {
+func stopCloudflareTunnel() {
 	tunnelMu.Lock()
 	defer tunnelMu.Unlock()
 	if cfTunnelCancel != nil {
@@ -235,20 +267,30 @@ func stopCloudflareQuickTunnel() {
 	cfLiveURL = ""
 }
 
+func stopCloudflareQuickTunnel() {
+	stopCloudflareTunnel()
+}
+
+// StopAllTunnels safely terminates any active Cloudflare Quick Tunnel processes.
+func StopAllTunnels() {
+	stopCloudflareTunnel()
+}
+
+// GetEndpointStatus returns the sanitized EndpointStatusResponse (with NgrokAuthToken masked).
+func GetEndpointStatus(listenAddr string) EndpointStatusResponse {
+	return buildEndpointStatus(listenAddr)
+}
+
 func buildEndpointStatus(listenAddr string) EndpointStatusResponse {
 	cfg := GetEndpointConfig()
 	hostID, lanURL, localURL, port := detectLocalServerInfo(listenAddr)
 
 	tunnelMu.Lock()
 	liveCF := cfLiveURL
-	liveNgrok := ngrokLiveURL
 	tunnelMu.Unlock()
 
 	if liveCF != "" {
 		cfg.CloudflareTunnelURL = liveCF
-	}
-	if liveNgrok != "" {
-		cfg.NgrokURL = liveNgrok
 	}
 
 	cfInstalled := isBinaryInstalled("cloudflared")
@@ -342,6 +384,8 @@ func buildEndpointStatus(listenAddr string) EndpointStatusResponse {
 	}
 
 	basePub := strings.TrimSuffix(activePub, "/v1")
+	cfgCopy := cfg
+	cfgCopy.NgrokAuthToken = MaskSecretToken(cfgCopy.NgrokAuthToken)
 
 	return EndpointStatusResponse{
 		ActivePublicURL:    activePub,
@@ -352,7 +396,7 @@ func buildEndpointStatus(listenAddr string) EndpointStatusResponse {
 		ServerRunning:      true,
 		ActiveTunnelsCount: activeCount,
 		TotalTunnelsCount:  len(tunnels),
-		Config:             cfg,
+		Config:             cfgCopy,
 		Tunnels:            tunnels,
 		MCPEndpointURL:     basePub + "/v1/mcp/info",
 		A2AEndpointURL:     basePub + "/v1/a2a",
@@ -363,40 +407,22 @@ func buildEndpointStatus(listenAddr string) EndpointStatusResponse {
 func (s *Server) handleEndpointAPI(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet, http.MethodHead:
-		status := buildEndpointStatus(s.cfg.ListenAddr)
+		status := GetEndpointStatus(s.cfg.ListenAddr)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(status)
 
 	case http.MethodPost:
-		var req struct {
-			PublicURL            *string `json:"public_url"`
-			CustomSystemPromptOn *bool   `json:"custom_system_prompt_on"`
-			CustomSystemPrompt   *string `json:"custom_system_prompt"`
-			NgrokAuthToken       *string `json:"ngrok_auth_token"`
-		}
-		if err := json.NewDecoder(io.LimitReader(r.Body, 64*1024)).Decode(&req); err != nil {
+		var patch EndpointConfigPatch
+		if err := json.NewDecoder(io.LimitReader(r.Body, 64*1024)).Decode(&patch); err != nil {
 			writeOpenAIError(w, http.StatusBadRequest, "invalid JSON: "+err.Error(), "invalid_request_error")
 			return
 		}
-		cfg := GetEndpointConfig()
-		if req.PublicURL != nil {
-			cfg.PublicURL = strings.TrimSpace(*req.PublicURL)
-		}
-		if req.CustomSystemPromptOn != nil {
-			cfg.CustomSystemPromptOn = *req.CustomSystemPromptOn
-		}
-		if req.CustomSystemPrompt != nil {
-			cfg.CustomSystemPrompt = *req.CustomSystemPrompt
-		}
-		if req.NgrokAuthToken != nil {
-			cfg.NgrokAuthToken = strings.TrimSpace(*req.NgrokAuthToken)
-		}
-		if err := SaveEndpointConfig(cfg); err != nil {
+		if _, err := UpdateEndpointConfig(patch); err != nil {
 			writeOpenAIError(w, http.StatusInternalServerError, err.Error(), "save_error")
 			return
 		}
-		status := buildEndpointStatus(s.cfg.ListenAddr)
+		status := GetEndpointStatus(s.cfg.ListenAddr)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(status)
@@ -460,8 +486,8 @@ func (s *Server) handleEndpointTunnel(w http.ResponseWriter, r *http.Request) {
 			cfg.TailscaleURL = fmt.Sprintf("https://%s.ts.net/v1", strings.ToLower(hostname))
 		}
 	case "ngrok":
-		if strings.TrimSpace(req.NgrokAuthToken) != "" {
-			cfg.NgrokAuthToken = strings.TrimSpace(req.NgrokAuthToken)
+		if tok := strings.TrimSpace(req.NgrokAuthToken); tok != "" && !strings.Contains(tok, "****") {
+			cfg.NgrokAuthToken = tok
 		}
 		if req.Enable && strings.TrimSpace(cfg.NgrokAuthToken) == "" {
 			writeOpenAIError(w, http.StatusBadRequest, "Vui lòng nhập Ngrok Authtoken trước khi bật đường hầm ngrok", "ngrok_auth_required")

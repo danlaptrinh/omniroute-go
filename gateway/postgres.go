@@ -2,13 +2,17 @@ package gateway
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "github.com/lib/pq"
@@ -16,7 +20,11 @@ import (
 
 type auditCtxKeyType string
 
-const auditContextKey auditCtxKeyType = "omni_audit_ctx"
+const (
+	auditContextKey       auditCtxKeyType = "omni_audit_ctx"
+	MaxPostgresPromptLogs int             = 50000
+	pgPruneEveryInserts   uint64          = 500
+)
 
 // AuditContext carries employee API key metadata, prompt text, and AI response text across request execution.
 type AuditContext struct {
@@ -65,7 +73,7 @@ func SetAuditResponse(ctx context.Context, responseText string, promptTokens int
 	ac.mu.Lock()
 	defer ac.mu.Unlock()
 	if responseText != "" {
-		ac.ResponseText = truncateAuditText(responseText, 12000)
+		ac.ResponseText = TruncateUTF8(responseText, 16000)
 	}
 	if promptTokens > 0 {
 		ac.PromptTokens = promptTokens
@@ -118,7 +126,7 @@ func extractPromptTextFromMessages(messages []OpenAIChatMessage) string {
 		return ""
 	}
 	var sb strings.Builder
-	// Keep the last 6 messages or up to 8000 characters so the admin sees full context + the exact user prompt
+	// Keep the last 6 messages or up to 8000 runes so the admin sees full context + the exact user prompt
 	startIdx := 0
 	if len(messages) > 6 {
 		startIdx = len(messages) - 6
@@ -138,35 +146,61 @@ func extractPromptTextFromMessages(messages []OpenAIChatMessage) string {
 		}
 		sb.WriteString(fmt.Sprintf("[%s]: %s", role, txt))
 	}
-	return truncateAuditText(sb.String(), 8000)
+	return TruncateUTF8(sb.String(), 8000)
 }
 
 func truncateAuditText(s string, maxChars int) string {
-	s = strings.TrimSpace(s)
-	if len(s) <= maxChars {
-		return s
+	return TruncateUTF8(s, maxChars)
+}
+
+func computeKeySHA256Hex(rawKey string) string {
+	rawKey = strings.TrimSpace(rawKey)
+	if rawKey == "" {
+		return ""
 	}
-	return s[:maxChars] + "... [truncated]"
+	sum := sha256.Sum256([]byte(rawKey))
+	return hex.EncodeToString(sum[:])
+}
+
+func effectiveMaxPostgresLogs() int {
+	if raw := strings.TrimSpace(os.Getenv("OMNI_PG_MAX_LOGS")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			return parsed
+		}
+	}
+	return MaxPostgresPromptLogs
+}
+
+// escapeILIKE escapes PostgreSQL ILIKE/LIKE wildcard characters (\, %, _) for use with ESCAPE '\'.
+func escapeILIKE(s string) string {
+	return strings.NewReplacer(
+		`\`, `\\`,
+		`%`, `\%`,
+		`_`, `\_`,
+	).Replace(s)
 }
 
 // EmployeeUsageSummary aggregates request, token, and prompt metrics per employee API key.
 type EmployeeUsageSummary struct {
-	APIKeyID       string `json:"api_key_id"`
-	EmployeeName   string `json:"employee_name"`
-	MaskedKey      string `json:"masked_key"`
-	TotalRequests  int64  `json:"total_requests"`
-	TotalTokens    int64  `json:"total_tokens"`
-	ErrorCount     int64  `json:"error_count"`
-	LastModel      string `json:"last_model"`
-	LastPrompt     string `json:"last_prompt"`
-	LastUsedAt     string `json:"last_used_at"`
+	APIKeyID      string `json:"api_key_id"`
+	EmployeeName  string `json:"employee_name"`
+	MaskedKey     string `json:"masked_key"`
+	TotalRequests int64  `json:"total_requests"`
+	TotalTokens   int64  `json:"total_tokens"`
+	ErrorCount    int64  `json:"error_count"`
+	LastModel     string `json:"last_model"`
+	LastPrompt    string `json:"last_prompt"`
+	LastUsedAt    string `json:"last_used_at"`
 }
 
 var (
-	pgMu        sync.RWMutex
-	pgDB        *sql.DB
-	pgActiveDSN string
-	pgLastErr   string
+	pgMu            sync.RWMutex
+	pgDB            *sql.DB
+	pgConnected     bool
+	pgActiveDSN     string
+	pgServerVersion string
+	pgLastErr       string
+	pgInsertCounter atomic.Uint64
 )
 
 // ResolveEffectivePostgresDSN returns the active PostgreSQL connection string from env or saved config.
@@ -198,19 +232,15 @@ func MaskPostgresDSN(dsn string) string {
 }
 
 // InitPostgresDB connects to PostgreSQL, runs auto-migrations for omni_api_keys and omni_prompt_logs,
-// and synchronizes API keys between local config and PostgreSQL.
+// and synchronizes API keys and Vector DB memories between local config and PostgreSQL.
 func InitPostgresDB(dsn string) error {
 	dsn = strings.TrimSpace(dsn)
 	if dsn == "" {
 		dsn = ResolveEffectivePostgresDSN()
 	}
 	if dsn == "" {
+		_ = ClosePostgres()
 		pgMu.Lock()
-		if pgDB != nil {
-			_ = pgDB.Close()
-			pgDB = nil
-		}
-		pgActiveDSN = ""
 		pgLastErr = ""
 		pgMu.Unlock()
 		return nil
@@ -219,6 +249,9 @@ func InitPostgresDB(dsn string) error {
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		pgMu.Lock()
+		if pgDB == nil {
+			pgConnected = false
+		}
 		pgLastErr = err.Error()
 		pgMu.Unlock()
 		return err
@@ -228,23 +261,35 @@ func InitPostgresDB(dsn string) error {
 	db.SetMaxIdleConns(4)
 	db.SetConnMaxLifetime(30 * time.Minute)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
 		pgMu.Lock()
+		if pgDB == nil {
+			pgConnected = false
+		}
 		pgLastErr = err.Error()
 		pgMu.Unlock()
 		return err
 	}
 
-	if err := migratePostgresTables(ctx, db); err != nil {
+	if err := migrateSchema(ctx, db); err != nil {
 		_ = db.Close()
 		pgMu.Lock()
+		if pgDB == nil {
+			pgConnected = false
+		}
 		pgLastErr = err.Error()
 		pgMu.Unlock()
 		return err
+	}
+
+	var serverVer string
+	_ = db.QueryRowContext(ctx, `SELECT current_setting('server_version')`).Scan(&serverVer)
+	if idx := strings.IndexByte(serverVer, ' '); idx > 0 {
+		serverVer = serverVer[:idx]
 	}
 
 	pgMu.Lock()
@@ -252,25 +297,72 @@ func InitPostgresDB(dsn string) error {
 		_ = pgDB.Close()
 	}
 	pgDB = db
+	pgConnected = true
 	pgActiveDSN = dsn
+	pgServerVersion = strings.TrimSpace(serverVer)
 	pgLastErr = ""
 	pgMu.Unlock()
 
-	log.Printf("[omniroute-postgres] Connected to PostgreSQL (%s) and verified schema", MaskPostgresDSN(dsn))
+	log.Printf("[omniroute-postgres] Connected to PostgreSQL %s (%s) and verified schema", pgServerVersion, MaskPostgresDSN(dsn))
 
 	// Bidirectional sync of API keys and Vector DB memories on startup
 	syncAPIKeysBidirectional(db)
-	migratePostgresVectorTables(ctx, db)
+	InitVectorDBSchema(db)
+	return nil
+}
+
+// ClosePostgres gracefully closes the active PostgreSQL connection pool and resets connection flags.
+func ClosePostgres() error {
+	pgMu.Lock()
+	db := pgDB
+	pgDB = nil
+	pgConnected = false
+	pgActiveDSN = ""
+	pgServerVersion = ""
+	var closeErr error
+	if db != nil {
+		closeErr = db.Close()
+	}
+	pgMu.Unlock()
+
+	resetPgVectorState()
+	return closeErr
+}
+
+// ClearPromptLogsFromPostgres truncates all persisted prompt logs in PostgreSQL when connected.
+func ClearPromptLogsFromPostgres() error {
+	pgMu.RLock()
+	connected := pgConnected
+	db := pgDB
+	pgMu.RUnlock()
+
+	if !connected || db == nil {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if _, err := db.ExecContext(ctx, `TRUNCATE TABLE omni_prompt_logs`); err != nil {
+		if _, delErr := db.ExecContext(ctx, `DELETE FROM omni_prompt_logs`); delErr != nil {
+			return err
+		}
+	}
 	return nil
 }
 
 func migratePostgresTables(ctx context.Context, db *sql.DB) error {
+	return migrateSchema(ctx, db)
+}
+
+func migrateSchema(ctx context.Context, db *sql.DB) error {
 	queries := []string{
 		`CREATE TABLE IF NOT EXISTS omni_api_keys (
 			id TEXT PRIMARY KEY,
 			name TEXT NOT NULL DEFAULT '',
 			full_key TEXT NOT NULL DEFAULT '',
 			masked_key TEXT NOT NULL DEFAULT '',
+			key_hash TEXT NOT NULL DEFAULT '',
 			admin_access BOOLEAN NOT NULL DEFAULT FALSE,
 			allow_self_usage BOOLEAN NOT NULL DEFAULT TRUE,
 			allow_shared_quota BOOLEAN NOT NULL DEFAULT TRUE,
@@ -280,6 +372,8 @@ func migratePostgresTables(ctx context.Context, db *sql.DB) error {
 			created_at TEXT NOT NULL DEFAULT '',
 			last_used_at TEXT NOT NULL DEFAULT ''
 		);`,
+		`ALTER TABLE omni_api_keys ADD COLUMN IF NOT EXISTS key_hash TEXT NOT NULL DEFAULT '';`,
+		`CREATE INDEX IF NOT EXISTS idx_omni_api_keys_hash ON omni_api_keys(key_hash);`,
 		`CREATE TABLE IF NOT EXISTS omni_prompt_logs (
 			id TEXT PRIMARY KEY,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -300,11 +394,16 @@ func migratePostgresTables(ctx context.Context, db *sql.DB) error {
 			latency_ms BIGINT NOT NULL DEFAULT 0,
 			status_code INT NOT NULL DEFAULT 200,
 			is_error BOOLEAN NOT NULL DEFAULT FALSE,
-			error_message TEXT NOT NULL DEFAULT ''
+			error_message TEXT NOT NULL DEFAULT '',
+			error_detail TEXT NOT NULL DEFAULT ''
 		);`,
+		`ALTER TABLE omni_prompt_logs ADD COLUMN IF NOT EXISTS error_detail TEXT NOT NULL DEFAULT '';`,
 		`CREATE INDEX IF NOT EXISTS idx_omni_prompt_logs_created_at ON omni_prompt_logs(created_at DESC);`,
 		`CREATE INDEX IF NOT EXISTS idx_omni_prompt_logs_api_key_id ON omni_prompt_logs(api_key_id);`,
 		`CREATE INDEX IF NOT EXISTS idx_omni_prompt_logs_employee ON omni_prompt_logs(employee_name);`,
+		`CREATE INDEX IF NOT EXISTS idx_omni_logs_key_created ON omni_prompt_logs(api_key_id, created_at DESC);`,
+		`CREATE INDEX IF NOT EXISTS idx_omni_logs_err_created ON omni_prompt_logs(is_error, created_at DESC);`,
+		`CREATE INDEX IF NOT EXISTS idx_omni_logs_prov_created ON omni_prompt_logs(provider, created_at DESC);`,
 	}
 
 	for _, q := range queries {
@@ -319,40 +418,57 @@ func syncAPIKeysBidirectional(db *sql.DB) {
 	if db == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 
 	cfg := LoadSavedAuthConfig()
+	changedLocal := false
 	localByID := make(map[string]GatewayAPIKey, len(cfg.APIKeys))
-	for _, k := range cfg.APIKeys {
-		localByID[k.ID] = k
+	for i := range cfg.APIKeys {
+		if cfg.APIKeys[i].Key != "" {
+			computed := computeKeySHA256Hex(cfg.APIKeys[i].Key)
+			if cfg.APIKeys[i].KeyHash != computed {
+				cfg.APIKeys[i].KeyHash = computed
+				changedLocal = true
+			}
+		}
+		localByID[cfg.APIKeys[i].ID] = cfg.APIKeys[i]
 	}
 
 	rows, err := db.QueryContext(ctx, `
-		SELECT id, name, full_key, masked_key, admin_access, allow_self_usage, allow_shared_quota, allow_local_usage_cmd, total_requests, total_tokens, created_at, last_used_at
+		SELECT id, name, full_key, masked_key, key_hash, admin_access, allow_self_usage, allow_shared_quota, allow_local_usage_cmd, total_requests, total_tokens, created_at, last_used_at
 		FROM omni_api_keys ORDER BY created_at ASC
 	`)
 	if err == nil {
 		defer rows.Close()
-		changedLocal := false
 		for rows.Next() {
 			var k GatewayAPIKey
 			if scanErr := rows.Scan(
-				&k.ID, &k.Name, &k.Key, &k.MaskedKey,
+				&k.ID, &k.Name, &k.Key, &k.MaskedKey, &k.KeyHash,
 				&k.AdminAccess, &k.AllowSelfUsage, &k.AllowSharedQuota, &k.AllowLocalUsageCmd,
 				&k.TotalRequests, &k.TotalTokens, &k.CreatedAt, &k.LastUsedAt,
 			); scanErr == nil {
+				if k.Key != "" && k.KeyHash == "" {
+					k.KeyHash = computeKeySHA256Hex(k.Key)
+				}
 				if existing, ok := localByID[k.ID]; !ok {
 					cfg.APIKeys = append(cfg.APIKeys, k)
 					localByID[k.ID] = k
 					changedLocal = true
-				} else if k.TotalRequests > existing.TotalRequests || k.TotalTokens > existing.TotalTokens {
+				} else if k.TotalRequests > existing.TotalRequests || k.TotalTokens > existing.TotalTokens || (existing.KeyHash == "" && k.KeyHash != "") {
 					for i := range cfg.APIKeys {
 						if cfg.APIKeys[i].ID == k.ID {
-							cfg.APIKeys[i].TotalRequests = k.TotalRequests
-							cfg.APIKeys[i].TotalTokens = k.TotalTokens
+							if k.TotalRequests > cfg.APIKeys[i].TotalRequests {
+								cfg.APIKeys[i].TotalRequests = k.TotalRequests
+							}
+							if k.TotalTokens > cfg.APIKeys[i].TotalTokens {
+								cfg.APIKeys[i].TotalTokens = k.TotalTokens
+							}
 							if k.LastUsedAt != "" {
 								cfg.APIKeys[i].LastUsedAt = k.LastUsedAt
+							}
+							if cfg.APIKeys[i].KeyHash == "" && k.KeyHash != "" {
+								cfg.APIKeys[i].KeyHash = k.KeyHash
 							}
 						}
 					}
@@ -360,29 +476,53 @@ func syncAPIKeysBidirectional(db *sql.DB) {
 				}
 			}
 		}
-		if changedLocal {
-			configMu.Lock()
-			_ = saveAuthConfigLocked(cfg)
-			configMu.Unlock()
-		}
 	}
 
-	// Ensure all local keys are upserted into PostgreSQL
+	if changedLocal {
+		configMu.Lock()
+		_ = saveAuthConfigLocked(cfg)
+		configMu.Unlock()
+	}
+
+	// Ensure all local keys (including populated key_hash) are upserted into PostgreSQL
 	for _, k := range cfg.APIKeys {
 		upsertAPIKeyToPostgres(ctx, db, k)
 	}
+}
+
+// UpsertAPIKeyToPostgres upserts a single GatewayAPIKey (with SHA-256 key_hash) into PostgreSQL when connected.
+func UpsertAPIKeyToPostgres(k GatewayAPIKey) {
+	pgMu.RLock()
+	connected := pgConnected
+	db := pgDB
+	pgMu.RUnlock()
+	if !connected || db == nil {
+		return
+	}
+	go func(item GatewayAPIKey) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		upsertAPIKeyToPostgres(ctx, db, item)
+	}(k)
 }
 
 func upsertAPIKeyToPostgres(ctx context.Context, db *sql.DB, k GatewayAPIKey) {
 	if db == nil {
 		return
 	}
+	keyHash := strings.TrimSpace(k.KeyHash)
+	if k.Key != "" {
+		keyHash = computeKeySHA256Hex(k.Key)
+	}
 	_, _ = db.ExecContext(ctx, `
 		INSERT INTO omni_api_keys (
-			id, name, full_key, masked_key, admin_access, allow_self_usage, allow_shared_quota, allow_local_usage_cmd, total_requests, total_tokens, created_at, last_used_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+			id, name, full_key, masked_key, key_hash, admin_access, allow_self_usage, allow_shared_quota, allow_local_usage_cmd, total_requests, total_tokens, created_at, last_used_at
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
 		ON CONFLICT (id) DO UPDATE SET
 			name = EXCLUDED.name,
+			full_key = CASE WHEN EXCLUDED.full_key <> '' THEN EXCLUDED.full_key ELSE omni_api_keys.full_key END,
+			masked_key = CASE WHEN EXCLUDED.masked_key <> '' THEN EXCLUDED.masked_key ELSE omni_api_keys.masked_key END,
+			key_hash = CASE WHEN EXCLUDED.key_hash <> '' THEN EXCLUDED.key_hash ELSE omni_api_keys.key_hash END,
 			admin_access = EXCLUDED.admin_access,
 			allow_self_usage = EXCLUDED.allow_self_usage,
 			allow_shared_quota = EXCLUDED.allow_shared_quota,
@@ -390,22 +530,37 @@ func upsertAPIKeyToPostgres(ctx context.Context, db *sql.DB, k GatewayAPIKey) {
 			total_requests = GREATEST(omni_api_keys.total_requests, EXCLUDED.total_requests),
 			total_tokens = GREATEST(omni_api_keys.total_tokens, EXCLUDED.total_tokens),
 			last_used_at = CASE WHEN EXCLUDED.last_used_at <> '' THEN EXCLUDED.last_used_at ELSE omni_api_keys.last_used_at END
-	`, k.ID, k.Name, k.Key, k.MaskedKey, k.AdminAccess, k.AllowSelfUsage, k.AllowSharedQuota, k.AllowLocalUsageCmd, k.TotalRequests, k.TotalTokens, k.CreatedAt, k.LastUsedAt)
+	`,
+		k.ID,
+		TruncateUTF8(k.Name, 256),
+		k.Key,
+		k.MaskedKey,
+		keyHash,
+		k.AdminAccess,
+		k.AllowSelfUsage,
+		k.AllowSharedQuota,
+		k.AllowLocalUsageCmd,
+		k.TotalRequests,
+		k.TotalTokens,
+		k.CreatedAt,
+		k.LastUsedAt,
+	)
 }
 
 // SyncAPIKeysToPostgresAsync synchronizes the current API keys list to PostgreSQL in the background.
 func SyncAPIKeysToPostgresAsync() {
 	pgMu.RLock()
+	connected := pgConnected
 	db := pgDB
 	pgMu.RUnlock()
-	if db == nil {
+	if !connected || db == nil {
 		return
 	}
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		keys := ListAPIKeys()
-		for _, k := range keys {
+		cfg := LoadSavedAuthConfig()
+		for _, k := range cfg.APIKeys {
 			upsertAPIKeyToPostgres(ctx, db, k)
 		}
 	}()
@@ -414,9 +569,10 @@ func SyncAPIKeysToPostgresAsync() {
 // DeleteAPIKeyFromPostgresAsync removes an API key from PostgreSQL in the background.
 func DeleteAPIKeyFromPostgresAsync(id string) {
 	pgMu.RLock()
+	connected := pgConnected
 	db := pgDB
 	pgMu.RUnlock()
-	if db == nil || id == "" {
+	if !connected || db == nil || id == "" {
 		return
 	}
 	go func() {
@@ -426,33 +582,59 @@ func DeleteAPIKeyFromPostgresAsync(id string) {
 	}()
 }
 
-// InsertPromptLogAsync saves a GatewayLogEntry (including employee identity, prompt, and response) to PostgreSQL.
+// InsertPromptLogAsync saves a GatewayLogEntry to PostgreSQL and performs periodic retention pruning.
 func InsertPromptLogAsync(entry GatewayLogEntry) {
 	pgMu.RLock()
+	connected := pgConnected
 	db := pgDB
 	pgMu.RUnlock()
-	if db == nil {
+	if !connected || db == nil {
 		return
 	}
 	go func(e GatewayLogEntry) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+
+		e.EmployeeName = TruncateUTF8(e.EmployeeName, 256)
+		e.Account = TruncateUTF8(e.Account, 256)
+		e.RequestedModel = TruncateUTF8(e.RequestedModel, 256)
+		e.ResolvedModel = TruncateUTF8(e.ResolvedModel, 256)
+		e.PromptText = TruncateUTF8(e.PromptText, 16000)
+		e.ResponseText = TruncateUTF8(e.ResponseText, 16000)
+		e.ErrorMessage = TruncateUTF8(e.ErrorMessage, 4000)
+		e.ErrorDetail = TruncateUTF8(e.ErrorDetail, 4000)
+
 		_, err := db.ExecContext(ctx, `
 			INSERT INTO omni_prompt_logs (
 				id, timestamp_str, api_key_id, employee_name, masked_key,
 				provider, account, requested_model, resolved_model,
 				prompt_text, response_text, prompt_tokens, completion_tokens, total_tokens, tokens_saved,
-				latency_ms, status_code, is_error, error_message
-			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+				latency_ms, status_code, is_error, error_message, error_detail
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
 			ON CONFLICT (id) DO NOTHING
 		`,
 			e.ID, e.Timestamp, e.APIKeyID, e.EmployeeName, e.MaskedKey,
 			string(e.Provider), e.Account, e.RequestedModel, e.ResolvedModel,
 			e.PromptText, e.ResponseText, e.PromptTokens, e.CompletionTokens, e.TotalTokens, e.TokensSaved,
-			e.LatencyMs, e.StatusCode, e.IsError, e.ErrorMessage,
+			e.LatencyMs, e.StatusCode, e.IsError, e.ErrorMessage, e.ErrorDetail,
 		)
 		if err != nil {
 			log.Printf("[omniroute-postgres] insert prompt log warning: %v", err)
+			return
+		}
+
+		// Auto-retention pruning every 500 inserts to prevent unbounded disk growth on VPS
+		if pgInsertCounter.Add(1)%pgPruneEveryInserts == 0 {
+			pruneCtx, pruneCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			_, pruneErr := db.ExecContext(
+				pruneCtx,
+				`DELETE FROM omni_prompt_logs WHERE id IN (SELECT id FROM omni_prompt_logs ORDER BY created_at DESC OFFSET $1)`,
+				effectiveMaxPostgresLogs(),
+			)
+			pruneCancel()
+			if pruneErr != nil {
+				log.Printf("[omniroute-postgres] auto-retention prune warning: %v", pruneErr)
+			}
 		}
 	}(entry)
 }
@@ -467,10 +649,11 @@ func QueryPromptLogs(limit int, providerFilter string, errorsOnly bool, apiKeyFi
 	providerFilter = strings.TrimSpace(providerFilter)
 
 	pgMu.RLock()
+	connected := pgConnected
 	db := pgDB
 	pgMu.RUnlock()
 
-	if db != nil {
+	if connected && db != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
@@ -492,8 +675,12 @@ func QueryPromptLogs(limit int, providerFilter string, errorsOnly bool, apiKeyFi
 			argIdx++
 		}
 		if searchQuery != "" {
-			where = append(where, fmt.Sprintf("(prompt_text ILIKE $%d OR response_text ILIKE $%d OR employee_name ILIKE $%d OR requested_model ILIKE $%d)", argIdx, argIdx, argIdx, argIdx))
-			args = append(args, "%"+searchQuery+"%")
+			escapedPattern := "%" + escapeILIKE(searchQuery) + "%"
+			where = append(where, fmt.Sprintf(
+				"(prompt_text ILIKE $%d ESCAPE '\\' OR response_text ILIKE $%d ESCAPE '\\' OR employee_name ILIKE $%d ESCAPE '\\' OR requested_model ILIKE $%d ESCAPE '\\')",
+				argIdx, argIdx, argIdx, argIdx,
+			))
+			args = append(args, escapedPattern)
 			argIdx++
 		}
 
@@ -501,18 +688,19 @@ func QueryPromptLogs(limit int, providerFilter string, errorsOnly bool, apiKeyFi
 			SELECT id, timestamp_str, api_key_id, employee_name, masked_key,
 			       provider, account, requested_model, resolved_model,
 			       prompt_text, response_text, prompt_tokens, completion_tokens, total_tokens, tokens_saved,
-			       latency_ms, status_code, is_error, error_message
+			       latency_ms, status_code, is_error, error_message, error_detail
 			FROM omni_prompt_logs
 		`
 		if len(where) > 0 {
 			query += " WHERE " + strings.Join(where, " AND ")
 		}
-		query += fmt.Sprintf(" ORDER BY created_at DESC LIMIT %d", limit)
+		query += fmt.Sprintf(" ORDER BY created_at DESC LIMIT $%d", argIdx)
+		args = append(args, limit)
 
 		rows, err := db.QueryContext(ctx, query, args...)
 		if err == nil {
 			defer rows.Close()
-			var out []GatewayLogEntry
+			out := make([]GatewayLogEntry, 0)
 			for rows.Next() {
 				var e GatewayLogEntry
 				var prov string
@@ -520,13 +708,14 @@ func QueryPromptLogs(limit int, providerFilter string, errorsOnly bool, apiKeyFi
 					&e.ID, &e.Timestamp, &e.APIKeyID, &e.EmployeeName, &e.MaskedKey,
 					&prov, &e.Account, &e.RequestedModel, &e.ResolvedModel,
 					&e.PromptText, &e.ResponseText, &e.PromptTokens, &e.CompletionTokens, &e.TotalTokens, &e.TokensSaved,
-					&e.LatencyMs, &e.StatusCode, &e.IsError, &e.ErrorMessage,
+					&e.LatencyMs, &e.StatusCode, &e.IsError, &e.ErrorMessage, &e.ErrorDetail,
 				); err == nil {
 					e.Provider = ProviderID(prov)
 					out = append(out, e)
 				}
 			}
-			if len(out) > 0 || apiKeyFilter != "" || searchQuery != "" {
+			hasFilter := apiKeyFilter != "" || searchQuery != "" || errorsOnly || (providerFilter != "" && !strings.EqualFold(providerFilter, "all"))
+			if len(out) > 0 || hasFilter {
 				return out
 			}
 		}
@@ -534,7 +723,7 @@ func QueryPromptLogs(limit int, providerFilter string, errorsOnly bool, apiKeyFi
 
 	// Fallback to in-memory logger with filtering
 	memLogs := GlobalLogger.GetRecentLogs(limit*2, providerFilter, errorsOnly)
-	var filtered []GatewayLogEntry
+	filtered := make([]GatewayLogEntry, 0)
 	qLower := strings.ToLower(searchQuery)
 	for _, item := range memLogs {
 		if apiKeyFilter != "" && !strings.EqualFold(apiKeyFilter, "all") {
@@ -556,10 +745,11 @@ func QueryPromptLogs(limit int, providerFilter string, errorsOnly bool, apiKeyFi
 	return filtered
 }
 
-// GetEmployeeUsageStats returns per-employee API key usage and prompt summary.
+// GetEmployeeUsageStats returns per-employee API key usage and prompt summary using SQL aggregation
+// when PostgreSQL is connected, falling back seamlessly to in-memory GlobalLogger when disconnected.
 func GetEmployeeUsageStats() []EmployeeUsageSummary {
 	keys := ListAPIKeys()
-	byKeyID := make(map[string]*EmployeeUsageSummary, len(keys))
+	byKeyID := make(map[string]*EmployeeUsageSummary, len(keys)+2)
 	var order []string
 
 	for _, k := range keys {
@@ -575,38 +765,169 @@ func GetEmployeeUsageStats() []EmployeeUsageSummary {
 		order = append(order, k.ID)
 	}
 
-	logs := QueryPromptLogs(250, "", false, "", "")
-	for _, l := range logs {
-		id := l.APIKeyID
-		if id == "" {
-			id = "admin_local"
-		}
-		s, exists := byKeyID[id]
-		if !exists {
-			name := l.EmployeeName
-			if name == "" {
-				name = "Admin / Local"
+	pgMu.RLock()
+	connected := pgConnected
+	db := pgDB
+	pgMu.RUnlock()
+
+	usedSQL := false
+	if connected && db != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		rows, err := db.QueryContext(ctx, `
+			WITH agg AS (
+				SELECT
+					COALESCE(NULLIF(api_key_id, ''), 'admin_local') AS eff_key_id,
+					COUNT(*) AS log_requests,
+					COALESCE(SUM(total_tokens), 0) AS log_tokens,
+					COUNT(*) FILTER (WHERE is_error = TRUE) AS error_count
+				FROM omni_prompt_logs
+				GROUP BY COALESCE(NULLIF(api_key_id, ''), 'admin_local')
+			),
+			latest AS (
+				SELECT DISTINCT ON (COALESCE(NULLIF(api_key_id, ''), 'admin_local'))
+					COALESCE(NULLIF(api_key_id, ''), 'admin_local') AS eff_key_id,
+					employee_name,
+					masked_key,
+					CASE WHEN resolved_model <> '' THEN resolved_model ELSE requested_model END AS last_model,
+					LEFT(prompt_text, 300) AS last_prompt,
+					timestamp_str AS last_used_at
+				FROM omni_prompt_logs
+				ORDER BY COALESCE(NULLIF(api_key_id, ''), 'admin_local'), created_at DESC
+			)
+			SELECT
+				agg.eff_key_id,
+				COALESCE(latest.employee_name, ''),
+				COALESCE(latest.masked_key, ''),
+				agg.log_requests,
+				agg.log_tokens,
+				agg.error_count,
+				COALESCE(latest.last_model, ''),
+				COALESCE(latest.last_prompt, ''),
+				COALESCE(latest.last_used_at, '')
+			FROM agg
+			LEFT JOIN latest ON latest.eff_key_id = agg.eff_key_id
+			ORDER BY agg.log_requests DESC
+		`)
+		if err == nil {
+			defer rows.Close()
+			usedSQL = true
+			for rows.Next() {
+				var (
+					effKeyID   string
+					empName    string
+					maskedKey  string
+					logReqs    int64
+					logToks    int64
+					errCount   int64
+					lastModel  string
+					lastPrompt string
+					lastUsedAt string
+				)
+				if scanErr := rows.Scan(
+					&effKeyID, &empName, &maskedKey,
+					&logReqs, &logToks, &errCount,
+					&lastModel, &lastPrompt, &lastUsedAt,
+				); scanErr != nil {
+					continue
+				}
+
+				s, exists := byKeyID[effKeyID]
+				if !exists {
+					if empName == "" {
+						empName = "Admin / Local"
+					}
+					s = &EmployeeUsageSummary{
+						APIKeyID:      effKeyID,
+						EmployeeName:  empName,
+						MaskedKey:     maskedKey,
+						TotalRequests: logReqs,
+						TotalTokens:   logToks,
+						ErrorCount:    errCount,
+						LastModel:     lastModel,
+						LastPrompt:    TruncateUTF8(lastPrompt, 180),
+						LastUsedAt:    lastUsedAt,
+					}
+					byKeyID[effKeyID] = s
+					order = append(order, effKeyID)
+				} else {
+					if logReqs > s.TotalRequests {
+						s.TotalRequests = logReqs
+					}
+					if logToks > s.TotalTokens {
+						s.TotalTokens = logToks
+					}
+					s.ErrorCount = errCount
+					if lastModel != "" {
+						s.LastModel = lastModel
+					}
+					if lastPrompt != "" {
+						s.LastPrompt = TruncateUTF8(lastPrompt, 180)
+					}
+					if s.LastUsedAt == "" && lastUsedAt != "" {
+						s.LastUsedAt = lastUsedAt
+					}
+				}
 			}
-			s = &EmployeeUsageSummary{
-				APIKeyID:     id,
-				EmployeeName: name,
-				MaskedKey:    l.MaskedKey,
-				LastUsedAt:   l.Timestamp,
+		}
+	}
+
+	if !usedSQL {
+		memLogs := GlobalLogger.GetRecentLogs(0, "", false)
+		memReqs := make(map[string]int64, len(keys)+2)
+		memToks := make(map[string]int64, len(keys)+2)
+
+		for _, l := range memLogs {
+			id := l.APIKeyID
+			if id == "" {
+				id = "admin_local"
 			}
-			byKeyID[id] = s
-			order = append(order, id)
+			memReqs[id]++
+			memToks[id] += int64(l.TotalTokens)
+
+			s, exists := byKeyID[id]
+			if !exists {
+				name := l.EmployeeName
+				if name == "" {
+					name = "Admin / Local"
+				}
+				s = &EmployeeUsageSummary{
+					APIKeyID:     id,
+					EmployeeName: name,
+					MaskedKey:    l.MaskedKey,
+					LastUsedAt:   l.Timestamp,
+				}
+				byKeyID[id] = s
+				order = append(order, id)
+			}
+			if l.IsError {
+				s.ErrorCount++
+			}
+			if s.LastModel == "" {
+				if l.ResolvedModel != "" {
+					s.LastModel = l.ResolvedModel
+				} else if l.RequestedModel != "" {
+					s.LastModel = l.RequestedModel
+				}
+			}
+			if s.LastPrompt == "" && l.PromptText != "" {
+				s.LastPrompt = TruncateUTF8(l.PromptText, 180)
+			}
+			if s.LastUsedAt == "" && l.Timestamp != "" {
+				s.LastUsedAt = l.Timestamp
+			}
 		}
-		if l.IsError {
-			s.ErrorCount++
-		}
-		if s.LastModel == "" && l.ResolvedModel != "" {
-			s.LastModel = l.ResolvedModel
-		}
-		if s.LastPrompt == "" && l.PromptText != "" {
-			s.LastPrompt = truncateAuditText(l.PromptText, 180)
-		}
-		if s.LastUsedAt == "" && l.Timestamp != "" {
-			s.LastUsedAt = l.Timestamp
+
+		for id, count := range memReqs {
+			if s, ok := byKeyID[id]; ok {
+				if count > s.TotalRequests {
+					s.TotalRequests = count
+				}
+				if memToks[id] > s.TotalTokens {
+					s.TotalTokens = memToks[id]
+				}
+			}
 		}
 	}
 
@@ -639,6 +960,7 @@ func GetPostgresStatus() map[string]any {
 	pgMu.RLock()
 	db := pgDB
 	dsn := pgActiveDSN
+	serverVer := pgServerVersion
 	lastErr := pgLastErr
 	pgMu.RUnlock()
 
@@ -662,6 +984,15 @@ func GetPostgresStatus() map[string]any {
 		}
 	}
 
+	pgMu.Lock()
+	if pgDB == db && db != nil {
+		pgConnected = connected
+		if !connected && lastErr != "" {
+			pgLastErr = lastErr
+		}
+	}
+	pgMu.Unlock()
+
 	mode := "local_json"
 	if connected {
 		mode = "postgresql"
@@ -670,10 +1001,12 @@ func GetPostgresStatus() map[string]any {
 	return map[string]any{
 		"connected":         connected,
 		"mode":              mode,
+		"server_version":    serverVer,
 		"dsn_masked":        MaskPostgresDSN(dsn),
 		"has_dsn":           dsn != "",
 		"total_prompt_logs": totalLogs,
 		"total_keys_in_db":  totalKeys,
+		"max_prompt_logs":   effectiveMaxPostgresLogs(),
 		"last_error":        lastErr,
 	}
 }

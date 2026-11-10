@@ -1,12 +1,16 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"omni-parallel-mcp/gateway"
@@ -26,7 +30,7 @@ func main() {
 		ccpaURL      = flag.String("ccpa-url", envOrDefault("AGY_CCPA_ENDPOINT", gateway.DefaultCCPAEndpoint), "Direct Antigravity Cloud Code Private API endpoint")
 		agyToken     = flag.String("agy-token", envOrDefault("AGY_OAUTH_TOKEN", saved.AgyOAuthToken), "Google AI Ultra OAuth token (ya29....) for direct daily-cloudcode-pa access")
 		agyProject   = flag.String("agy-project", envOrDefault("AGY_PROJECT_ID", saved.AgyProjectID), "Optional Antigravity Cloud Code project ID")
-		fallbacks    = flag.String("fallbacks", envOrDefault("GATEWAY_FALLBACK_MODELS", "gemini-4-argon,gemini-3.1-pro,claude-opus-4-6-thinking"), "Comma-separated fallback models")
+		fallbacks    = flag.String("fallbacks", envOrDefault("GATEWAY_FALLBACK_MODELS", "antigravity/gemini-4-carbon-high,antigravity/gemini-4-argon-high,claude-code/claude-opus-4-6-thinking,alibaba/qwen3-coder-plus"), "Comma-separated fallback models")
 	)
 	flag.Parse()
 
@@ -49,18 +53,19 @@ func main() {
 
 	resolver := gateway.NewResolver()
 	upstream := gateway.NewUpstream(cfg)
-	srv := gateway.NewServer(cfg, resolver, upstream)
-	handler := srv.Handler()
+	gatewaySrv := gateway.NewServer(cfg, resolver, upstream)
+	handler := gatewaySrv.Handler()
 
 	// Start automatic OAuth callback listener on 127.0.0.1:20128 in the background
+	var cbServer *http.Server
 	if *callbackAddr != "" && *callbackAddr != cfg.ListenAddr {
+		cbServer = &http.Server{
+			Addr:              *callbackAddr,
+			Handler:           handler,
+			ReadHeaderTimeout: 15 * time.Second,
+		}
 		go func() {
-			cbServer := &http.Server{
-				Addr:              *callbackAddr,
-				Handler:           handler,
-				ReadHeaderTimeout: 15 * time.Second,
-			}
-			if err := cbServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			if err := cbServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Printf("[omni-gateway] OAuth callback listener on %s note: %v (paste URL manually in /ui if port is busy)", *callbackAddr, err)
 			}
 		}()
@@ -92,20 +97,49 @@ func main() {
 		fmt.Printf("  Database Backend      : Local JSON + RAM (Set DATABASE_URL for PostgreSQL)\n")
 	}
 	fmt.Printf("  Connected Accounts    : %d\n", len(saved.Accounts))
-	fmt.Printf("  Supported Providers   : 1. Google Antigravity (Gen 3, Gen 4 & Claude)\n")
+	fmt.Printf("  Supported Providers   : 1. Google Antigravity (Gemini 4 Carbon (High), Gemini 4 Argon, Gen 3 & Claude)\n")
 	fmt.Printf("                          2. Anthropic Claude Code (OAuth PKCE / API Key)\n")
 	fmt.Printf("                          3. Alibaba Token Plan (Bailian Coding Plan)\n")
 	fmt.Printf("======================================================================\n")
 
-	httpServer := &http.Server{
+	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
 		Handler:           handler,
 		ReadHeaderTimeout: 15 * time.Second,
 	}
 
-	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	serverErrCh := make(chan error, 1)
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serverErrCh <- err
+		}
+	}()
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+
+	select {
+	case err := <-serverErrCh:
 		log.Fatalf("[omni-gateway] server exited with error: %v", err)
+	case sig := <-sigCh:
+		log.Printf("[omni-gateway] received signal %v, shutting down gracefully...", sig)
 	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	if cbServer != nil {
+		_ = cbServer.Shutdown(shutdownCtx)
+	}
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("[omni-gateway] HTTP server shutdown error: %v", err)
+	}
+
+	gateway.StopAllTunnels()
+	gateway.FlushPendingConfigSave()
+	_ = gateway.ClosePostgres()
+	log.Printf("[omni-gateway] graceful shutdown complete.")
 }
 
 func envOrDefault(key, def string) string {
