@@ -22,7 +22,7 @@ type auditCtxKeyType string
 
 const (
 	auditContextKey       auditCtxKeyType = "omni_audit_ctx"
-	MaxPostgresPromptLogs int             = 50000
+	MaxPostgresPromptLogs int             = 250000
 	pgPruneEveryInserts   uint64          = 500
 )
 

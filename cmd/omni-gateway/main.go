@@ -23,14 +23,14 @@ func main() {
 	}
 
 	var (
-		listenAddr   = flag.String("listen", envOrDefault("GATEWAY_LISTEN_ADDR", "127.0.0.1:8787"), "Local HTTP listen address for the Standalone AI Gateway")
+		listenAddr   = flag.String("listen", envFirstNonEmpty([]string{"GATEWAY_LISTEN_ADDR", "OMNI_GATEWAY_ADDR"}, "127.0.0.1:8787"), "Local HTTP listen address for the Standalone AI Gateway")
 		callbackAddr = flag.String("oauth-callback-addr", envOrDefault("GATEWAY_OAUTH_CALLBACK_ADDR", "127.0.0.1:20128"), "Local OAuth callback listener address matching redirect_uri http://127.0.0.1:20128/callback")
 		omniURL      = flag.String("omni-url", envOrDefault("OMNIROUTE_BASE_URL", ""), "Optional external OpenAI upstream URL (disabled by default)")
 		omniKey      = flag.String("omni-key", envOrDefault("OMNIROUTE_API_KEY", ""), "Optional external OpenAI upstream API key (disabled by default)")
 		ccpaURL      = flag.String("ccpa-url", envOrDefault("AGY_CCPA_ENDPOINT", gateway.DefaultCCPAEndpoint), "Direct Antigravity Cloud Code Private API endpoint")
 		agyToken     = flag.String("agy-token", envOrDefault("AGY_OAUTH_TOKEN", saved.AgyOAuthToken), "Google AI Ultra OAuth token (ya29....) for direct daily-cloudcode-pa access")
 		agyProject   = flag.String("agy-project", envOrDefault("AGY_PROJECT_ID", saved.AgyProjectID), "Optional Antigravity Cloud Code project ID")
-		fallbacks    = flag.String("fallbacks", envOrDefault("GATEWAY_FALLBACK_MODELS", "antigravity/gemini-4-carbon-high,antigravity/gemini-4-argon-high,claude-code/claude-opus-4-6-thinking,alibaba/qwen3-coder-plus"), "Comma-separated fallback models")
+		fallbacks    = flag.String("fallbacks", envFirstNonEmpty([]string{"GATEWAY_FALLBACK_MODELS", "OMNI_FALLBACK_MODELS"}, "antigravity/gemini-4-carbon-high,antigravity/gemini-4-argon-high,claude-code/claude-opus-4-6-thinking,alibaba/qwen3-coder-plus"), "Comma-separated fallback models")
 	)
 	flag.Parse()
 
@@ -145,6 +145,15 @@ func main() {
 func envOrDefault(key, def string) string {
 	if val := strings.TrimSpace(os.Getenv(key)); val != "" {
 		return val
+	}
+	return def
+}
+
+func envFirstNonEmpty(keys []string, def string) string {
+	for _, k := range keys {
+		if val := strings.TrimSpace(os.Getenv(k)); val != "" {
+			return val
+		}
 	}
 	return def
 }

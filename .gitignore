@@ -7,7 +7,10 @@ omni-gateway
 omni-parallel-mcp
 
 # Local runtime state & secrets
+data/
+backups/
 gateway_config.json
+omni_vector_memories.json
 *.bak
 .env
 .env.*
