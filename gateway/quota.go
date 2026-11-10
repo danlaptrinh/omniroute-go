@@ -606,98 +606,87 @@ func inspectClaudeCodeAccount(ctx context.Context, acc *ConnectedAccount, detail
 	}
 
 	// Orca Live Claude OAuth Usage Fetch (GET https://api.anthropic.com/api/oauth/usage)
-	if ctx != nil && strings.TrimSpace(acc.AccessToken) != "" && ClaudeOAuthUsageEndpoint != "" {
-		reqCtx, cancel := context.WithTimeout(ctx, 3500*time.Millisecond)
-		req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, ClaudeOAuthUsageEndpoint, nil)
-		if err == nil {
-			req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(acc.AccessToken))
-			req.Header.Set("anthropic-beta", "oauth-2025-04-20")
-			req.Header.Set("User-Agent", "claude-code/2.1.0")
-			req.Header.Set("Accept", "application/json")
-
-			client := &http.Client{
-				Transport: SharedHTTPTransport,
-				Timeout:   3500 * time.Millisecond,
-			}
-			if resp, doErr := client.Do(req); doErr == nil {
-				if resp.StatusCode == http.StatusOK {
-					var usageResp claudeOAuthUsageResponse
-					if decErr := json.NewDecoder(resp.Body).Decode(&usageResp); decErr == nil {
-						if rem, rst, ok := extractClaudeWindowRemaining(usageResp.FiveHour, sessionPct, sessionReset); ok {
-							sessionPct = rem
-							sessionReset = rst
+	if resp, doErr := FetchClaudeUsageWithRefresh(ctx, acc); doErr == nil && resp != nil {
+		if resp.StatusCode == http.StatusOK {
+			var usageResp claudeOAuthUsageResponse
+			if decErr := json.NewDecoder(resp.Body).Decode(&usageResp); decErr == nil {
+				if rem, rst, ok := extractClaudeWindowRemaining(usageResp.FiveHour, sessionPct, sessionReset); ok {
+					sessionPct = rem
+					sessionReset = rst
+				}
+				if rem, rst, ok := extractClaudeWindowRemaining(usageResp.SevenDay, weeklyPct, weeklyReset); ok {
+					weeklyPct = rem
+					weeklyReset = rst
+					fableWeeklyPct = rem
+					fableReset = rst
+				}
+				// Check Fable / Mythos weekly scoped window (Orca mapFableWeeklyWindow)
+				fableFound := false
+				for _, lim := range usageResp.Limits {
+					if lim.Kind == "weekly_scoped" && lim.Scope != nil && lim.Scope.Model != nil &&
+						strings.EqualFold(strings.TrimSpace(lim.Scope.Model.DisplayName), "fable") {
+						u := lim.Percent
+						if u > 0 && u <= 1.0 {
+							u *= 100.0
 						}
-						if rem, rst, ok := extractClaudeWindowRemaining(usageResp.SevenDay, weeklyPct, weeklyReset); ok {
-							weeklyPct = rem
-							weeklyReset = rst
+						rem := int(math.Round(100.0 - u))
+						if rem < 0 {
+							rem = 0
+						} else if rem > 100 {
+							rem = 100
+						}
+						fableWeeklyPct = rem
+						fableReset = parseClaudeResetAny(lim.ResetsAt, weeklyReset)
+						fableFound = true
+						break
+					}
+				}
+				if !fableFound {
+					for _, cand := range []*claudeUsageWindowInput{usageResp.FableWeekly, usageResp.FableSevenDay, usageResp.SevenDayFable} {
+						if rem, rst, ok := extractClaudeWindowRemaining(cand, fableWeeklyPct, weeklyReset); ok {
 							fableWeeklyPct = rem
 							fableReset = rst
-						}
-						// Check Fable / Mythos weekly scoped window (Orca mapFableWeeklyWindow)
-						fableFound := false
-						for _, lim := range usageResp.Limits {
-							if lim.Kind == "weekly_scoped" && lim.Scope != nil && lim.Scope.Model != nil &&
-								strings.EqualFold(strings.TrimSpace(lim.Scope.Model.DisplayName), "fable") {
-								u := lim.Percent
-								if u > 0 && u <= 1.0 {
-									u *= 100.0
-								}
-								rem := int(math.Round(100.0 - u))
-								if rem < 0 {
-									rem = 0
-								} else if rem > 100 {
-									rem = 100
-								}
-								fableWeeklyPct = rem
-								fableReset = parseClaudeResetAny(lim.ResetsAt, weeklyReset)
-								fableFound = true
-								break
-							}
-						}
-						if !fableFound {
-							for _, cand := range []*claudeUsageWindowInput{usageResp.FableWeekly, usageResp.FableSevenDay, usageResp.SevenDayFable} {
-								if rem, rst, ok := extractClaudeWindowRemaining(cand, fableWeeklyPct, weeklyReset); ok {
-									fableWeeklyPct = rem
-									fableReset = rst
-									break
-								}
-							}
-						}
-						// Check Extra Usage / Spend limit (Orca mapClaudeExtraUsage)
-						if usageResp.Spend != nil && usageResp.Spend.Limit != nil && usageResp.Spend.Limit.AmountMinor != nil && *usageResp.Spend.Limit.AmountMinor > 0 {
-							exp := 2
-							if usageResp.Spend.Limit.Exponent != nil {
-								exp = *usageResp.Spend.Limit.Exponent
-							}
-							div := math.Pow10(exp)
-							limitUSD := *usageResp.Spend.Limit.AmountMinor / div
-							usedUSD := 0.0
-							if usageResp.Spend.Used != nil && usageResp.Spend.Used.AmountMinor != nil {
-								usedUSD = *usageResp.Spend.Used.AmountMinor / div
-							}
-							remPct := 100
-							if limitUSD > 0 {
-								remPct = int(math.Round(100.0 - (usedUSD/limitUSD)*100.0))
-								if remPct < 0 {
-									remPct = 0
-								} else if remPct > 100 {
-									remPct = 100
-								}
-							}
-							extraSpendQuota = &ModelQuotaInfo{
-								ModelID:          "claude-extra-credits",
-								DisplayName:      fmt.Sprintf("Extra Usage Credits ($%.2f / $%.2f)", usedUSD, limitUSD),
-								RemainingPercent: remPct,
-								ResetTime:        "⏱️ Hạn mức tín dụng tháng",
-								Status:           getQuotaStatus(remPct),
-							}
+							break
 						}
 					}
 				}
-				_ = resp.Body.Close()
+				// Check Extra Usage / Spend limit (Orca mapClaudeExtraUsage)
+				if usageResp.Spend != nil && usageResp.Spend.Limit != nil && usageResp.Spend.Limit.AmountMinor != nil && *usageResp.Spend.Limit.AmountMinor > 0 {
+					exp := 2
+					if usageResp.Spend.Limit.Exponent != nil {
+						exp = *usageResp.Spend.Limit.Exponent
+					}
+					div := math.Pow10(exp)
+					limitUSD := *usageResp.Spend.Limit.AmountMinor / div
+					usedUSD := 0.0
+					if usageResp.Spend.Used != nil && usageResp.Spend.Used.AmountMinor != nil {
+						usedUSD = *usageResp.Spend.Used.AmountMinor / div
+					}
+					remPct := 100
+					if limitUSD > 0 {
+						remPct = int(math.Round(100.0 - (usedUSD/limitUSD)*100.0))
+						if remPct < 0 {
+							remPct = 0
+						} else if remPct > 100 {
+							remPct = 100
+						}
+					}
+					extraSpendQuota = &ModelQuotaInfo{
+						ModelID:          "claude-extra-credits",
+						DisplayName:      fmt.Sprintf("Extra Usage Credits ($%.2f / $%.2f)", usedUSD, limitUSD),
+						RemainingPercent: remPct,
+						ResetTime:        "⏱️ Hạn mức tín dụng tháng",
+						Status:           getQuotaStatus(remPct),
+					}
+				}
+			}
+		} else if resp.StatusCode == http.StatusUnauthorized {
+			if !acc.Disabled {
+				detail.Status = "critical"
+				detail.ErrorMessage = "OAuth token hết hạn — vui lòng kết nối lại Claude Code"
 			}
 		}
-		cancel()
+		_ = resp.Body.Close()
 	}
 
 	detail.SessionPercent = sessionPct
@@ -707,7 +696,7 @@ func inspectClaudeCodeAccount(ctx context.Context, acc *ConnectedAccount, detail
 	if weeklyPct < minPct {
 		minPct = weeklyPct
 	}
-	if !acc.Disabled {
+	if !acc.Disabled && detail.ErrorMessage == "" {
 		if minPct <= 20 {
 			detail.Status = "critical"
 		} else if minPct <= 50 {

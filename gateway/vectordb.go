@@ -205,6 +205,7 @@ func ensureVectorMemoriesLoadedLocked() {
 	if err == nil {
 		_ = json.Unmarshal(data, &list)
 	}
+	list, removedPoisoned := FilterPoisonedVectorMemories(list)
 	seenIDs := make(map[string]bool, len(list))
 	for i := range list {
 		seenIDs[list[i].ID] = true
@@ -220,6 +221,17 @@ func ensureVectorMemoriesLoadedLocked() {
 	}
 	vectorMemories = capVectorMemories(list, MaxInMemoryVectors)
 	vectorLoadedLocal = true
+	if removedPoisoned > 0 {
+		snapshot := make([]VectorMemoryEntry, len(vectorMemories))
+		copy(snapshot, vectorMemories)
+		go func(items []VectorMemoryEntry) {
+			path := vectorFallbackFilePath()
+			_ = os.MkdirAll(filepath.Dir(path), 0o755)
+			if b, mErr := json.MarshalIndent(items, "", "  "); mErr == nil {
+				_ = os.WriteFile(path, b, 0o600)
+			}
+		}(snapshot)
+	}
 }
 
 func saveVectorMemoriesLocalAsync() {
@@ -459,6 +471,7 @@ func migratePostgresVectorTables(ctx context.Context, db *sql.DB) {
 	pgVectorNativeReady = nativeReady
 	vectorMu.Unlock()
 
+	PurgePoisonedPostgresVectors(ctx, db)
 	if nativeReady {
 		backfillPgVectorEmbeddings(ctx, db)
 	}
@@ -539,6 +552,9 @@ func syncVectorMemoriesBidirectional(ctx context.Context, db *sql.DB) {
 				&m.ID, &m.CreatedAt, &m.Title, &m.Category, &m.EmployeeName, &m.APIKeyID,
 				&m.Model, &m.PromptText, &m.AnswerText, &m.Pinned, &m.HitCount, &embJSON,
 			); scanErr == nil {
+				if IsPoisonedVectorEntry(m.PromptText, m.AnswerText) || IsUnsupportedClientBanner(m.Title) {
+					continue
+				}
 				_ = json.Unmarshal([]byte(embJSON), &m.Embedding)
 				if len(m.Embedding) != VectorEmbeddingDim {
 					m.Embedding = ComputeSemanticEmbedding(m.Title + "\n" + m.PromptText + "\n" + m.AnswerText)
@@ -550,12 +566,13 @@ func syncVectorMemoriesBidirectional(ctx context.Context, db *sql.DB) {
 
 		// Add any local memories not yet in DB
 		for id, localMem := range localByID {
-			if !seen[id] {
+			if !seen[id] && !IsPoisonedVectorEntry(localMem.PromptText, localMem.AnswerText) && !IsUnsupportedClientBanner(localMem.Title) {
 				merged = append(merged, localMem)
 				upsertVectorMemoryPG(ctx, db, localMem)
 			}
 		}
 
+		merged, _ = FilterPoisonedVectorMemories(merged)
 		compacted := capVectorMemories(merged, MaxInMemoryVectors)
 		vectorMu.Lock()
 		vectorMemories = compacted
@@ -635,6 +652,9 @@ func AddVectorMemory(title, category, promptText, answerText, employeeName, apiK
 	title = TruncateUTF8(title, 200)
 	if promptText == "" && answerText == "" {
 		return VectorMemoryEntry{}, fmt.Errorf("nội dung ghi nhớ không được để trống")
+	}
+	if IsPoisonedVectorEntry(promptText, answerText) || IsUnsupportedClientBanner(title) {
+		return VectorMemoryEntry{}, fmt.Errorf("từ chối lưu nội dung lỗi hệ thống hoặc client deprecation banner vào Vector DB")
 	}
 	if title == "" {
 		source := promptText
@@ -736,6 +756,9 @@ func AutoLearnFromPromptLog(entry GatewayLogEntry) {
 	q := TruncateUTF8(extractLastUserQuestion(entry.PromptText), 4000)
 	ans := TruncateUTF8(entry.ResponseText, 6000)
 	if len(q) < 12 || len(ans) < 20 {
+		return
+	}
+	if IsPoisonedVectorEntry(q, ans) || IsPoisonedVectorEntry(entry.PromptText, entry.ResponseText) {
 		return
 	}
 	go func() {

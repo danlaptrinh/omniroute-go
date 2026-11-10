@@ -385,7 +385,7 @@ func (u *GatewayUpstream) handleClaudeCodeProvider(
 		httpReq.Header.Set("Accept", "application/json")
 		httpReq.Header.Set("anthropic-version", "2023-06-01")
 
-		if strings.HasPrefix(token, "sk-ant-oat") {
+		if strings.HasPrefix(token, "sk-ant-oat") || (strings.TrimSpace(acc.AccessToken) != "" && !strings.HasPrefix(token, "sk-ant-api")) {
 			httpReq.Header.Set("Authorization", "Bearer "+token)
 			httpReq.Header.Set("anthropic-beta", "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14")
 			httpReq.Header.Set("User-Agent", "claude-cli/1.0.0 (external, cli)")

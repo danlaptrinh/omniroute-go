@@ -210,51 +210,7 @@ func (u *GatewayUpstream) tryTarget(
 
 	switch prov {
 	case ProviderClaudeCode:
-		acc, err := SelectProviderAccount(ctx, ProviderClaudeCode)
-		if err != nil && strings.HasPrefix(cleanAuth, "sk-ant-") {
-			acc = &ConnectedAccount{Provider: ProviderClaudeCode, Email: "header-token", AccessToken: cleanAuth}
-		}
-		if acc == nil {
-			return fmt.Errorf("no Claude Code account configured")
-		}
-		AcquireAccountInFlightWithRole(acc.Email, target.CanonicalID)
-		err = u.handleClaudeCodeProvider(ctx, w, req, target, *acc)
-		ReleaseAccountInFlight(acc.Email)
-		lat := time.Now().UnixMilli() - startMs
-		if err == nil {
-			usedTokens := parseRecordedTokens(w.Header().Get("X-Omni-Gateway-Tokens"), req)
-			RecordAccountModelResult(acc.Email, ProviderClaudeCode, target.CanonicalID, true, lat, usedTokens, http.StatusOK)
-			entry := GatewayLogEntry{
-				Provider:       ProviderClaudeCode,
-				Account:        acc.Email,
-				RequestedModel: req.Model,
-				ResolvedModel:  target.CanonicalID,
-				StatusCode:     http.StatusOK,
-				LatencyMs:      lat,
-				TotalTokens:    usedTokens,
-				IsError:        false,
-				FallbackChain:  target.FallbackChain,
-			}
-			EnrichLogEntryFromContext(ctx, &entry, req)
-			RecordLogEntry(entry)
-			return nil
-		}
-		RecordAccountModelResult(acc.Email, ProviderClaudeCode, target.CanonicalID, false, lat, 0, http.StatusBadGateway)
-		errEntry := GatewayLogEntry{
-			Provider:       ProviderClaudeCode,
-			Account:        acc.Email,
-			RequestedModel: req.Model,
-			ResolvedModel:  target.CanonicalID,
-			StatusCode:     http.StatusBadGateway,
-			LatencyMs:      lat,
-			IsError:        true,
-			ErrorMessage:   err.Error(),
-			FallbackChain:  target.FallbackChain,
-		}
-		EnrichLogEntryFromContext(ctx, &errEntry, req)
-		RecordLogEntry(errEntry)
-		log.Printf("[omniroute-go] claude-code target %q failed: %v; trying next provider in chain", target.CanonicalID, err)
-		return err
+		return ExecuteClaudeWithReactiveRefresh(ctx, u, w, req, target, cleanAuth, startMs)
 
 	case ProviderAlibaba:
 		acc, err := SelectProviderAccount(ctx, ProviderAlibaba)
@@ -304,88 +260,7 @@ func (u *GatewayUpstream) tryTarget(
 		return err
 
 	case ProviderAntigravity:
-		var lastErr error
-		for attempt := 0; attempt < 2; attempt++ {
-			agyToken := strings.TrimSpace(u.cfg.AgyOAuthToken)
-			projectID := strings.TrimSpace(u.cfg.AgyProjectID)
-			accountEmail := ""
-
-			if tok, proj, email, err := GetValidAccountToken(ctx); err == nil && tok != "" {
-				agyToken = tok
-				if proj != "" {
-					projectID = proj
-				}
-				accountEmail = email
-			}
-			if strings.HasPrefix(cleanAuth, "ya29.") {
-				agyToken = cleanAuth
-			}
-
-			if agyToken == "" {
-				return fmt.Errorf("no Antigravity OAuth token configured")
-			}
-
-			if accountEmail != "" {
-				w.Header().Set("X-Omni-Gateway-Account", accountEmail)
-				AcquireAccountInFlightWithRole(accountEmail, target.CanonicalID)
-			}
-			w.Header().Set("X-Omni-Gateway-Provider", "antigravity")
-			err := u.handleDirectCCPA(ctx, w, req, target, agyToken, projectID)
-			if accountEmail != "" {
-				ReleaseAccountInFlight(accountEmail)
-			}
-			lat := time.Now().UnixMilli() - startMs
-			if err == nil {
-				usedTokens := parseRecordedTokens(w.Header().Get("X-Omni-Gateway-Tokens"), req)
-				if accountEmail != "" {
-					RecordAccountModelResult(accountEmail, ProviderAntigravity, target.CanonicalID, true, lat, usedTokens, http.StatusOK)
-				}
-				entry := GatewayLogEntry{
-					Provider:       ProviderAntigravity,
-					Account:        accountEmail,
-					RequestedModel: req.Model,
-					ResolvedModel:  target.CanonicalID,
-					StatusCode:     http.StatusOK,
-					LatencyMs:      lat,
-					TotalTokens:    usedTokens,
-					IsError:        false,
-					FallbackChain:  target.FallbackChain,
-				}
-				EnrichLogEntryFromContext(ctx, &entry, req)
-				RecordLogEntry(entry)
-				return nil
-			}
-
-			failCode := http.StatusBadGateway
-			errMsg := err.Error()
-			if strings.Contains(errMsg, "HTTP 401") || strings.Contains(errMsg, "HTTP 403") {
-				failCode = http.StatusUnauthorized
-			} else if strings.Contains(errMsg, "HTTP 429") {
-				failCode = http.StatusTooManyRequests
-			}
-			if accountEmail != "" {
-				RecordAccountModelResult(accountEmail, ProviderAntigravity, target.CanonicalID, false, lat, 0, failCode)
-			}
-			errEntry := GatewayLogEntry{
-				Provider:       ProviderAntigravity,
-				Account:        accountEmail,
-				RequestedModel: req.Model,
-				ResolvedModel:  target.CanonicalID,
-				StatusCode:     failCode,
-				LatencyMs:      lat,
-				IsError:        true,
-				ErrorMessage:   errMsg,
-				FallbackChain:  target.FallbackChain,
-			}
-			EnrichLogEntryFromContext(ctx, &errEntry, req)
-			RecordLogEntry(errEntry)
-			lastErr = err
-			log.Printf("[omniroute-go] antigravity CCPA attempt %d for %q (%s, acc=%s) failed: %v", attempt+1, target.RequestedID, target.CCPAModelID, accountEmail, err)
-			if failCode != http.StatusUnauthorized && failCode != http.StatusTooManyRequests {
-				break
-			}
-		}
-		return lastErr
+		return ExecuteAntigravityWithReactiveRefresh(ctx, u, w, req, target, cleanAuth, startMs)
 	}
 	return fmt.Errorf("unknown provider %s", prov)
 }
@@ -714,6 +589,10 @@ func (u *GatewayUpstream) handleDirectCCPA(
 		errBody, _ := io.ReadAll(io.LimitReader(r.Body, 4096))
 		_ = r.Body.Close()
 		lastCCPAErr = fmt.Errorf("CCPA HTTP %d (%s): %s", r.StatusCode, candidate, strings.TrimSpace(string(errBody)))
+		if r.StatusCode == http.StatusUnauthorized {
+			log.Printf("[omni-gateway] CCPA candidate %q returned HTTP 401; stopping tier fallback for reactive token refresh", candidate)
+			break
+		}
 		log.Printf("[omni-gateway] CCPA candidate %q returned HTTP %d; trying next CCPA tier model", candidate, r.StatusCode)
 	}
 

@@ -885,12 +885,7 @@ func SelectProviderAccount(ctx context.Context, provider ProviderID) (*Connected
 	if pinnedEmail := PinnedAccountFromContext(ctx); pinnedEmail != "" {
 		for _, c := range candidates {
 			if strings.EqualFold(c.Email, pinnedEmail) || strings.EqualFold(c.ID, pinnedEmail) {
-				if (c.Provider == ProviderAntigravity || c.Provider == "") &&
-					c.ExpiresAt > 0 && c.ExpiresAt <= time.Now().Unix()+60 && c.RefreshToken != "" {
-					if err := RefreshAntigravityToken(ctx, &c); err == nil {
-						_, _ = UpsertConnectedAccount(c)
-					}
-				}
+				c = EnsureAccountTokenFresh(ctx, c, nil)
 				return &c, nil
 			}
 		}
@@ -988,32 +983,8 @@ func SelectProviderAccount(ctx context.Context, provider ProviderID) (*Connected
 		selected = candidates[int(c%uint64(len(candidates)))]
 	}
 
-	// Auto-refresh Antigravity OAuth tokens if expired or expiring within 60s
-	if (selected.Provider == ProviderAntigravity || selected.Provider == "") &&
-		selected.ExpiresAt > 0 &&
-		selected.ExpiresAt <= time.Now().Unix()+60 {
-		if selected.RefreshToken != "" {
-			if err := RefreshAntigravityToken(ctx, &selected); err == nil {
-				_, _ = UpsertConnectedAccount(selected)
-			} else if len(candidates) > 1 {
-				RecordAccountResult(selected.Email, ProviderAntigravity, false, 0, 0, http.StatusUnauthorized)
-				for _, alt := range candidates {
-					if !strings.EqualFold(alt.Email, selected.Email) && alt.ID != selected.ID {
-						selected = alt
-						break
-					}
-				}
-			}
-		} else if len(candidates) > 1 {
-			RecordAccountResult(selected.Email, ProviderAntigravity, false, 0, 0, http.StatusUnauthorized)
-			for _, alt := range candidates {
-				if !strings.EqualFold(alt.Email, selected.Email) && alt.ID != selected.ID {
-					selected = alt
-					break
-				}
-			}
-		}
-	}
+	// Auto-refresh Antigravity and Claude Code OAuth tokens if expired or expiring within 60s
+	selected = EnsureAccountTokenFresh(ctx, selected, candidates)
 
 	return &selected, nil
 }
@@ -1108,13 +1079,15 @@ func GetValidAccountToken(ctx context.Context) (string, string, string, error) {
 	if err == nil && acc != nil && acc.AccessToken != "" {
 		return acc.AccessToken, acc.ProjectID, acc.Email, nil
 	}
-	saved := LoadSavedAuthConfig()
-	if strings.TrimSpace(saved.AgyOAuthToken) != "" {
-		email := "legacy-default"
-		if len(saved.Accounts) > 0 && saved.Accounts[0].Email != "" {
-			email = saved.Accounts[0].Email
+	if !HasConfiguredProviderAccount(ProviderAntigravity) {
+		saved := LoadSavedAuthConfig()
+		if strings.TrimSpace(saved.AgyOAuthToken) != "" {
+			email := "legacy-default"
+			if len(saved.Accounts) > 0 && saved.Accounts[0].Email != "" {
+				email = saved.Accounts[0].Email
+			}
+			return saved.AgyOAuthToken, saved.AgyProjectID, email, nil
 		}
-		return saved.AgyOAuthToken, saved.AgyProjectID, email, nil
 	}
 	return "", "", "", fmt.Errorf("no valid Antigravity account or token configured")
 }
