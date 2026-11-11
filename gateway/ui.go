@@ -2618,7 +2618,9 @@ docker compose up -d --build</pre>
             '</div>';
           }
         }
-        if (acc.error_message) {
+        const rawValURL = (acc.validation_url || '').trim();
+        const safeValURL = rawValURL.startsWith('https://') ? htmlEscape(rawValURL) : '';
+        if (acc.error_message && !safeValURL) {
           modelBarsHTML += '<div style="padding:8px;background:rgba(239, 68, 68, 0.1);border-radius:6px;color:#fca5a5;font-size:11.5px;margin-top:6px;">⚠️ ' + htmlEscape(acc.error_message) + '</div>';
         }
 
@@ -2632,17 +2634,26 @@ docker compose up -d --build</pre>
         const isBusyNow = (acc.in_flight || 0) > 0;
         const routeBadge = !acc.enabled
           ? '<span style="color:#94a3b8;font-weight:600;">⏸️ Đã tắt (Không nhận request)</span>'
-          : (acc.in_cooldown
-              ? '<span style="color:#f59e0b;font-weight:700;">⏳ Cooldown</span>'
-              : (isBusyNow
-                  ? '<span style="color:#c084fc;font-weight:700;">🔥 ĐANG XỬ LÝ (' + acc.in_flight + ' req)</span>'
-                  : '<span style="color:#34d399;font-weight:700;">🟢 Sẵn sàng (Đang rảnh)</span>'));
+          : (acc.validation_url
+              ? '<span style="color:#f87171;font-weight:700;">🔒 Bị Google chặn (Cần xác minh)</span>'
+              : (acc.in_cooldown
+                  ? '<span style="color:#f59e0b;font-weight:700;">⏳ Cooldown</span>'
+                  : (isBusyNow
+                      ? '<span style="color:#c084fc;font-weight:700;">🔥 ĐANG XỬ LÝ (' + acc.in_flight + ' req)</span>'
+                      : '<span style="color:#34d399;font-weight:700;">🟢 Sẵn sàng (Đang rảnh)</span>')));
 
         const activeOrLastModelText = isBusyNow
           ? ('<span style="color:#c084fc;font-weight:700;">🔥 Đang chạy: ' + htmlEscape(acc.active_model || 'Model') + '</span>')
           : (acc.last_model
               ? ('<span style="color:#fbbf24;font-weight:600;">🤖 Vừa chạy: ' + htmlEscape(acc.last_model) + '</span>' + (acc.last_latency_ms ? (' <span style="color:#94a3b8;">(' + acc.last_latency_ms + ' ms)</span>') : ''))
               : '<span style="color:#64748b;">Chưa chạy model nào</span>');
+
+        const validationCalloutHTML = safeValURL
+          ? ('<div style="margin-bottom:8px;padding:8px 9px;background:rgba(239,68,68,0.12);border:1px solid rgba(248,113,113,0.45);border-radius:7px;">' +
+              '<div style="color:#fecaca;font-size:11px;line-height:1.45;margin-bottom:7px;">⚠️ Google yêu cầu xác minh bảo mật Gmail này. Hãy mở trình duyệt đang đăng nhập đúng Gmail này rồi bấm nút dưới, sau đó bấm &quot;Làm mới tất cả&quot;:</div>' +
+              '<a href="' + safeValURL + '" target="_blank" rel="noopener noreferrer" style="display:block;text-align:center;padding:6px 10px;border-radius:6px;background:linear-gradient(135deg,#ef4444,#f59e0b);color:#fff;font-weight:700;font-size:11.5px;text-decoration:none;box-shadow:0 2px 8px rgba(239,68,68,0.3);">🛡️ Xác Minh Tài Khoản Google (Mở Khóa 403) ↗</a>' +
+            '</div>')
+          : '';
 
         const realExecStatsHTML =
           '<div style="background:#0b0f17;border:1px solid ' + (isBusyNow ? '#a855f7' : 'rgba(56,189,248,0.18)') + ';border-radius:8px;padding:8px 10px;margin-bottom:12px;font-size:11.5px;">' +
@@ -2653,6 +2664,7 @@ docker compose up -d --build</pre>
             '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;padding-bottom:5px;border-bottom:1px dashed rgba(255,255,255,0.07);font-family:monospace;font-size:11px;">' +
               activeOrLastModelText +
             '</div>' +
+            validationCalloutHTML +
             '<div class="acc-exec-grid">' +
               '<div>' +
                 '<div style="color:var(--muted);font-size:10px;">TOKEN ĐÃ CHẠY</div>' +

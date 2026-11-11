@@ -602,3 +602,48 @@ func PurgePoisonedPostgresVectors(ctx context.Context, db *sql.DB) {
 		}
 	}
 }
+
+// SyncAccountValidationState isolates an Antigravity account with a 2-hour cooldown when Google
+// reports VALIDATION_REQUIRED, or immediately clears a long validation cooldown once verified.
+func SyncAccountValidationState(emailOrID string, requiresValidation bool) {
+	target := strings.TrimSpace(emailOrID)
+	if target == "" {
+		return
+	}
+
+	configMu.Lock()
+	defer configMu.Unlock()
+	cfg := loadSavedAuthConfigLocked()
+	now := time.Now().Unix()
+
+	for i := range cfg.Accounts {
+		acc := &cfg.Accounts[i]
+		prov := acc.Provider
+		if prov == "" {
+			prov = ProviderAntigravity
+		}
+		if prov != ProviderAntigravity {
+			continue
+		}
+		if acc.ID == target || strings.EqualFold(acc.Email, target) {
+			if requiresValidation {
+				if acc.CooldownUntil < now+1800 {
+					acc.CooldownUntil = now + 7200
+					acc.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+					cfg.UpdatedAt = acc.UpdatedAt
+					saveAuthConfigAsyncLocked(cfg)
+				}
+			} else {
+				if acc.CooldownUntil > now+600 {
+					acc.CooldownUntil = 0
+					acc.FailureCount = 0
+					acc.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+					cfg.UpdatedAt = acc.UpdatedAt
+					asyncFlushPending = false
+					_ = saveAuthConfigLocked(cfg)
+				}
+			}
+			return
+		}
+	}
+}

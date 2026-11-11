@@ -556,3 +556,102 @@ func TestAntigravitySkipsTwo403AccountsToReachHealthyThirdOnLowModel(t *testing.
 		}
 	}
 }
+
+func TestQuotaDetectsValidationRequiredAndAutoUnlocks(t *testing.T) {
+	tmpCfg := filepath.Join(t.TempDir(), "gateway_config.json")
+	t.Setenv("GATEWAY_CONFIG_FILE", tmpCfg)
+	resetAuthCacheForTest(t)
+	t.Cleanup(func() { resetAuthCacheForTest(t) })
+
+	origLoadEndpoint := CCPALoadCodeAssistEndpoint
+	origSummaryEndpoint := CCPARetrieveUserQuotaSummaryEndpoint
+	origQuotaEndpoint := CCPARetrieveUserQuotaEndpoint
+	t.Cleanup(func() {
+		CCPALoadCodeAssistEndpoint = origLoadEndpoint
+		CCPARetrieveUserQuotaSummaryEndpoint = origSummaryEndpoint
+		CCPARetrieveUserQuotaEndpoint = origQuotaEndpoint
+	})
+
+	valLink := "https://accounts.google.com/signin/continue?sarp=1&scc=1&plt=AKgnsb_mock_verify"
+	var callCount atomic.Int32
+
+	mockCCPAQuota := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/loadCodeAssist":
+			n := callCount.Add(1)
+			if n == 1 {
+				_, _ = fmt.Fprintf(w, `{
+					"cloudaicompanionProject": "mock-proj-val",
+					"ineligibleTiers": [{
+						"reasonCode": "VALIDATION_REQUIRED",
+						"reasonMessage": "Verify your account to continue.",
+						"validationUrl": %q
+					}]
+				}`, valLink)
+				return
+			}
+			_, _ = w.Write([]byte(`{
+				"cloudaicompanionProject": "mock-proj-val",
+				"currentTier": {"id": "free-tier", "name": "Free Tier"},
+				"ineligibleTiers": []
+			}`))
+		default:
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	defer mockCCPAQuota.Close()
+
+	CCPALoadCodeAssistEndpoint = mockCCPAQuota.URL + "/loadCodeAssist"
+	CCPARetrieveUserQuotaSummaryEndpoint = mockCCPAQuota.URL + "/quotaSummary"
+	CCPARetrieveUserQuotaEndpoint = mockCCPAQuota.URL + "/retrieveQuota"
+
+	acc := ConnectedAccount{
+		Provider:    ProviderAntigravity,
+		Email:       "verify-me@gmail.com",
+		AccessToken: "ya29.mock-verify-token",
+		ProjectID:   "mock-proj-val",
+		ExpiresAt:   time.Now().Unix() + 3600,
+	}
+	if _, err := UpsertConnectedAccount(acc); err != nil {
+		t.Fatalf("UpsertConnectedAccount failed: %v", err)
+	}
+
+	// Call #1: loadCodeAssist reports VALIDATION_REQUIRED -> proactively isolates account for 2h + exposes validation_url
+	savedBefore := LoadSavedAuthConfig()
+	detail1 := inspectSingleAccountQuota(context.Background(), savedBefore.Accounts[0], "reset")
+	if detail1.ValidationURL != valLink {
+		t.Fatalf("expected ValidationURL=%q, got %q", valLink, detail1.ValidationURL)
+	}
+	if detail1.Status != "warning" {
+		t.Fatalf("expected Status=warning on VALIDATION_REQUIRED, got %q", detail1.Status)
+	}
+	if !detail1.InCooldown {
+		t.Fatalf("expected detail1.InCooldown=true on VALIDATION_REQUIRED")
+	}
+	if !strings.Contains(detail1.ErrorMessage, "VALIDATION_REQUIRED") {
+		t.Fatalf("expected VALIDATION_REQUIRED in ErrorMessage, got %q", detail1.ErrorMessage)
+	}
+
+	savedAfter1 := LoadSavedAuthConfig()
+	if len(savedAfter1.Accounts) != 1 || savedAfter1.Accounts[0].CooldownUntil <= time.Now().Unix()+3600 {
+		t.Fatalf("expected persisted 2h CooldownUntil (> now+3600), got %+v", savedAfter1.Accounts)
+	}
+
+	// Call #2: user completes Google verification -> loadCodeAssist returns currentTier.id="free-tier" & empty ineligibleTiers
+	detail2 := inspectSingleAccountQuota(context.Background(), savedAfter1.Accounts[0], "reset")
+	if detail2.ValidationURL != "" {
+		t.Fatalf("expected empty ValidationURL after verification, got %q", detail2.ValidationURL)
+	}
+	if detail2.InCooldown {
+		t.Fatalf("expected detail2.InCooldown=false after auto-unlock")
+	}
+	if detail2.Status != "healthy" {
+		t.Fatalf("expected detail2.Status=healthy after auto-unlock, got %q", detail2.Status)
+	}
+
+	savedAfter2 := LoadSavedAuthConfig()
+	if savedAfter2.Accounts[0].CooldownUntil != 0 {
+		t.Fatalf("expected SyncAccountValidationState to auto-clear CooldownUntil=0, got %d", savedAfter2.Accounts[0].CooldownUntil)
+	}
+}

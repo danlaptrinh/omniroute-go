@@ -35,6 +35,7 @@ type AccountQuotaDetail struct {
 	Tier                string           `json:"tier"` // "Ultra", "Pro", "Lite", "Token Plan"
 	Status              string           `json:"status"` // "healthy", "warning", "critical"
 	ErrorMessage        string           `json:"error_message,omitempty"`
+	ValidationURL       string           `json:"validation_url,omitempty"`
 	Enabled             bool             `json:"enabled"`
 	InCooldown          bool             `json:"in_cooldown"`
 	SuccessCount        int64            `json:"success_count"`
@@ -953,6 +954,12 @@ func inspectAntigravityAccount(ctx context.Context, acc *ConnectedAccount, detai
 			Name        string `json:"name"`
 			Description string `json:"description"`
 		} `json:"paidTier"`
+		IneligibleTiers []struct {
+			ReasonCode             string `json:"reasonCode"`
+			ReasonMessage          string `json:"reasonMessage"`
+			ValidationErrorMessage string `json:"validationErrorMessage"`
+			ValidationURL          string `json:"validationUrl"`
+		} `json:"ineligibleTiers"`
 		CloudaicompanionProject string `json:"cloudaicompanionProject"`
 	}
 	_ = json.NewDecoder(resp.Body).Decode(&codeAssistBody)
@@ -969,6 +976,35 @@ func inspectAntigravityAccount(ctx context.Context, acc *ConnectedAccount, detai
 	if (acc.ProjectID == "" || acc.ProjectID == "aicode-consumers") && codeAssistBody.CloudaicompanionProject != "" {
 		acc.ProjectID = codeAssistBody.CloudaicompanionProject
 		_, _ = UpsertConnectedAccount(*acc)
+	}
+
+	acctKey := strings.TrimSpace(acc.Email)
+	if acctKey == "" {
+		acctKey = strings.TrimSpace(acc.ID)
+	}
+	foundValidation := false
+	for _, t := range codeAssistBody.IneligibleTiers {
+		if strings.EqualFold(strings.TrimSpace(t.ReasonCode), "VALIDATION_REQUIRED") || strings.TrimSpace(t.ValidationURL) != "" {
+			foundValidation = true
+			detail.ValidationURL = strings.TrimSpace(t.ValidationURL)
+			detail.ErrorMessage = "Google yêu cầu xác minh danh tính tài khoản (HTTP 403 VALIDATION_REQUIRED)"
+			if !acc.Disabled {
+				detail.Status = "warning"
+				detail.InCooldown = true
+			}
+			SyncAccountValidationState(acctKey, true)
+			break
+		}
+	}
+	if !foundValidation && strings.TrimSpace(codeAssistBody.CurrentTier.ID) != "" {
+		wasValidationCooldown := acc.CooldownUntil > time.Now().Unix()+600
+		SyncAccountValidationState(acctKey, false)
+		if wasValidationCooldown {
+			acc.CooldownUntil = 0
+			acc.FailureCount = 0
+			detail.InCooldown = false
+			detail.FailureCount = 0
+		}
 	}
 
 	// 2. Call retrieveUserQuotaSummary for weekly & 5h limits
