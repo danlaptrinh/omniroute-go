@@ -74,6 +74,29 @@ func init() {
 	}
 }
 
+func accountCacheScope(w http.ResponseWriter, oauthToken string) string {
+	if w != nil {
+		if acc := strings.ToLower(strings.TrimSpace(w.Header().Get("X-Omni-Gateway-Account"))); acc != "" {
+			return acc
+		}
+	}
+	tok := strings.TrimSpace(oauthToken)
+	if tok == "" {
+		return "anon"
+	}
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(tok))
+	return fmt.Sprintf("%016x", h.Sum64())
+}
+
+func normalizeAccScope(accScope string) string {
+	s := strings.ToLower(strings.TrimSpace(accScope))
+	if s == "" {
+		return "anon"
+	}
+	return s
+}
+
 func markDeadCCPAModel(endpoint, candidate string, ttl time.Duration) {
 	candidate = strings.TrimSpace(candidate)
 	if candidate == "" {
@@ -101,6 +124,51 @@ func isDeadCCPAModel(endpoint, candidate string, now time.Time) bool {
 		endpoint = DefaultCCPAEndpoint
 	}
 	key := endpoint + "|" + strings.TrimSpace(candidate)
+	val, ok := deadCCPAModelCache.Load(key)
+	if !ok {
+		return false
+	}
+	entry, ok := val.(deadCCPAEntry)
+	if !ok {
+		deadCCPAModelCache.Delete(key)
+		return false
+	}
+	if now.Before(entry.expiresAt) {
+		return true
+	}
+	deadCCPAModelCache.Delete(key)
+	return false
+}
+
+func markAccountDeadCCPAModel(endpoint, accScope, candidate string, ttl time.Duration) {
+	candidate = strings.TrimSpace(candidate)
+	if candidate == "" {
+		return
+	}
+	if endpoint == "" {
+		endpoint = DefaultCCPAEndpoint
+	}
+	scope := normalizeAccScope(accScope)
+	deadCCPAModelCache.Store(endpoint+"|acc:"+scope+"|"+candidate, deadCCPAEntry{
+		expiresAt: time.Now().Add(ttl),
+	})
+	prefix := endpoint + "|acc:" + scope + "|"
+	workingCCPAModelCache.Range(func(k, v any) bool {
+		ks, okK := k.(string)
+		vs, okV := v.(string)
+		if okK && okV && strings.HasPrefix(ks, prefix) && vs == candidate {
+			workingCCPAModelCache.Delete(k)
+		}
+		return true
+	})
+}
+
+func isAccountDeadCCPAModel(endpoint, accScope, candidate string, now time.Time) bool {
+	if endpoint == "" {
+		endpoint = DefaultCCPAEndpoint
+	}
+	scope := normalizeAccScope(accScope)
+	key := endpoint + "|acc:" + scope + "|" + strings.TrimSpace(candidate)
 	val, ok := deadCCPAModelCache.Load(key)
 	if !ok {
 		return false
@@ -650,8 +718,9 @@ func (u *GatewayUpstream) handleDirectCCPA(
 	if endpoint == "" {
 		endpoint = DefaultCCPAEndpoint
 	}
+	accScope := accountCacheScope(w, oauthToken)
 	noThinking := req.ThinkingConfig != nil && !req.ThinkingConfig.IncludeThoughts && req.ThinkingConfig.ThinkingBudget == 0 && req.ThinkingConfig.ThinkingLevel == ThinkingLevelNone
-	ccpaCandidates := buildCCPACandidatesWithCache(endpoint, resolved, noThinking)
+	ccpaCandidates := buildCCPACandidatesWithCache(endpoint, accScope, resolved, noThinking)
 
 	var (
 		resp            *http.Response
@@ -750,7 +819,9 @@ func (u *GatewayUpstream) handleDirectCCPA(
 			switch r.StatusCode {
 			case http.StatusNotFound:
 				markDeadCCPAModel(endpoint, candidate, 6*time.Hour)
-			case http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout, http.StatusTooManyRequests:
+			case http.StatusTooManyRequests:
+				markAccountDeadCCPAModel(endpoint, accScope, candidate, 2*time.Minute)
+			case http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
 				markDeadCCPAModel(endpoint, candidate, 2*time.Minute)
 			}
 			lastCCPAErr = fmt.Errorf("CCPA HTTP %d (%s): %s", r.StatusCode, candidate, strings.TrimSpace(string(errBody)))
@@ -880,7 +951,7 @@ func (u *GatewayUpstream) handleDirectCCPA(
 	defer resp.Body.Close()
 
 	if !noThinking && resolved.CanonicalID != "" {
-		workingCCPAModelCache.Store(endpoint+"|"+resolved.CanonicalID, activeCCPAModel)
+		workingCCPAModelCache.Store(endpoint+"|acc:"+normalizeAccScope(accScope)+"|"+resolved.CanonicalID, activeCCPAModel)
 	}
 
 	created := time.Now().Unix()
@@ -1119,13 +1190,14 @@ func (u *GatewayUpstream) handleDirectCCPA(
 	return json.NewEncoder(w).Encode(outResp)
 }
 
-func buildCCPACandidatesWithCache(endpoint string, resolved ResolvedModel, noThinking bool) []string {
+func buildCCPACandidatesWithCache(endpoint, accScope string, resolved ResolvedModel, noThinking bool) []string {
 	if endpoint == "" {
 		endpoint = DefaultCCPAEndpoint
 	}
+	scope := normalizeAccScope(accScope)
 	var raw []string
 	if !noThinking && resolved.CanonicalID != "" {
-		if cached, ok := workingCCPAModelCache.Load(endpoint + "|" + resolved.CanonicalID); ok {
+		if cached, ok := workingCCPAModelCache.Load(endpoint + "|acc:" + scope + "|" + resolved.CanonicalID); ok {
 			if s, ok := cached.(string); ok && s != "" {
 				raw = append(raw, s)
 			}
@@ -1282,7 +1354,7 @@ func buildCCPACandidatesWithCache(endpoint string, resolved ResolvedModel, noThi
 	now := time.Now()
 	alive := make([]string, 0, len(deduped))
 	for _, m := range deduped {
-		if isDeadCCPAModel(endpoint, m, now) {
+		if isDeadCCPAModel(endpoint, m, now) || isAccountDeadCCPAModel(endpoint, scope, m, now) {
 			continue
 		}
 		alive = append(alive, m)

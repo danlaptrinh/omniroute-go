@@ -242,7 +242,7 @@ func TestCCPA503CachedAndCarbonCandidateOrder(t *testing.T) {
 	// 1. Verify Carbon High & Argon High prioritize Opus, Sonnet, and Gemini 3 Flash BEFORE gemini-3.8-flash-tiered
 	for _, modelID := range []string{"antigravity/gemini-4-carbon-high", "antigravity/gemini-4-argon-high"} {
 		res := ResolveModel(modelID, nil)
-		cands := buildCCPACandidatesWithCache("https://test.ccpa.local", res, false)
+		cands := buildCCPACandidatesWithCache("https://test.ccpa.local", "", res, false)
 		tieredIdx := indexOfString(cands, "gemini-3.8-flash-tiered")
 		if tieredIdx == -1 {
 			t.Fatalf("%s candidates missing gemini-3.8-flash-tiered: %v", modelID, cands)
@@ -257,7 +257,7 @@ func TestCCPA503CachedAndCarbonCandidateOrder(t *testing.T) {
 
 	// 2. Verify gemini-3.8-flash-low places gemini-3-flash BEFORE gemini-3.8-flash-tiered (and never puts tiered at front)
 	flashLowRes := ResolveModel("antigravity/gemini-3.8-flash-low", nil)
-	flashLowCands := buildCCPACandidatesWithCache("https://test.ccpa.local", flashLowRes, false)
+	flashLowCands := buildCCPACandidatesWithCache("https://test.ccpa.local", "", flashLowRes, false)
 	if len(flashLowCands) == 0 || flashLowCands[0] == "gemini-3.8-flash-tiered" {
 		t.Fatalf("gemini-3.8-flash-low must not place gemini-3.8-flash-tiered first: %v", flashLowCands)
 	}
@@ -464,5 +464,143 @@ func TestFailedRequestDoesNotPoisonAccountAvgLatency(t *testing.T) {
 	savedAfter := LoadSavedAuthConfig()
 	if savedAfter.Accounts[0].AvgLatencyMs != 900 {
 		t.Fatalf("expected weighted EMA AvgLatencyMs=900, got %d", savedAfter.Accounts[0].AvgLatencyMs)
+	}
+}
+
+func TestPerAccount429DoesNotDowngradeOtherAccounts(t *testing.T) {
+	tmpCfg := filepath.Join(t.TempDir(), "gateway_config.json")
+	t.Setenv("GATEWAY_CONFIG_FILE", tmpCfg)
+	resetAuthCacheForTest(t)
+	ResetCCPAModelCaches()
+	GetGlobalCache().Clear()
+	t.Cleanup(func() {
+		ResetCCPAModelCaches()
+		GetGlobalCache().Clear()
+		resetAuthCacheForTest(t)
+	})
+
+	var mu sync.Mutex
+	var global404Calls int
+	callsByTokenAndModel := make(map[string]int)
+
+	mockCCPA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload ccpaRequestPayload
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		authHdr := strings.TrimSpace(r.Header.Get("Authorization"))
+
+		mu.Lock()
+		callsByTokenAndModel[authHdr+"|"+payload.Model]++
+		if payload.Model == "gemini-4-carbon-high" || payload.Model == "gemini-4-carbon" {
+			global404Calls++
+		}
+		mu.Unlock()
+
+		if payload.Model == "gemini-4-carbon-high" || payload.Model == "gemini-4-carbon" {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":{"code":404,"message":"model not yet rolled out"}}`))
+			return
+		}
+
+		// Account 1 (exhausted@gmail.com) has exhausted its per-account Claude weekly quota (HTTP 429)
+		if authHdr == "Bearer ya29.exhausted-claude-quota" &&
+			(payload.Model == "claude-opus-4-6-thinking" || payload.Model == "claude-sonnet-4-6") {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"Per-user Claude quota exhausted"}}`))
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprintf(w, "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"served-by-%s\"}]}}]}}\n\ndata: [DONE]\n\n", payload.Model)
+	}))
+	defer mockCCPA.Close()
+
+	accounts := []ConnectedAccount{
+		{
+			Provider:    ProviderAntigravity,
+			Email:       "exhausted@gmail.com",
+			AccessToken: "ya29.exhausted-claude-quota",
+			ProjectID:   "proj-1",
+			ExpiresAt:   time.Now().Unix() + 3600,
+		},
+		{
+			Provider:    ProviderAntigravity,
+			Email:       "fresh@gmail.com",
+			AccessToken: "ya29.fresh-claude-quota",
+			ProjectID:   "proj-2",
+			ExpiresAt:   time.Now().Unix() + 3600,
+		},
+	}
+	for _, a := range accounts {
+		if _, err := UpsertConnectedAccount(a); err != nil {
+			t.Fatalf("UpsertConnectedAccount(%s) failed: %v", a.Email, err)
+		}
+	}
+
+	upstream := NewUpstream(GatewayConfig{CCPAEndpoint: mockCCPA.URL})
+	resolved := ResolveModel("antigravity/gemini-4-carbon-high", nil)
+
+	// 1. Account 1 (exhausted@gmail.com): hits 404 on carbon, 429 on opus & sonnet, succeeds on gemini-3-flash
+	req1 := OpenAIChatRequest{
+		Model: "antigravity/gemini-4-carbon-high",
+		Messages: []OpenAIChatMessage{
+			{Role: "user", Content: json.RawMessage(`"Request from exhausted Claude account"`)},
+		},
+	}
+	rec1 := httptest.NewRecorder()
+	ctx1 := WithPinnedAccount(context.Background(), "exhausted@gmail.com")
+	if err := upstream.HandleChatCompletion(ctx1, rec1, req1, resolved, ""); err != nil {
+		t.Fatalf("Account 1 request failed: %v", err)
+	}
+	if gotAcc := rec1.Header().Get("X-Omni-Gateway-Account"); gotAcc != "exhausted@gmail.com" {
+		t.Fatalf("Account 1 header = %q, want exhausted@gmail.com", gotAcc)
+	}
+	if gotModel := rec1.Header().Get("X-Omni-Gateway-Resolved-Model"); gotModel != "gemini-3-flash" {
+		t.Fatalf("Account 1 resolved model = %q, want gemini-3-flash", gotModel)
+	}
+
+	mu.Lock()
+	after1Global404s := global404Calls
+	mu.Unlock()
+	if after1Global404s != 2 {
+		t.Fatalf("expected 2 initial 404 probes on Account 1, got %d", after1Global404s)
+	}
+
+	// 2. Account 2 (fresh@gmail.com): must skip global 404s (0 extra 404 calls) AND hit claude-opus-4-6-thinking directly!
+	req2 := OpenAIChatRequest{
+		Model: "antigravity/gemini-4-carbon-high",
+		Messages: []OpenAIChatMessage{
+			{Role: "user", Content: json.RawMessage(`"Request from fresh Claude account"`)} ,
+		},
+	}
+	rec2 := httptest.NewRecorder()
+	ctx2 := WithPinnedAccount(context.Background(), "fresh@gmail.com")
+	if err := upstream.HandleChatCompletion(ctx2, rec2, req2, resolved, ""); err != nil {
+		t.Fatalf("Account 2 request failed: %v", err)
+	}
+	if gotAcc := rec2.Header().Get("X-Omni-Gateway-Account"); gotAcc != "fresh@gmail.com" {
+		t.Fatalf("Account 2 header = %q, want fresh@gmail.com", gotAcc)
+	}
+	if gotModel := rec2.Header().Get("X-Omni-Gateway-Resolved-Model"); gotModel != "claude-opus-4-6-thinking" {
+		t.Fatalf("Account 2 was downgraded to %q instead of claude-opus-4-6-thinking!", gotModel)
+	}
+	if !strings.Contains(rec2.Body.String(), "served-by-claude-opus-4-6-thinking") {
+		t.Fatalf("unexpected Account 2 response body: %s", rec2.Body.String())
+	}
+
+	mu.Lock()
+	after2Global404s := global404Calls
+	freshOpusCalls := callsByTokenAndModel["Bearer ya29.fresh-claude-quota|claude-opus-4-6-thinking"]
+	freshFlashCalls := callsByTokenAndModel["Bearer ya29.fresh-claude-quota|gemini-3-flash"]
+	mu.Unlock()
+
+	if after2Global404s != after1Global404s {
+		t.Fatalf("Account 2 re-probed globally dead 404 models (%d -> %d)", after1Global404s, after2Global404s)
+	}
+	if freshOpusCalls != 1 || freshFlashCalls != 0 {
+		t.Fatalf("expected fresh@gmail.com to call claude-opus-4-6-thinking=1 and gemini-3-flash=0, got opus=%d flash=%d", freshOpusCalls, freshFlashCalls)
 	}
 }
