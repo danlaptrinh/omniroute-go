@@ -6,17 +6,24 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"log"
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 const (
 	DefaultCCPAEndpoint = "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse"
+	ccpaClientShards    = 8
 )
+
+type deadCCPAEntry struct {
+	expiresAt time.Time
+}
 
 // SharedHTTPTransport and SharedHTTPClient reuse warm HTTP/2 connections across all requests,
 // eliminating repeated TCP + TLS handshakes (~300-500ms saved per request).
@@ -36,10 +43,91 @@ var (
 		Timeout:   180 * time.Second,
 	}
 
-	// Fast-path caches for CCPA candidate resolution to avoid sequential HTTP 404 probing.
-	workingCCPAModelCache sync.Map // key: resolved.CanonicalID -> value: string (winning CCPA model ID)
-	deadCCPAModelCache    sync.Map // key: candidate CCPA model ID -> value: time.Time (when 404 occurred)
+	ccpaShardedClients [ccpaClientShards]*http.Client
+
+	// Configurable CCPA watchdog timeouts (adjustable in unit tests).
+	CCPAFirstChunkTimeout   = 20 * time.Second
+	CCPAStreamIdleTimeout   = 25 * time.Second
+	CCPACandidateMaxTimeout = 90 * time.Second
+
+	// Fast-path caches for CCPA candidate resolution scoped by endpoint to avoid sequential probing.
+	workingCCPAModelCache sync.Map // key: endpoint + "|" + resolved.CanonicalID -> value: string (winning CCPA model ID)
+	deadCCPAModelCache    sync.Map // key: endpoint + "|" + candidate CCPA model ID -> value: deadCCPAEntry
 )
+
+func init() {
+	for i := 0; i < ccpaClientShards; i++ {
+		tr := &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			MaxIdleConns:          64,
+			MaxIdleConnsPerHost:   32,
+			MaxConnsPerHost:       64,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   8 * time.Second,
+			ResponseHeaderTimeout: 20 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+			ForceAttemptHTTP2:     true,
+		}
+		ccpaShardedClients[i] = &http.Client{
+			Transport: tr,
+		}
+	}
+}
+
+func markDeadCCPAModel(endpoint, candidate string, ttl time.Duration) {
+	candidate = strings.TrimSpace(candidate)
+	if candidate == "" {
+		return
+	}
+	if endpoint == "" {
+		endpoint = DefaultCCPAEndpoint
+	}
+	deadCCPAModelCache.Store(endpoint+"|"+candidate, deadCCPAEntry{
+		expiresAt: time.Now().Add(ttl),
+	})
+	prefix := endpoint + "|"
+	workingCCPAModelCache.Range(func(k, v any) bool {
+		ks, okK := k.(string)
+		vs, okV := v.(string)
+		if okK && okV && strings.HasPrefix(ks, prefix) && vs == candidate {
+			workingCCPAModelCache.Delete(k)
+		}
+		return true
+	})
+}
+
+func isDeadCCPAModel(endpoint, candidate string, now time.Time) bool {
+	if endpoint == "" {
+		endpoint = DefaultCCPAEndpoint
+	}
+	key := endpoint + "|" + strings.TrimSpace(candidate)
+	val, ok := deadCCPAModelCache.Load(key)
+	if !ok {
+		return false
+	}
+	entry, ok := val.(deadCCPAEntry)
+	if !ok {
+		deadCCPAModelCache.Delete(key)
+		return false
+	}
+	if now.Before(entry.expiresAt) {
+		return true
+	}
+	deadCCPAModelCache.Delete(key)
+	return false
+}
+
+// ResetCCPAModelCaches clears both working and dead CCPA model caches (useful for tests and diagnostics).
+func ResetCCPAModelCaches() {
+	workingCCPAModelCache.Range(func(k, _ any) bool {
+		workingCCPAModelCache.Delete(k)
+		return true
+	})
+	deadCCPAModelCache.Range(func(k, _ any) bool {
+		deadCCPAModelCache.Delete(k)
+		return true
+	})
+}
 
 // GatewayUpstream implements UpstreamHandler with Standalone Direct Antigravity CCPA mode
 // (daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse) by default,
@@ -47,6 +135,16 @@ var (
 type GatewayUpstream struct {
 	cfg    GatewayConfig
 	client *http.Client
+}
+
+func (u *GatewayUpstream) ccpaHTTPClient(oauthToken string) *http.Client {
+	if u.client != nil && u.client != SharedHTTPClient {
+		return u.client
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(strings.TrimSpace(oauthToken)))
+	idx := int(h.Sum32() % uint32(ccpaClientShards))
+	return ccpaShardedClients[idx]
 }
 
 // NewUpstream creates a new GatewayUpstream instance sharing the warm HTTP/2 connection pool.
@@ -150,14 +248,24 @@ func (u *GatewayUpstream) HandleChatCompletion(
 	}
 
 	for _, target := range targets {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		if err := u.tryTarget(ctx, w, req, target, cleanAuth); err == nil {
 			return nil
 		} else {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			lastErr = err
 			if firstUpstreamErr == nil && !isMissingAccountErr(err) {
 				firstUpstreamErr = err
 			}
 		}
+	}
+
+	if ctx.Err() != nil {
+		return ctx.Err()
 	}
 
 	if strings.TrimSpace(u.cfg.OmniRouteBaseURL) != "" {
@@ -214,7 +322,8 @@ func (u *GatewayUpstream) tryTarget(
 
 	case ProviderAlibaba:
 		acc, err := SelectProviderAccount(ctx, ProviderAlibaba)
-		if err != nil && strings.HasPrefix(cleanAuth, "sk-") && !strings.HasPrefix(cleanAuth, "sk-ant-") {
+		lowerAuth := strings.ToLower(cleanAuth)
+		if err != nil && strings.HasPrefix(lowerAuth, "sk-") && !strings.HasPrefix(lowerAuth, "sk-ant-") && !strings.HasPrefix(lowerAuth, "sk-omni-") {
 			acc = &ConnectedAccount{Provider: ProviderAlibaba, Email: "header-key", APIKey: cleanAuth}
 		}
 		if acc == nil {
@@ -241,6 +350,9 @@ func (u *GatewayUpstream) tryTarget(
 			EnrichLogEntryFromContext(ctx, &entry, req)
 			RecordLogEntry(entry)
 			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
 		RecordAccountModelResult(acc.Email, ProviderAlibaba, target.CanonicalID, false, lat, 0, http.StatusBadGateway)
 		errEntry := GatewayLogEntry{
@@ -530,23 +642,57 @@ func (u *GatewayUpstream) handleDirectCCPA(
 		inner.SystemInstruction = &ccpaContent{Parts: sysParts}
 	}
 
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+
 	endpoint := u.cfg.CCPAEndpoint
 	if endpoint == "" {
 		endpoint = DefaultCCPAEndpoint
 	}
-	useFastCache := (endpoint == DefaultCCPAEndpoint)
 	noThinking := req.ThinkingConfig != nil && !req.ThinkingConfig.IncludeThoughts && req.ThinkingConfig.ThinkingBudget == 0 && req.ThinkingConfig.ThinkingLevel == ThinkingLevelNone
-	ccpaCandidates := buildCCPACandidatesWithCache(resolved, useFastCache, noThinking)
+	ccpaCandidates := buildCCPACandidatesWithCache(endpoint, resolved, noThinking)
 
-	var resp *http.Response
-	var activeCCPAModel string
-	var lastCCPAErr error
+	var (
+		resp            *http.Response
+		activeCCPAModel string
+		activeScanner   *bufio.Scanner
+		activeIdleTimer *time.Timer
+		activeCandCtx   context.Context
+		activeCancel    context.CancelFunc
+		activeTimedOut  *atomic.Bool
+		initialText     string
+		initialThoughts string
+		lastUsage       *ccpaUsageMetadata
+		lastCCPAErr     error
+	)
 
 	for _, candidate := range ccpaCandidates {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
 		candInner := inner
-		// Anthropic models, gemini-3-flash, and image models on CCPA do not accept thinkingConfig overrides
-		if (strings.HasPrefix(candidate, "claude-") || candidate == "gemini-3-flash" || strings.Contains(candidate, "image")) && candInner.GenerationConfig.ThinkingConfig != nil {
+		// Anthropic models, flash-lite/gemini-3-flash, and image models on CCPA do not accept thinkingConfig overrides
+		if (strings.HasPrefix(candidate, "claude-") ||
+			candidate == "gemini-3-flash" ||
+			candidate == "gemini-3.5-flash-lite" ||
+			candidate == "gemini-3.1-flash-lite" ||
+			strings.Contains(candidate, "image")) && candInner.GenerationConfig.ThinkingConfig != nil {
 			candInner.GenerationConfig.ThinkingConfig = nil
+		} else if candidate == "gemini-3.8-flash-tiered" && candInner.GenerationConfig.ThinkingConfig != nil {
+			origTC := *candInner.GenerationConfig.ThinkingConfig
+			cappedBudget := 1024
+			if resolved.ThinkingLevel == ThinkingLevelLow || (origTC.ThinkingBudget != nil && *origTC.ThinkingBudget == 0) {
+				cappedBudget = 0
+			} else if origTC.ThinkingBudget != nil && *origTC.ThinkingBudget > 0 && *origTC.ThinkingBudget < cappedBudget {
+				cappedBudget = *origTC.ThinkingBudget
+			}
+			candInner.GenerationConfig.ThinkingConfig = &ccpaThinkingConfig{
+				IncludeThoughts: origTC.IncludeThoughts,
+				ThinkingLevel:   "",
+				ThinkingBudget:  &cappedBudget,
+			}
 		}
 
 		payload := ccpaRequestPayload{
@@ -561,8 +707,17 @@ func (u *GatewayUpstream) handleDirectCCPA(
 			continue
 		}
 
-		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
+		candCtx, cancelCand := context.WithTimeout(ctx, CCPACandidateMaxTimeout)
+		var timedOut atomic.Bool
+		idleTimer := time.AfterFunc(CCPAFirstChunkTimeout, func() {
+			timedOut.Store(true)
+			cancelCand()
+		})
+
+		httpReq, err := http.NewRequestWithContext(candCtx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
 		if err != nil {
+			idleTimer.Stop()
+			cancelCand()
 			lastCCPAErr = err
 			continue
 		}
@@ -571,60 +726,61 @@ func (u *GatewayUpstream) handleDirectCCPA(
 		httpReq.Header.Set("User-Agent", GetAgyUserAgent())
 		httpReq.Header.Set("Authorization", "Bearer "+oauthToken)
 
-		r, err := u.client.Do(httpReq)
+		r, err := u.ccpaHTTPClient(oauthToken).Do(httpReq)
 		if err != nil {
+			idleTimer.Stop()
+			candErr := candCtx.Err()
+			cancelCand()
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if timedOut.Load() || candErr != nil {
+				markDeadCCPAModel(endpoint, candidate, 2*time.Minute)
+			}
 			lastCCPAErr = err
+			log.Printf("[omni-gateway] CCPA candidate %q transport error: %v; trying next CCPA tier model", candidate, err)
 			continue
 		}
 
-		if r.StatusCode >= 200 && r.StatusCode < 300 {
-			resp = r
-			activeCCPAModel = candidate
-			break
+		if r.StatusCode < 200 || r.StatusCode >= 300 {
+			idleTimer.Stop()
+			errBody, _ := io.ReadAll(io.LimitReader(r.Body, 4096))
+			_ = r.Body.Close()
+			cancelCand()
+			switch r.StatusCode {
+			case http.StatusNotFound:
+				markDeadCCPAModel(endpoint, candidate, 6*time.Hour)
+			case http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout, http.StatusTooManyRequests:
+				markDeadCCPAModel(endpoint, candidate, 2*time.Minute)
+			}
+			lastCCPAErr = fmt.Errorf("CCPA HTTP %d (%s): %s", r.StatusCode, candidate, strings.TrimSpace(string(errBody)))
+			if r.StatusCode == http.StatusUnauthorized || (r.StatusCode == http.StatusForbidden && strings.Contains(string(errBody), "VALIDATION_REQUIRED")) {
+				log.Printf("[omni-gateway] CCPA candidate %q returned HTTP %d; stopping tier fallback for account recovery/failover", candidate, r.StatusCode)
+				break
+			}
+			log.Printf("[omni-gateway] CCPA candidate %q returned HTTP %d; trying next CCPA tier model", candidate, r.StatusCode)
+			continue
 		}
 
-		if useFastCache && r.StatusCode == http.StatusNotFound {
-			deadCCPAModelCache.Store(candidate, time.Now())
-		}
-		errBody, _ := io.ReadAll(io.LimitReader(r.Body, 4096))
-		_ = r.Body.Close()
-		lastCCPAErr = fmt.Errorf("CCPA HTTP %d (%s): %s", r.StatusCode, candidate, strings.TrimSpace(string(errBody)))
-		if r.StatusCode == http.StatusUnauthorized || (r.StatusCode == http.StatusForbidden && strings.Contains(string(errBody), "VALIDATION_REQUIRED")) {
-			log.Printf("[omni-gateway] CCPA candidate %q returned HTTP %d; stopping tier fallback for account recovery/failover", candidate, r.StatusCode)
-			break
-		}
-		log.Printf("[omni-gateway] CCPA candidate %q returned HTTP %d; trying next CCPA tier model", candidate, r.StatusCode)
-	}
-
-	if resp == nil {
-		return lastCCPAErr
-	}
-	defer resp.Body.Close()
-
-	created := time.Now().Unix()
-	respID := fmt.Sprintf("chatcmpl-ccpa-%d", time.Now().UnixNano())
-
-	if req.Stream {
-		var streamedText strings.Builder
-		var streamedThoughts strings.Builder
-		var lastUsage *ccpaUsageMetadata
-		var rawNonSSE strings.Builder
-
-		scanner := bufio.NewScanner(resp.Body)
+		// Verify first meaningful chunk inside candidate loop while idleTimer (CCPAFirstChunkTimeout) is armed.
+		scanner := bufio.NewScanner(r.Body)
 		scanner.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)
 
-		// Buffer and inspect the first meaningful SSE chunk(s) BEFORE calling w.WriteHeader(http.StatusOK)
-		// so an outdated Antigravity client banner returns an error and triggers cross-provider failover.
-		var initialText strings.Builder
-		var initialThoughts strings.Builder
-		foundSSE := false
+		var (
+			candInitialText     strings.Builder
+			candInitialThoughts strings.Builder
+			candRawNonSSE       strings.Builder
+			candLastUsage       *ccpaUsageMetadata
+			foundSSE            bool
+		)
+
 		for scanner.Scan() {
 			rawLine := scanner.Text()
 			line := strings.TrimSpace(rawLine)
 			if !strings.HasPrefix(line, "data:") {
-				if line != "" {
-					rawNonSSE.WriteString(rawLine)
-					rawNonSSE.WriteByte('\n')
+				if line != "" && !strings.HasPrefix(line, ":") && !strings.HasPrefix(line, "event:") && !strings.HasPrefix(line, "id:") && !strings.HasPrefix(line, "retry:") {
+					candRawNonSSE.WriteString(rawLine)
+					candRawNonSSE.WriteByte('\n')
 				}
 				continue
 			}
@@ -635,46 +791,104 @@ func (u *GatewayUpstream) handleDirectCCPA(
 			}
 			textDelta, thoughtDelta, uMeta := extractCCPAPartsAndUsage(dataStr)
 			if uMeta != nil && (uMeta.TotalTokenCount > 0 || uMeta.PromptTokenCount > 0 || uMeta.CandidatesTokenCount > 0) {
-				lastUsage = uMeta
+				candLastUsage = uMeta
 			}
 			if textDelta == "" && thoughtDelta == "" {
 				continue
 			}
-			initialText.WriteString(textDelta)
-			initialThoughts.WriteString(thoughtDelta)
+			idleTimer.Reset(CCPAStreamIdleTimeout)
+			candInitialText.WriteString(textDelta)
+			candInitialThoughts.WriteString(thoughtDelta)
 
-			probe := initialText.String()
+			probe := candInitialText.String()
 			if IsUnsupportedClientBanner(probe) {
+				idleTimer.Stop()
+				_ = r.Body.Close()
+				cancelCand()
 				return fmt.Errorf("CCPA client version rejected by upstream (update OMNI_AGY_USER_AGENT): %s", TruncateUTF8(probe, 200))
 			}
 			lowerProbe := strings.ToLower(strings.TrimSpace(probe))
-			if initialThoughts.Len() == 0 && lowerProbe != "" && len(lowerProbe) < 60 &&
+			if candInitialThoughts.Len() == 0 && lowerProbe != "" && len(lowerProbe) < 60 &&
 				strings.HasPrefix("this version of antigravity is no longer supported", lowerProbe) {
 				continue
 			}
 			break
 		}
 
-		if !foundSSE && rawNonSSE.Len() > 0 {
-			tDelta, thDelta, uMeta := extractCCPAPartsAndUsage(rawNonSSE.String())
+		scanErr := scanner.Err()
+		candErr := candCtx.Err()
+
+		if !foundSSE && candRawNonSSE.Len() > 0 {
+			tDelta, thDelta, uMeta := extractCCPAPartsAndUsage(candRawNonSSE.String())
 			if uMeta != nil && (uMeta.TotalTokenCount > 0 || uMeta.PromptTokenCount > 0 || uMeta.CandidatesTokenCount > 0) {
-				lastUsage = uMeta
+				candLastUsage = uMeta
 			}
-			initialText.WriteString(tDelta)
-			initialThoughts.WriteString(thDelta)
+			candInitialText.WriteString(tDelta)
+			candInitialThoughts.WriteString(thDelta)
 		}
 
-		if IsUnsupportedClientBanner(initialText.String()) || IsUnsupportedClientBanner(rawNonSSE.String()) {
-			banner := initialText.String()
+		if IsUnsupportedClientBanner(candInitialText.String()) || IsUnsupportedClientBanner(candRawNonSSE.String()) {
+			idleTimer.Stop()
+			_ = r.Body.Close()
+			cancelCand()
+			banner := candInitialText.String()
 			if strings.TrimSpace(banner) == "" {
-				banner = rawNonSSE.String()
+				banner = candRawNonSSE.String()
 			}
 			return fmt.Errorf("CCPA client version rejected by upstream (update OMNI_AGY_USER_AGENT): %s", TruncateUTF8(banner, 200))
 		}
 
-		if useFastCache && !noThinking && resolved.CanonicalID != "" {
-			workingCCPAModelCache.Store(resolved.CanonicalID, activeCCPAModel)
+		if scanErr != nil || (candInitialText.Len() == 0 && candInitialThoughts.Len() == 0 && (timedOut.Load() || candErr != nil)) {
+			idleTimer.Stop()
+			_ = r.Body.Close()
+			cancelCand()
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			markDeadCCPAModel(endpoint, candidate, 2*time.Minute)
+			if candErr != nil {
+				lastCCPAErr = fmt.Errorf("CCPA candidate %q timed out waiting for first token: %v", candidate, candErr)
+			} else {
+				lastCCPAErr = fmt.Errorf("CCPA candidate %q stream error before first token: %v", candidate, scanErr)
+			}
+			log.Printf("[omni-gateway] %v; trying next CCPA tier model", lastCCPAErr)
+			continue
 		}
+
+		idleTimer.Reset(CCPAStreamIdleTimeout)
+		resp = r
+		activeCCPAModel = candidate
+		activeScanner = scanner
+		activeIdleTimer = idleTimer
+		activeCandCtx = candCtx
+		activeCancel = cancelCand
+		activeTimedOut = &timedOut
+		initialText = candInitialText.String()
+		initialThoughts = candInitialThoughts.String()
+		lastUsage = candLastUsage
+		break
+	}
+
+	if resp == nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return lastCCPAErr
+	}
+	defer activeIdleTimer.Stop()
+	defer activeCancel()
+	defer resp.Body.Close()
+
+	if !noThinking && resolved.CanonicalID != "" {
+		workingCCPAModelCache.Store(endpoint+"|"+resolved.CanonicalID, activeCCPAModel)
+	}
+
+	created := time.Now().Unix()
+	respID := fmt.Sprintf("chatcmpl-ccpa-%d", time.Now().UnixNano())
+
+	if req.Stream {
+		var streamedText strings.Builder
+		var streamedThoughts strings.Builder
 
 		w.Header().Set("X-Omni-Gateway-Resolved-Model", activeCCPAModel)
 		w.Header().Set("X-Omni-Gateway-Route", "ccpa-direct")
@@ -710,9 +924,9 @@ func (u *GatewayUpstream) handleDirectCCPA(
 			}
 		}()
 
-		if initialText.Len() > 0 || initialThoughts.Len() > 0 {
-			streamedText.WriteString(initialText.String())
-			streamedThoughts.WriteString(initialThoughts.String())
+		if len(initialText) > 0 || len(initialThoughts) > 0 {
+			streamedText.WriteString(initialText)
+			streamedThoughts.WriteString(initialThoughts)
 			firstChunk := OpenAIChatResponse{
 				ID:      respID,
 				Object:  "chat.completion.chunk",
@@ -723,8 +937,8 @@ func (u *GatewayUpstream) handleDirectCCPA(
 						Index: 0,
 						Delta: &OpenAIOutputMessage{
 							Role:             "assistant",
-							Content:          initialText.String(),
-							ReasoningContent: initialThoughts.String(),
+							Content:          initialText,
+							ReasoningContent: initialThoughts,
 						},
 					},
 				},
@@ -736,8 +950,9 @@ func (u *GatewayUpstream) handleDirectCCPA(
 			}
 		}
 
-		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
+		for activeScanner.Scan() {
+			activeIdleTimer.Reset(CCPAStreamIdleTimeout)
+			line := strings.TrimSpace(activeScanner.Text())
 			if !strings.HasPrefix(line, "data:") {
 				continue
 			}
@@ -777,6 +992,11 @@ func (u *GatewayUpstream) handleDirectCCPA(
 			}
 		}
 
+		streamScanErr := activeScanner.Err()
+		if streamScanErr != nil && ctx.Err() == nil && (activeTimedOut.Load() || activeCandCtx.Err() != nil) {
+			markDeadCCPAModel(endpoint, activeCCPAModel, 2*time.Minute)
+		}
+
 		usage := computeCCPAUsage(req, streamedText.Len(), streamedThoughts.Len(), lastUsage)
 		w.Header().Set("X-Omni-Gateway-Tokens", fmt.Sprintf("%d", usage.TotalTokens))
 		SetAuditResponse(ctx, streamedText.String(), usage.PromptTokens, usage.CompletionTokens)
@@ -803,7 +1023,7 @@ func (u *GatewayUpstream) handleDirectCCPA(
 			flusher.Flush()
 		}
 
-		if streamedText.Len() > 0 && !IsUnsupportedClientBanner(streamedText.String()) {
+		if streamScanErr == nil && streamedText.Len() > 0 && !IsUnsupportedClientBanner(streamedText.String()) {
 			cachedResp := OpenAIChatResponse{
 				ID:      respID,
 				Object:  "chat.completion",
@@ -829,22 +1049,15 @@ func (u *GatewayUpstream) handleDirectCCPA(
 
 	var fullText strings.Builder
 	var fullThoughts strings.Builder
-	var lastUsage *ccpaUsageMetadata
+	fullText.WriteString(initialText)
+	fullThoughts.WriteString(initialThoughts)
 
-	rawBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return err
-	}
-
-	scanner := bufio.NewScanner(bytes.NewReader(rawBytes))
-	scanner.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)
-	foundSSE := false
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
+	for activeScanner.Scan() {
+		activeIdleTimer.Reset(CCPAStreamIdleTimeout)
+		line := strings.TrimSpace(activeScanner.Text())
 		if !strings.HasPrefix(line, "data:") {
 			continue
 		}
-		foundSSE = true
 		dataStr := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 		if dataStr == "" || dataStr == "[DONE]" {
 			continue
@@ -857,25 +1070,18 @@ func (u *GatewayUpstream) handleDirectCCPA(
 		fullThoughts.WriteString(thDelta)
 	}
 
-	if !foundSSE {
-		tDelta, thDelta, uMeta := extractCCPAPartsAndUsage(string(rawBytes))
-		if uMeta != nil && (uMeta.TotalTokenCount > 0 || uMeta.PromptTokenCount > 0 || uMeta.CandidatesTokenCount > 0) {
-			lastUsage = uMeta
+	if err := activeScanner.Err(); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
-		fullText.WriteString(tDelta)
-		fullThoughts.WriteString(thDelta)
+		if activeTimedOut.Load() || activeCandCtx.Err() != nil {
+			markDeadCCPAModel(endpoint, activeCCPAModel, 2*time.Minute)
+		}
+		return err
 	}
 
-	if IsUnsupportedClientBanner(fullText.String()) || IsUnsupportedClientBanner(string(rawBytes)) {
-		banner := fullText.String()
-		if strings.TrimSpace(banner) == "" {
-			banner = string(rawBytes)
-		}
-		return fmt.Errorf("CCPA client version rejected by upstream (update OMNI_AGY_USER_AGENT): %s", TruncateUTF8(banner, 200))
-	}
-
-	if useFastCache && !noThinking && resolved.CanonicalID != "" {
-		workingCCPAModelCache.Store(resolved.CanonicalID, activeCCPAModel)
+	if IsUnsupportedClientBanner(fullText.String()) {
+		return fmt.Errorf("CCPA client version rejected by upstream (update OMNI_AGY_USER_AGENT): %s", TruncateUTF8(fullText.String(), 200))
 	}
 
 	w.Header().Set("X-Omni-Gateway-Resolved-Model", activeCCPAModel)
@@ -913,10 +1119,13 @@ func (u *GatewayUpstream) handleDirectCCPA(
 	return json.NewEncoder(w).Encode(outResp)
 }
 
-func buildCCPACandidatesWithCache(resolved ResolvedModel, useFastCache bool, noThinking bool) []string {
+func buildCCPACandidatesWithCache(endpoint string, resolved ResolvedModel, noThinking bool) []string {
+	if endpoint == "" {
+		endpoint = DefaultCCPAEndpoint
+	}
 	var raw []string
-	if useFastCache && !noThinking && resolved.CanonicalID != "" {
-		if cached, ok := workingCCPAModelCache.Load(resolved.CanonicalID); ok {
+	if !noThinking && resolved.CanonicalID != "" {
+		if cached, ok := workingCCPAModelCache.Load(endpoint + "|" + resolved.CanonicalID); ok {
 			if s, ok := cached.(string); ok && s != "" {
 				raw = append(raw, s)
 			}
@@ -926,32 +1135,31 @@ func buildCCPACandidatesWithCache(resolved ResolvedModel, useFastCache bool, noT
 	switch {
 	case resolved.IsCarbonFamily || strings.HasPrefix(resolved.CCPAModelID, "gemini-4-carbon"):
 		switch resolved.ThinkingLevel {
+		case ThinkingLevelLow:
+			raw = append(raw,
+				"gemini-4-carbon-low",
+				"gemini-3-flash",
+				"gemini-3.5-flash-lite",
+				"claude-sonnet-4-6",
+				"gemini-3.8-flash-tiered",
+			)
 		case ThinkingLevelMedium:
 			raw = append(raw,
 				"gemini-4-carbon-medium",
 				"gemini-4-carbon",
-				"gemini-4-argon",
-				"gemini-3.8-flash-tiered",
+				"claude-sonnet-4-6",
+				"claude-opus-4-6-thinking",
 				"gemini-3-flash",
-			)
-		case ThinkingLevelLow:
-			raw = append(raw,
-				"gemini-4-carbon-low",
-				"gemini-4-carbon",
-				"gemini-4-argon",
 				"gemini-3.8-flash-tiered",
-				"gemini-3-flash",
 			)
 		default:
 			raw = append(raw,
 				"gemini-4-carbon-high",
 				"gemini-4-carbon",
-				"gemini-4-argon-high",
-				"gemini-4-argon",
-				"gemini-3.8-flash-tiered",
 				"claude-opus-4-6-thinking",
 				"claude-sonnet-4-6",
 				"gemini-3-flash",
+				"gemini-3.8-flash-tiered",
 			)
 		}
 
@@ -960,20 +1168,31 @@ func buildCCPACandidatesWithCache(resolved ResolvedModel, useFastCache bool, noT
 			raw = append(raw, resolved.CCPAModelID)
 		}
 		switch resolved.ThinkingLevel {
-		case ThinkingLevelHigh:
-			raw = append(raw, "gemini-4-argon-high")
-		case ThinkingLevelMedium:
-			raw = append(raw, "gemini-4-argon-medium")
 		case ThinkingLevelLow:
-			raw = append(raw, "gemini-4-argon-low")
+			raw = append(raw,
+				"gemini-4-argon-low",
+				"gemini-3-flash",
+				"gemini-3.5-flash-lite",
+				"claude-sonnet-4-6",
+				"gemini-3.8-flash-tiered",
+			)
+		case ThinkingLevelMedium:
+			raw = append(raw,
+				"gemini-4-argon-medium",
+				"claude-sonnet-4-6",
+				"claude-opus-4-6-thinking",
+				"gemini-3-flash",
+				"gemini-3.8-flash-tiered",
+			)
+		default:
+			raw = append(raw,
+				"gemini-4-argon-high",
+				"claude-opus-4-6-thinking",
+				"claude-sonnet-4-6",
+				"gemini-3-flash",
+				"gemini-3.8-flash-tiered",
+			)
 		}
-		raw = append(raw,
-			"gemini-4-argon",
-			"gemini-3.8-flash-tiered",
-			"claude-sonnet-4-6",
-			"claude-opus-4-6-thinking",
-			"gemini-3-flash",
-		)
 
 	case strings.HasPrefix(resolved.CCPAModelID, "gemini-3.1-pro") || strings.Contains(resolved.CanonicalID, "gemini-3.1-pro"):
 		if resolved.CCPAModelID != "" {
@@ -981,25 +1200,30 @@ func buildCCPACandidatesWithCache(resolved ResolvedModel, useFastCache bool, noT
 		}
 		raw = append(raw,
 			"gemini-3.1-pro-preview",
-			"gemini-3.1-pro",
-			"gemini-3.8-flash-tiered",
+			"claude-opus-4-6-thinking",
 			"claude-sonnet-4-6",
 			"gemini-3-flash",
+			"gemini-3.8-flash-tiered",
 		)
 
 	case strings.HasPrefix(resolved.CCPAModelID, "gemini-3.8-flash"):
-		if useFastCache {
-			raw = append(raw, "gemini-3.8-flash-tiered")
-		}
 		if resolved.CCPAModelID != "" {
 			raw = append(raw, resolved.CCPAModelID)
 		}
-		raw = append(raw,
-			"gemini-3.8-flash-tiered",
-			"claude-sonnet-4-6",
-			"gemini-3-flash",
-			"gemini-3.5-flash-lite",
-		)
+		if resolved.ThinkingLevel == ThinkingLevelLow {
+			raw = append(raw,
+				"gemini-3-flash",
+				"gemini-3.5-flash-lite",
+				"claude-sonnet-4-6",
+				"gemini-3.8-flash-tiered",
+			)
+		} else {
+			raw = append(raw,
+				"gemini-3-flash",
+				"claude-sonnet-4-6",
+				"gemini-3.8-flash-tiered",
+			)
+		}
 
 	case strings.Contains(resolved.CanonicalID, "lite") || resolved.CCPAModelID == "gemini-3-flash":
 		if resolved.CCPAModelID != "" {
@@ -1007,7 +1231,8 @@ func buildCCPACandidatesWithCache(resolved ResolvedModel, useFastCache bool, noT
 		}
 		raw = append(raw,
 			"gemini-3-flash",
-			"gemini-3.8-flash-tiered",
+			"gemini-3.5-flash-lite",
+			"gemini-3.1-flash-lite",
 		)
 
 	case strings.HasPrefix(resolved.CCPAModelID, "claude-opus"):
@@ -1017,6 +1242,7 @@ func buildCCPACandidatesWithCache(resolved ResolvedModel, useFastCache bool, noT
 		raw = append(raw,
 			"claude-opus-4-6-thinking",
 			"claude-sonnet-4-6",
+			"gemini-3-flash",
 			"gemini-3.8-flash-tiered",
 		)
 
@@ -1027,6 +1253,7 @@ func buildCCPACandidatesWithCache(resolved ResolvedModel, useFastCache bool, noT
 		raw = append(raw,
 			"claude-sonnet-4-6",
 			"claude-opus-4-6-thinking",
+			"gemini-3-flash",
 			"gemini-3.8-flash-tiered",
 		)
 
@@ -1036,8 +1263,9 @@ func buildCCPACandidatesWithCache(resolved ResolvedModel, useFastCache bool, noT
 		}
 		raw = append(raw,
 			"claude-sonnet-4-6",
-			"gemini-3.8-flash-tiered",
 			"claude-opus-4-6-thinking",
+			"gemini-3-flash",
+			"gemini-3.8-flash-tiered",
 		)
 	}
 
@@ -1051,19 +1279,11 @@ func buildCCPACandidatesWithCache(resolved ResolvedModel, useFastCache bool, noT
 		}
 	}
 
-	if !useFastCache {
-		return deduped
-	}
-
-	// Filter out candidates that recently returned HTTP 404 on live CCPA (TTL: 10 minutes)
 	now := time.Now()
 	alive := make([]string, 0, len(deduped))
 	for _, m := range deduped {
-		if deadVal, isDead := deadCCPAModelCache.Load(m); isDead {
-			if deadAt, ok := deadVal.(time.Time); ok && now.Sub(deadAt) < 10*time.Minute {
-				continue
-			}
-			deadCCPAModelCache.Delete(m)
+		if isDeadCCPAModel(endpoint, m, now) {
+			continue
 		}
 		alive = append(alive, m)
 	}

@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -18,7 +17,7 @@ import (
 	"omni-parallel-mcp/gateway"
 )
 
-const DefaultModel = "antigravity/gemini-4-argon-high"
+const DefaultModel = "antigravity/gemini-4-carbon-high"
 
 // --- JSON-RPC 2.0 & MCP Types ---
 
@@ -65,14 +64,15 @@ type WorkerTask struct {
 }
 
 type TaskResult struct {
-	Index    int
-	FilePath string
-	Status   string
-	Error    string
-	Bytes    int
-	Lines    int
-	Duration time.Duration
-	Err      error
+	Index     int
+	FilePath  string
+	ModelUsed string
+	Status    string
+	Error     string
+	Bytes     int
+	Lines     int
+	Duration  time.Duration
+	Err       error
 }
 
 // --- OpenAI / OmniRoute Chat Completion Types ---
@@ -193,7 +193,7 @@ func main() {
 func toolDefinition() map[string]any {
 	return map[string]any{
 		"name":        "omni_parallel_workers",
-		"description": "Spawn N parallel Goroutines (e.g. 100 workers at 100% concurrency) hitting OmniRoute (/v1/chat/completions) simultaneously (supporting antigravity/gemini-4-carbon-high, antigravity/gemini-4-argon-high, Claude, and Qwen) to generate code and write files directly to disk in a single turn.",
+		"description": "Spawn N parallel Goroutines (e.g. 100 workers at 100% concurrency) hitting OmniRoute (/v1/chat/completions) simultaneously using antigravity/gemini-4-carbon-high by default (falling back to antigravity/gemini-4-argon-high only when Carbon is stuck or rate-limited) to generate code and write files directly to disk in a single turn.",
 		"inputSchema": map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -274,12 +274,7 @@ func handleToolCall(req RPCRequest) RPCResponse {
 	startWall := time.Now()
 	endpoint := resolveEndpoint(args.Endpoint)
 	apiKey := resolveAPIKey(args.APIKey)
-	defaultModel := firstNonEmpty(
-		args.Model,
-		os.Getenv("OMNI_DEFAULT_MODEL"),
-		os.Getenv("OMNIROUTE_MODEL"),
-		DefaultModel,
-	)
+	defaultModel := resolveDefaultModel(args.Model)
 	sysPrompt := firstNonEmpty(args.SystemPrompt,
 		"You are an elite software engineer worker. Output ONLY the raw, complete, compilable source code for the requested file. Do NOT wrap output in markdown fences (no ```go or ```), and do NOT include explanations outside code comments.")
 
@@ -290,7 +285,7 @@ func handleToolCall(req RPCRequest) RPCResponse {
 
 	maxConc := args.MaxConcurrency
 	if maxConc <= 0 {
-		if envConc, err := strconv.Atoi(os.Getenv("OMNIROUTE_MAX_CONCURRENCY")); err == nil && envConc > 0 {
+		if envConc, err := strconv.Atoi(firstNonEmpty(os.Getenv("OMNI_MAX_CONCURRENCY"), os.Getenv("OMNIROUTE_MAX_CONCURRENCY"))); err == nil && envConc > 0 {
 			maxConc = envConc
 		}
 	}
@@ -338,7 +333,7 @@ func handleToolCall(req RPCRequest) RPCResponse {
 	}
 
 	fmt.Fprintf(&sb, "OmniRoute Parallel Dispatcher Summary:\n")
-	fmt.Fprintf(&sb, "- Endpoint: %s (Model: %s)\n", endpoint, defaultModel)
+	fmt.Fprintf(&sb, "- Endpoint: %s (Primary: %s | Fallback: %s)\n", endpoint, defaultModel, primaryFallbackLabel(defaultModel))
 	fmt.Fprintf(&sb, "- Workers Spawned: %d (%d succeeded, %d failed)\n", len(results), okCount, errCount)
 	fmt.Fprintf(&sb, "- Total Output: %d lines (%d bytes)\n", totalLines, totalBytes)
 	fmt.Fprintf(&sb, "- Wall-Clock Time: %s (Cumulative Worker Time: %s | Parallel Speedup: %.1fx)\n\n",
@@ -347,6 +342,8 @@ func handleToolCall(req RPCRequest) RPCResponse {
 	for _, r := range results {
 		if r.Err != nil {
 			fmt.Fprintf(&sb, "[ERR] #%03d %s (%s): %v\n", r.Index+1, r.FilePath, r.Duration.Round(time.Millisecond), r.Err)
+		} else if r.ModelUsed != "" && !strings.EqualFold(r.ModelUsed, defaultModel) {
+			fmt.Fprintf(&sb, "[OK]  #%03d %s (%d lines, %d bytes, %s) [failover -> %s]\n", r.Index+1, r.FilePath, r.Lines, r.Bytes, r.Duration.Round(time.Millisecond), r.ModelUsed)
 		} else {
 			fmt.Fprintf(&sb, "[OK]  #%03d %s (%d lines, %d bytes, %s)\n", r.Index+1, r.FilePath, r.Lines, r.Bytes, r.Duration.Round(time.Millisecond))
 		}
@@ -356,96 +353,8 @@ func handleToolCall(req RPCRequest) RPCResponse {
 }
 
 func callOmniRoute(endpoint, apiKey, model, sysPrompt, userPrompt string) (string, error) {
-	resolved := gateway.ResolveModel(model, nil)
-	candidates := resolved.FallbackChain
-	if len(candidates) == 0 {
-		candidates = []string{model}
-	}
-
-	var lastErr error
-
-	for _, candidateModel := range candidates {
-		reqObj := ChatRequest{
-			Model: candidateModel,
-			Messages: []ChatMessage{
-				{Role: "system", Content: sysPrompt},
-				{Role: "user", Content: userPrompt},
-			},
-			Temperature:     0.1,
-			Stream:          false,
-			ReasoningEffort: resolved.ReasoningEffort,
-		}
-		if resolved.IncludeThoughts || resolved.ThinkingLevel != gateway.ThinkingLevelNone {
-			reqObj.ThinkingConfig = &gateway.ThinkingConfig{
-				IncludeThoughts: resolved.IncludeThoughts,
-				ThinkingLevel:   resolved.ThinkingLevel,
-			}
-		}
-
-		payload, err := json.Marshal(reqObj)
-		if err != nil {
-			return "", err
-		}
-
-		maxRetries := 2
-		for attempt := 0; attempt < maxRetries; attempt++ {
-			if attempt > 0 {
-				time.Sleep(time.Duration(attempt*300) * time.Millisecond)
-			}
-
-			ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
-			httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
-			if err != nil {
-				cancel()
-				return "", err
-			}
-			httpReq.Header.Set("Content-Type", "application/json")
-			if apiKey != "" {
-				httpReq.Header.Set("Authorization", "Bearer "+apiKey)
-			}
-
-			resp, err := httpClient.Do(httpReq)
-			if err != nil {
-				cancel()
-				lastErr = err
-				continue
-			}
-
-			body, readErr := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			cancel()
-
-			if readErr != nil {
-				lastErr = readErr
-				continue
-			}
-
-			if resp.StatusCode == 404 || resp.StatusCode == 400 || resp.StatusCode == 503 {
-				// Model not recognized or unavailable on this upstream; break inner retry loop and try next candidate in FallbackChain
-				lastErr = fmt.Errorf("HTTP %d (%s): %s", resp.StatusCode, candidateModel, truncate(string(body), 200))
-				break
-			}
-			if resp.StatusCode == 429 || resp.StatusCode >= 500 {
-				lastErr = fmt.Errorf("HTTP %d (%s): %s", resp.StatusCode, candidateModel, truncate(string(body), 200))
-				continue
-			}
-			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-				return "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncate(string(body), 300))
-			}
-
-			content, err := parseOmniRouteResponse(body)
-			if err != nil {
-				lastErr = err
-				if strings.Contains(strings.ToLower(err.Error()), "404") || strings.Contains(strings.ToLower(err.Error()), "cooldown") {
-					break
-				}
-				continue
-			}
-			return content, nil
-		}
-	}
-
-	return "", fmt.Errorf("retries exhausted: %w", lastErr)
+	content, _, err := callOmniRouteWithFailover(endpoint, apiKey, model, sysPrompt, userPrompt)
+	return content, err
 }
 
 func parseOmniRouteResponse(body []byte) (string, error) {
@@ -521,7 +430,7 @@ func executeWorkerTask(idx int, baseDir string, t WorkerTask, endpoint, apiKey, 
 	model := firstNonEmpty(t.Model, defaultModel)
 	userPrompt := buildUserPrompt(t.FilePath, t.Prompt, sharedCtx)
 
-	rawOutput, err := callOmniRoute(endpoint, apiKey, model, sysPrompt, userPrompt)
+	rawOutput, usedModel, err := callOmniRouteWithFailover(endpoint, apiKey, model, sysPrompt, userPrompt)
 	if err != nil {
 		return TaskResult{
 			Index:    idx,
@@ -569,12 +478,13 @@ func executeWorkerTask(idx int, baseDir string, t WorkerTask, endpoint, apiKey, 
 
 	lines := strings.Count(cleanCode, "\n") + 1
 	return TaskResult{
-		Index:    idx,
-		FilePath: targetPath,
-		Status:   "ok",
-		Bytes:    len(cleanCode),
-		Lines:    lines,
-		Duration: time.Since(tStart),
+		Index:     idx,
+		FilePath:  targetPath,
+		ModelUsed: usedModel,
+		Status:    "ok",
+		Bytes:     len(cleanCode),
+		Lines:     lines,
+		Duration:  time.Since(tStart),
 	}
 }
 

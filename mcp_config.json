@@ -7,6 +7,8 @@
         "OMNI_GATEWAY_URL": "http://127.0.0.1:8787/v1/chat/completions",
         "OMNI_API_KEY": "${OMNI_API_KEY}",
         "OMNI_DEFAULT_MODEL": "antigravity/gemini-4-carbon-high",
+        "OMNI_FALLBACK_MODELS": "antigravity/gemini-4-argon-high",
+        "OMNI_PRIMARY_TIMEOUT_SEC": "45",
         "OMNI_MAX_CONCURRENCY": "0"
       }
     }

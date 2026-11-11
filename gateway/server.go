@@ -1090,7 +1090,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if strings.TrimSpace(req.Model) == "" {
-		req.Model = "gemini-4-argon-high"
+		req.Model = "antigravity/gemini-4-carbon-high"
 	}
 
 	resolved := s.resolver.Resolve(req.Model, s.cfg.FallbackModels)

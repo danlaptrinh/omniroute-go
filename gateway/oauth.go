@@ -1016,12 +1016,12 @@ func RecordAccountModelResult(emailOrID string, provider ProviderID, modelID str
 			if strings.TrimSpace(modelID) != "" {
 				acc.LastModel = strings.TrimSpace(modelID)
 			}
-			if latencyMs > 0 {
+			if success && latencyMs > 0 {
 				acc.LastLatencyMs = latencyMs
-				if acc.AvgLatencyMs == 0 || (acc.AvgLatencyMs > 5000 && latencyMs < 3500) {
+				if acc.AvgLatencyMs == 0 || (acc.AvgLatencyMs > 6000 && latencyMs < 4000) {
 					acc.AvgLatencyMs = latencyMs
 				} else {
-					acc.AvgLatencyMs = (acc.AvgLatencyMs + latencyMs) / 2
+					acc.AvgLatencyMs = (acc.AvgLatencyMs*3 + latencyMs) / 4
 				}
 			}
 			if success {

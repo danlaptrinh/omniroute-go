@@ -290,6 +290,9 @@ func ExecuteClaudeWithReactiveRefresh(
 
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		AcquireAccountInFlightWithRole(acc.Email, target.CanonicalID)
 		err = u.handleClaudeCodeProvider(ctx, w, req, target, *acc)
 		ReleaseAccountInFlight(acc.Email)
@@ -312,6 +315,10 @@ func ExecuteClaudeWithReactiveRefresh(
 			EnrichLogEntryFromContext(ctx, &entry, req)
 			RecordLogEntry(entry)
 			return nil
+		}
+
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
 
 		lastErr = err
@@ -394,6 +401,9 @@ func ExecuteAntigravityWithReactiveRefresh(
 	}
 
 	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		var agyToken, projectID, accountEmail string
 		if forcedAcc != nil {
 			agyToken = strings.TrimSpace(forcedAcc.AccessToken)
@@ -454,6 +464,10 @@ func ExecuteAntigravityWithReactiveRefresh(
 			EnrichLogEntryFromContext(ctx, &entry, req)
 			RecordLogEntry(entry)
 			return nil
+		}
+
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
 
 		errMsg := err.Error()
