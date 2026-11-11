@@ -1193,12 +1193,13 @@ const gatewayUIHTML = `<!DOCTYPE html>
               <option value="antigravity/claude-opus-4-6-thinking">antigravity/claude-opus-4-6-thinking</option>
             </optgroup>
             <optgroup label="🔗 Combo Đa Mô Hình (Pipeline, Hội Đồng MoA &amp; Night Discount)">
-              <option value="auto/team-coding">auto/team-coding (🔗 Pipeline: Opus 5.5 Kiến trúc ➔ Argon 4 Code ➔ Qwen 3.8 Max)</option>
-              <option value="auto/council-pro">auto/council-pro (🧠 Hội Đồng Song Song: Argon 4 + Opus 5.5 + Qwen 3.8 Max)</option>
-              <option value="auto/night-coding">auto/night-coding (⚡ Night 40-50% Off: Qwen 3.8 Max ➔ DeepSeek V4 Pro ➔ Argon 4)</option>
-              <option value="auto/best-coding">auto/best-coding (🛡️ Failover: Antigravity Argon 4 ➔ Claude Opus ➔ Qwen3 Coder)</option>
-              <option value="auto/reasoning">auto/reasoning (🔗 Suy Luận Đa Tầng: Argon 4 ➔ Claude Opus Thinking ➔ DeepSeek R1)</option>
-              <option value="auto/fast">auto/fast (⚡ Tốc Độ Nhanh: Gemini 3.8 Flash ➔ Qwen 3.8 Flash ➔ Haiku 5.5)</option>
+              <option value="auto/seo-master">auto/seo-master (👑 Quản Lý SEO: Carbon 4 + Argon 4 + Opus 5.5 ➔ Gemini 3.1 Pro / 3.8 Flash)</option>
+              <option value="auto/team-coding">auto/team-coding (🔗 Pipeline: Opus 5.5 Kiến trúc ➔ Carbon 4 / Argon 4 Code ➔ Qwen 3.8 Max)</option>
+              <option value="auto/council-pro">auto/council-pro (🧠 Hội Đồng Song Song: Carbon 4 + Argon 4 + Opus 5.5 + Qwen 3.8 Max)</option>
+              <option value="auto/night-coding">auto/night-coding (⚡ Night 40-50% Off: Qwen 3.8 Max ➔ DeepSeek V4 Pro ➔ Carbon 4 / Argon 4)</option>
+              <option value="auto/best-coding">auto/best-coding (🛡️ Failover: Carbon 4 &amp; Argon 4 ➔ Claude Opus ➔ Qwen3 Coder)</option>
+              <option value="auto/reasoning">auto/reasoning (🔗 Suy Luận Đa Tầng: Carbon 4 ➔ Claude Opus Thinking ➔ DeepSeek R1)</option>
+              <option value="auto/fast">auto/fast (⚡ Tốc Độ Nhanh: Carbon 4 Low ➔ Gemini 3.8 Flash Low ➔ Qwen 3.8 Flash ➔ Haiku 5.5)</option>
             </optgroup>
             <optgroup label="Claude Code (Anthropic CLI &amp; Pro/Max)">
               <option value="claude-code/claude-opus-5-5">claude-code/claude-opus-5-5 (Opus 5.5 Default)</option>
@@ -1753,19 +1754,19 @@ docker compose up -d --build</pre>
       <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));gap:12px;margin-top:16px;">
         <div class="setting-card" style="padding:13px;border-left:3px solid #a855f7;">
           <div style="font-weight:700;font-size:13px;color:#c084fc;">🔗 1. Pipeline Nối Tiếp (Kiến Trúc ➔ Code)</div>
-          <div style="font-size:11.5px;color:var(--muted);margin-top:4px;">Model Bước 1 (vd: <code>Claude Opus 5.5</code>) lập kiến trúc &amp; thuật toán ➔ truyền kết quả sang Model Bước 2 (vd: <code>Gemini 4 Argon</code> / <code>Qwen 3.8 Max</code>) viết code hoàn chỉnh.</div>
+          <div style="font-size:11.5px;color:var(--muted);margin-top:4px;">Model Bước 1 (vd: <code>Claude Opus 5.5</code>) lập kiến trúc &amp; thuật toán ➔ truyền kết quả sang Model Bước 2 (vd: <code>Gemini 4 Carbon / Argon</code> / <code>Qwen 3.8 Max</code>) viết code hoàn chỉnh.</div>
         </div>
         <div class="setting-card" style="padding:13px;border-left:3px solid #38bdf8;">
           <div style="font-weight:700;font-size:13px;color:#38bdf8;">🧠 2. Hội Đồng Song Song (Mixture of Agents)</div>
-          <div style="font-size:11.5px;color:var(--muted);margin-top:4px;">Chạy đồng thời 2-3 model bằng Goroutines (<code>Argon 4</code> + <code>Opus 5.5</code> + <code>Qwen 3.8 Max</code>) ➔ Model Chủ tịch tổng hợp câu trả lời xuất sắc nhất.</div>
+          <div style="font-size:11.5px;color:var(--muted);margin-top:4px;">Chạy đồng thời các model bằng Goroutines (<code>Carbon 4</code> + <code>Argon 4</code> + <code>Opus 5.5</code> + <code>Qwen 3.8 Max</code>) ➔ Model Chủ tịch tổng hợp câu trả lời xuất sắc nhất.</div>
         </div>
         <div class="setting-card" style="padding:13px;border-left:3px solid #10b981;">
           <div style="font-weight:700;font-size:13px;color:#34d399;">⚡ 3. Tối Ưu Ban Đêm (Night 40-50% Off)</div>
-          <div style="font-size:11.5px;color:var(--muted);margin-top:4px;">Ưu tiên các model giảm giá mạnh ban đêm của Alibaba (<code>Qwen 3.8 Max</code> ⚡40%, <code>DeepSeek V4.1 Flash</code> ⚡50%, <code>DeepSeek V4 Pro</code> ⚡50%) + dự phòng Argon 4.</div>
+          <div style="font-size:11.5px;color:var(--muted);margin-top:4px;">Ưu tiên các model giảm giá mạnh ban đêm của Alibaba (<code>Qwen 3.8 Max</code> ⚡40%, <code>DeepSeek V4.1 Flash</code> ⚡50%, <code>DeepSeek V4 Pro</code> ⚡50%) + dự phòng <code>Carbon 4 / Argon 4</code>.</div>
         </div>
         <div class="setting-card" style="padding:13px;border-left:3px solid #f59e0b;">
           <div style="font-weight:700;font-size:13px;color:#fbbf24;">🛡️ 4. Failover Chuyển Tiếp Tức Thì</div>
-          <div style="font-size:11.5px;color:var(--muted);margin-top:4px;">Chạy Model số 1 ưu tiên; ngay khi hết hạn mức hoặc quá tải sẽ tự động chuyển sang Model 2 ➔ Model 3 xuyên suốt 3 nhà cung cấp.</div>
+          <div style="font-size:11.5px;color:var(--muted);margin-top:4px;">Chạy Model số 1 ưu tiên (vd: <code>Carbon 4</code>); ngay khi hết hạn mức hoặc quá tải sẽ tự động chuyển sang Model 2 ➔ Model 3 xuyên suốt 3 nhà cung cấp.</div>
         </div>
       </div>
     </div>
@@ -1896,7 +1897,7 @@ docker compose up -d --build</pre>
         <div class="setting-card" style="padding:13px;border-left:3px solid #f59e0b;background:rgba(245,158,11,0.06);">
           <div style="font-weight:700;font-size:13px;color:#fbbf24;">👑 Tầng 1: Quản Lý Dự Án SEO (Lead Orchestrator)</div>
           <div style="font-size:11.5px;color:#e2e8f0;margin-top:5px;line-height:1.5;">
-            • <strong>Ban ngày (07:00–19:00):</strong> <code>antigravity/gemini-4-argon-high</code> &amp; <code>claude-code/claude-opus-5-5</code><br/>
+            • <strong>Ban ngày (07:00–19:00):</strong> <code>antigravity/gemini-4-carbon-high</code>, <code>antigravity/gemini-4-argon-high</code> &amp; <code>claude-code/claude-opus-5-5</code><br/>
             • <strong>Buổi tối (19:00–07:00):</strong> Tự động ưu tiên <code>alibaba/qwen3.8-max</code> (<span style="color:#34d399;font-weight:700;">⚡ 40% Off Nights</span>) làm Quản Lý Dự Án SEO &amp; chia việc cho đàn Sub-Agents.
           </div>
         </div>
@@ -1935,7 +1936,7 @@ docker compose up -d --build</pre>
     <div class="card" style="border:1px solid #2b354f;">
       <h2>🚀 Kích Hoạt Quản Lý Dự Án SEO &amp; Đàn Sub-Agents Chạy Cùng Lúc (50 Antigravity Pro Swarm)</h2>
       <div style="font-size:12.5px;color:var(--muted);margin-bottom:14px;">
-        <strong>Bước 1:</strong> Model Quản Lý Dự Án SEO (Ban ngày: <code>antigravity/gemini-4-argon-high</code> &amp; <code>claude-code/claude-opus-5-5</code> | Buổi tối: <code>alibaba/qwen3.8-max</code> ⚡40% Off) lập kế hoạch tổng thể.<br/>
+        <strong>Bước 1:</strong> Model Quản Lý Dự Án SEO (Ban ngày: <code>antigravity/gemini-4-carbon-high</code>, <code>antigravity/gemini-4-argon-high</code> &amp; <code>claude-code/claude-opus-5-5</code> | Buổi tối: <code>alibaba/qwen3.8-max</code> ⚡40% Off) lập kế hoạch tổng thể.<br/>
         <strong>Bước 2:</strong> Phóng đồng loạt <strong>N Sub-Agents chạy song song</strong> trên 50 tài khoản Antigravity Pro: <code>antigravity/gemini-3.1-pro-high</code> (<strong>Gemini 3.1 Pro High</strong>) viết bài chuẩn SEO &amp; <code>antigravity/gemini-3.8-flash-high</code> (<strong>Gemini 3.8 Flash High</strong>) viết code kỹ thuật.
       </div>
 
@@ -4384,8 +4385,10 @@ docker compose up -d --build</pre>
         models: [
           {id: 'antigravity/gemini-4-carbon-high', name: 'antigravity/gemini-4-carbon-high (Carbon 4 High Thinking)'},
           {id: 'antigravity/gemini-4-carbon-medium', name: 'antigravity/gemini-4-carbon-medium'},
+          {id: 'antigravity/gemini-4-carbon-low', name: 'antigravity/gemini-4-carbon-low (Carbon 4 Low - Fast)'},
           {id: 'antigravity/gemini-4-argon-high', name: 'antigravity/gemini-4-argon-high (Argon 4 High Thinking)'},
           {id: 'antigravity/gemini-4-argon-medium', name: 'antigravity/gemini-4-argon-medium'},
+          {id: 'antigravity/gemini-4-argon-low', name: 'antigravity/gemini-4-argon-low'},
           {id: 'antigravity/gemini-3.1-pro-high', name: 'antigravity/gemini-3.1-pro-high'},
           {id: 'antigravity/gemini-3.8-flash-high', name: 'antigravity/gemini-3.8-flash-high'},
           {id: 'antigravity/claude-opus-4-6-thinking', name: 'antigravity/claude-opus-4-6-thinking'}
@@ -4458,7 +4461,7 @@ docker compose up -d --build</pre>
       const s2 = document.getElementById('comboStep2Select');
       const s3 = document.getElementById('comboStep3Select');
       if (s1 && !s1.value) s1.value = 'claude-code/claude-opus-5-5';
-      if (s2 && !s2.value) s2.value = 'antigravity/gemini-4-argon-high';
+      if (s2 && !s2.value) s2.value = 'antigravity/gemini-4-carbon-high';
       if (s3 && !s3.value) s3.value = 'alibaba/qwen3.8-max';
     }
 

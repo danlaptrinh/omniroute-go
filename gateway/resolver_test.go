@@ -274,13 +274,14 @@ func TestResolve(t *testing.T) {
 			input:               "auto/best-coding",
 			wantProvider:        ProviderAutoCombo,
 			wantCanonicalID:     "auto/best-coding",
-			wantUpstreamModelID: "gemini-4-argon",
-			wantCCPAModelID:     "gemini-4-argon",
+			wantUpstreamModelID: "gemini-4-carbon",
+			wantCCPAModelID:     "gemini-4-carbon",
 			wantThinkingLevel:   ThinkingLevelHigh,
 			wantReasoningEffort: "high",
 			wantIncludeThoughts: true,
 			wantIsCombo:         true,
 			checkFallbackPrefix: []string{
+				"antigravity/gemini-4-carbon-high",
 				"antigravity/gemini-4-argon-high",
 				"claude-code/claude-opus-4-6-thinking",
 				"alibaba/qwen3-coder-plus",
@@ -291,13 +292,14 @@ func TestResolve(t *testing.T) {
 			input:               "auto/fast",
 			wantProvider:        ProviderAutoCombo,
 			wantCanonicalID:     "auto/fast",
-			wantUpstreamModelID: "gemini-4-argon",
-			wantCCPAModelID:     "gemini-4-argon",
+			wantUpstreamModelID: "gemini-4-carbon",
+			wantCCPAModelID:     "gemini-4-carbon",
 			wantIsCombo:         true,
 			checkFallbackPrefix: []string{
-				"antigravity/gemini-3.8-flash-high",
+				"antigravity/gemini-4-carbon-low",
+				"antigravity/gemini-3.8-flash-low",
 				"alibaba/qwen3-coder-plus",
-				"claude-code/claude-haiku-4-5",
+				"alibaba/qwen3.8-flash",
 			},
 		},
 		{
@@ -305,17 +307,17 @@ func TestResolve(t *testing.T) {
 			input:               "auto/reasoning",
 			wantProvider:        ProviderAutoCombo,
 			wantCanonicalID:     "auto/reasoning",
-			wantUpstreamModelID: "gemini-4-argon",
-			wantCCPAModelID:     "gemini-4-argon",
+			wantUpstreamModelID: "gemini-4-carbon",
+			wantCCPAModelID:     "gemini-4-carbon",
 			wantThinkingLevel:   ThinkingLevelHigh,
 			wantReasoningEffort: "high",
 			wantIncludeThoughts: true,
 			wantIsCombo:         true,
 			checkFallbackPrefix: []string{
-				"antigravity/gemini-4-argon-high",
+				"antigravity/gemini-4-carbon-high",
 				"claude-code/claude-opus-4-6-thinking",
-				"alibaba/qwq-plus",
-				"alibaba/deepseek-r1",
+				"antigravity/gemini-4-argon-high",
+				"alibaba/deepseek-v4-pro-0813",
 			},
 		},
 
@@ -561,6 +563,7 @@ func TestListCombos(t *testing.T) {
 	}
 
 	requiredCombos := []string{
+		"auto/seo-master",
 		"auto/best-coding",
 		"auto/team-coding",
 		"auto/council-pro",
@@ -580,9 +583,30 @@ func TestListCombos(t *testing.T) {
 		}
 	}
 
-	// Verify specific model composition of auto/best-coding
-	bestCoding := comboMap["auto/best-coding"]
-	if len(bestCoding.Models) > 0 && bestCoding.Models[0] != "antigravity/gemini-4-argon-high" {
-		t.Errorf("auto/best-coding primary model = %q, want antigravity/gemini-4-argon-high", bestCoding.Models[0])
+	// Verify every built-in combo in DefaultCombos() includes at least one gemini-4-carbon model
+	defaultComboMap := make(map[string]ComboModel, len(defaultCombos))
+	for _, dc := range defaultCombos {
+		defaultComboMap[dc.ID] = dc
+		hasCarbon := false
+		for _, m := range dc.Models {
+			if strings.Contains(m, "gemini-4-carbon") {
+				hasCarbon = true
+				break
+			}
+		}
+		if !hasCarbon {
+			t.Errorf("DefaultCombos() combo %q does not include any gemini-4-carbon model: %v", dc.ID, dc.Models)
+		}
+	}
+
+	// Verify primary Carbon 4 model placement in best-coding, reasoning, and fast combos
+	if bestCoding := comboMap["auto/best-coding"]; len(bestCoding.Models) == 0 || bestCoding.Models[0] != "antigravity/gemini-4-carbon-high" {
+		t.Errorf("auto/best-coding primary model = %v, want antigravity/gemini-4-carbon-high", bestCoding.Models)
+	}
+	if reasoning := comboMap["auto/reasoning"]; len(reasoning.Models) == 0 || reasoning.Models[0] != "antigravity/gemini-4-carbon-high" {
+		t.Errorf("auto/reasoning primary model = %v, want antigravity/gemini-4-carbon-high", reasoning.Models)
+	}
+	if fastCombo := comboMap["auto/fast"]; len(fastCombo.Models) == 0 || fastCombo.Models[0] != "antigravity/gemini-4-carbon-low" {
+		t.Errorf("auto/fast primary model = %v, want antigravity/gemini-4-carbon-low", fastCombo.Models)
 	}
 }

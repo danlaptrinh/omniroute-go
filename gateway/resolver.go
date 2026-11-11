@@ -66,19 +66,27 @@ func DefaultCombos() []ComboModel {
 		},
 		{
 			ID:          "auto/best-coding",
-			Name:        "Best Coding Failover (Gemini 4 Argon & Carbon ➔ Claude Opus ➔ Qwen3 Coder)",
+			Name:        "Best Coding Failover (Gemini 4 Carbon & Argon High ➔ Claude Opus ➔ Qwen3 Coder)",
 			Mode:        ComboModeFailover,
-			Description: "Ưu tiên Gemini 4 Argon/Carbon High trên Antigravity, tự động failover sang Claude Code Opus và Alibaba Token Plan Qwen3 Coder Plus",
+			Description: "Ưu tiên Gemini 4 Carbon High & Argon High trên Antigravity, tự động failover sang Claude Code Opus và Alibaba Token Plan Qwen3 Coder Plus",
 			Models: []string{
+				"antigravity/gemini-4-carbon-high",
 				"antigravity/gemini-4-argon-high",
 				"claude-code/claude-opus-4-6-thinking",
 				"alibaba/qwen3-coder-plus",
-				"antigravity/gemini-4-carbon-high",
 				"claude-code/claude-opus-5-5",
 				"alibaba/qwen3.8-max",
 				"antigravity/claude-opus-4-6-thinking",
 			},
-			Roles:   []string{"Primary Coder (Argon 4)", "Fallback 1 (Claude Code)", "Fallback 2 (Alibaba)", "Fallback 3 (Carbon 4 High)", "Fallback 4 (Opus 5.5)", "Fallback 5 (Qwen 3.8 Max)", "Fallback 6 (Antigravity Claude)"},
+			Roles: []string{
+				"Primary Coder (Carbon 4 High)",
+				"Co-Primary Coder (Argon 4 High)",
+				"Fallback 1 (Claude Code Opus Thinking)",
+				"Fallback 2 (Alibaba Qwen3 Coder)",
+				"Fallback 3 (Claude Opus 5.5)",
+				"Fallback 4 (Qwen 3.8 Max)",
+				"Fallback 5 (Antigravity Claude)",
+			},
 			BuiltIn: true,
 		},
 		{
@@ -152,40 +160,48 @@ func DefaultCombos() []ComboModel {
 		},
 		{
 			ID:          "auto/fast",
-			Name:        "Fast Coding (Gemini 3.8 Flash ➔ Qwen3 Coder / 3.8 Flash ➔ Claude Haiku 5.5/4.5)",
+			Name:        "Fast Coding (Gemini 4 Carbon Low ➔ Gemini 3.8 Flash Low ➔ Qwen 3.8 Flash ➔ Claude Haiku 5.5/4.5)",
 			Mode:        ComboModeFailover,
-			Description: "Tốc độ phản hồi cực nhanh qua Gemini 3.8 Flash, Qwen 3.8 Flash / Coder Plus và Claude Haiku",
+			Description: "Tốc độ phản hồi cực nhanh qua Gemini 4 Carbon Low, Gemini 3.8 Flash Low, Qwen 3.8 Flash / Coder Plus và Claude Haiku",
 			Models: []string{
-				"antigravity/gemini-3.8-flash-high",
+				"antigravity/gemini-4-carbon-low",
+				"antigravity/gemini-3.8-flash-low",
 				"alibaba/qwen3-coder-plus",
-				"claude-code/claude-haiku-4-5",
 				"alibaba/qwen3.8-flash",
 				"claude-code/claude-haiku-5-5",
+				"claude-code/claude-haiku-4-5",
 			},
-			Roles:   []string{"Tốc độ cao 1", "Tốc độ cao 2", "Tốc độ cao 3", "Night 40% Off", "Haiku 5.5"},
+			Roles: []string{
+				"Tốc độ cao 1 (Carbon 4 Low)",
+				"Tốc độ cao 2 (Gemini 3.8 Flash Low)",
+				"Tốc độ cao 3 (Qwen3 Coder Plus)",
+				"Night 40% Off (Qwen 3.8 Flash)",
+				"Haiku 5.5",
+				"Haiku 4.5",
+			},
 			BuiltIn: true,
 		},
 		{
 			ID:          "auto/reasoning",
-			Name:        "Deep Reasoning Pipeline (Argon 4 & Carbon 4 High ➔ Claude Opus Thinking ➔ DeepSeek V4 Pro / R1)",
+			Name:        "Deep Reasoning Pipeline (Carbon 4 & Argon 4 High ➔ Claude Opus Thinking ➔ DeepSeek V4 Pro / R1)",
 			Mode:        ComboModePipeline,
-			Description: "Chuyên suy luận sâu đa tầng nối tiếp qua 3 nhà cung cấp",
+			Description: "Chuyên suy luận sâu đa tầng nối tiếp qua 3 nhà cung cấp với Gemini 4 Carbon High dẫn đầu",
 			Models: []string{
-				"antigravity/gemini-4-argon-high",
+				"antigravity/gemini-4-carbon-high",
 				"claude-code/claude-opus-4-6-thinking",
+				"antigravity/gemini-4-argon-high",
+				"alibaba/deepseek-v4-pro-0813",
 				"alibaba/qwq-plus",
 				"alibaba/deepseek-r1",
-				"antigravity/gemini-4-carbon-high",
-				"alibaba/deepseek-v4-pro-0813",
 				"claude-code/claude-opus-5-5-thinking",
 			},
 			Roles: []string{
-				"Bước 1: Suy luận Toán & Logic (Argon 4)",
+				"Bước 1: Suy luận Toán & Logic (Carbon 4 High)",
 				"Bước 2: Phản biện & Tổng hợp (Claude Opus Thinking)",
-				"Bước 3: Kiểm chứng (Alibaba QwQ)",
-				"Bước 4: DeepSeek R1",
-				"Bước 5: Suy luận Gemini 4 Carbon High",
-				"Bước 6: DeepSeek V4 Pro (0813)",
+				"Bước 3: Đồng suy luận (Argon 4 High)",
+				"Bước 4: DeepSeek V4 Pro (0813)",
+				"Bước 5: Kiểm chứng (Alibaba QwQ)",
+				"Bước 6: DeepSeek R1",
 				"Bước 7: Claude Opus 5.5 Thinking",
 			},
 			HandoffPrompt: "Hãy kiểm chứng, bổ sung lập luận chặt chẽ và hoàn thiện câu trả lời dựa trên phân tích suy luận của Model Bước 1.",
@@ -295,8 +311,8 @@ func (r *DefaultResolver) Resolve(modelID string, defaultFallbacks []string) Res
 			}
 			res.ComboMode = mode
 			res.ComboHandoff = combo.HandoffPrompt
-			res.UpstreamModelID = "gemini-4-argon"
-			res.CCPAModelID = "gemini-4-argon"
+			res.UpstreamModelID = "gemini-4-carbon"
+			res.CCPAModelID = "gemini-4-carbon"
 			if len(combo.Models) > 0 {
 				res.OmniBaseModelID = combo.Models[0]
 			}
