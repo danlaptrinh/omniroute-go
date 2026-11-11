@@ -824,8 +824,13 @@ func (r *DefaultResolver) Resolve(modelID string, defaultFallbacks []string) Res
 		}
 	}
 
-	primaryCandidates := []string{res.CanonicalID, res.OmniBaseModelID, res.CCPAModelID}
-	primaryCandidates = append(primaryCandidates, extraCandidates...)
+	var primaryCandidates []string
+	if res.ThinkingLevel == ThinkingLevelLow {
+		primaryCandidates = []string{res.CanonicalID, "antigravity/gemini-3.5-flash-lite", "alibaba/qwen3.8-flash"}
+	} else {
+		primaryCandidates = []string{res.CanonicalID, res.OmniBaseModelID, res.CCPAModelID}
+		primaryCandidates = append(primaryCandidates, extraCandidates...)
+	}
 	res.FallbackChain = buildFallbackChain(primaryCandidates, defaultFallbacks)
 
 	return res

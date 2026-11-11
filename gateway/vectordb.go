@@ -845,8 +845,8 @@ func SearchVectorMemories(query string, topK int, minSim float64) []VectorMemory
 		if strings.Contains(strings.ToLower(m.Title+" "+m.PromptText), qLower) {
 			sim = math.Min(1.0, sim+0.25)
 		}
-		if m.Pinned && sim >= minSim*0.75 {
-			sim = math.Min(1.0, sim+0.08)
+		if m.Pinned && sim >= minSim {
+			sim = math.Min(1.0, sim+0.04)
 		}
 		if sim >= minSim {
 			cp := m
@@ -920,7 +920,7 @@ func searchVectorMemoriesNativePG(db *sql.DB, query string, topK int, minSim flo
 			1 - (embedding <=> $1::vector) AS similarity
 		FROM omni_vector_memories
 		WHERE embedding IS NOT NULL
-		ORDER BY pinned DESC, embedding <=> $1::vector ASC
+		ORDER BY embedding <=> $1::vector ASC
 		LIMIT $2
 	`, vecLit, candidateLimit)
 	if err != nil {
@@ -960,8 +960,8 @@ func searchVectorMemoriesNativePG(db *sql.DB, query string, topK int, minSim flo
 		if strings.Contains(strings.ToLower(m.Title+" "+m.PromptText), qLower) {
 			sim = math.Min(1.0, sim+0.25)
 		}
-		if m.Pinned && sim >= minSim*0.75 {
-			sim = math.Min(1.0, sim+0.08)
+		if m.Pinned && sim >= minSim {
+			sim = math.Min(1.0, sim+0.04)
 		}
 		if sim >= minSim {
 			m.Similarity = math.Round(sim*1000) / 1000
@@ -979,8 +979,8 @@ func searchVectorMemoriesNativePG(db *sql.DB, query string, topK int, minSim flo
 		if strings.Contains(strings.ToLower(m.Title+" "+m.PromptText), qLower) {
 			sim = math.Min(1.0, sim+0.25)
 		}
-		if m.Pinned && sim >= minSim*0.75 {
-			sim = math.Min(1.0, sim+0.08)
+		if m.Pinned && sim >= minSim {
+			sim = math.Min(1.0, sim+0.04)
 		}
 		if sim >= minSim {
 			cp := m
@@ -1025,7 +1025,11 @@ func ApplyVectorMemoryRAG(req OpenAIChatRequest) (OpenAIChatRequest, int) {
 		return req, 0
 	}
 
-	matches := SearchVectorMemories(userQuery, cfg.TopK, cfg.MinSimilarity)
+	effectiveMinSim := cfg.MinSimilarity
+	if effectiveMinSim < 0.55 {
+		effectiveMinSim = 0.55
+	}
+	matches := SearchVectorMemories(userQuery, cfg.TopK, effectiveMinSim)
 	if len(matches) == 0 {
 		return req, 0
 	}

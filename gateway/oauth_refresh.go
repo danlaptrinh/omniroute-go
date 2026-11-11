@@ -374,7 +374,26 @@ func ExecuteAntigravityWithReactiveRefresh(
 	var lastErr error
 	var forcedAcc *ConnectedAccount
 
-	for attempt := 0; attempt < 2; attempt++ {
+	maxAttempts := 0
+	for _, a := range LoadSavedAuthConfig().Accounts {
+		if a.Disabled {
+			continue
+		}
+		p := a.Provider
+		if p == "" {
+			p = ProviderAntigravity
+		}
+		if p == ProviderAntigravity {
+			maxAttempts++
+		}
+	}
+	if maxAttempts < 2 {
+		maxAttempts = 2
+	} else if maxAttempts > 6 {
+		maxAttempts = 6
+	}
+
+	for attempt := 0; attempt < maxAttempts; attempt++ {
 		var agyToken, projectID, accountEmail string
 		if forcedAcc != nil {
 			agyToken = strings.TrimSpace(forcedAcc.AccessToken)
@@ -447,8 +466,10 @@ func ExecuteAntigravityWithReactiveRefresh(
 		}
 
 		failCode := http.StatusBadGateway
-		if strings.Contains(errMsg, "HTTP 401") || strings.Contains(errMsg, "HTTP 403") {
+		if strings.Contains(errMsg, "HTTP 401") {
 			failCode = http.StatusUnauthorized
+		} else if strings.Contains(errMsg, "HTTP 403") {
+			failCode = http.StatusForbidden
 		} else if strings.Contains(errMsg, "HTTP 429") {
 			failCode = http.StatusTooManyRequests
 		}
@@ -471,7 +492,7 @@ func ExecuteAntigravityWithReactiveRefresh(
 		RecordLogEntry(errEntry)
 		lastErr = err
 		log.Printf("[omniroute-go] antigravity CCPA attempt %d for %q (%s, acc=%s) failed: %v", attempt+1, target.RequestedID, target.CCPAModelID, accountEmail, err)
-		if failCode != http.StatusUnauthorized && failCode != http.StatusTooManyRequests {
+		if failCode != http.StatusUnauthorized && failCode != http.StatusForbidden && failCode != http.StatusTooManyRequests {
 			break
 		}
 	}

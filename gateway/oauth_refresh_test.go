@@ -403,3 +403,156 @@ func TestVectorDBRejectsAndFiltersUnsupportedBanner(t *testing.T) {
 		t.Fatalf("expected AutoLearnFromPromptLog to skip poisoned banner (before=%d, after=%d)", beforeCount, afterCount)
 	}
 }
+
+func TestAntigravitySkipsTwo403AccountsToReachHealthyThirdOnLowModel(t *testing.T) {
+	tmpDir := t.TempDir()
+	tmpCfg := filepath.Join(tmpDir, "gateway_config.json")
+	t.Setenv("GATEWAY_CONFIG_FILE", tmpCfg)
+	resetAuthCacheForTest(t)
+
+	vectorMu.Lock()
+	origMemories := vectorMemories
+	origLoaded := vectorLoadedLocal
+	vectorMemories = nil
+	vectorLoadedLocal = false
+	vectorMu.Unlock()
+
+	t.Cleanup(func() {
+		vectorMu.Lock()
+		vectorMemories = origMemories
+		vectorLoadedLocal = origLoaded
+		vectorMu.Unlock()
+		resetAuthCacheForTest(t)
+	})
+
+	GetGlobalCache().Clear()
+	defer GetGlobalCache().Clear()
+
+	// Verify resolver puts fast -low/-lite/qwen3.8-flash first and strips bare high-thinking OmniBaseModelID/CCPAModelID
+	resolved := ResolveModel("gemini-3.8-flash-low", nil)
+	if resolved.CanonicalID != "antigravity/gemini-3.8-flash-low" || resolved.ThinkingLevel != ThinkingLevelLow {
+		t.Fatalf("unexpected resolved low model: %+v", resolved)
+	}
+	wantPrefix := []string{"antigravity/gemini-3.8-flash-low", "antigravity/gemini-3.5-flash-lite", "alibaba/qwen3.8-flash"}
+	if len(resolved.FallbackChain) < len(wantPrefix) {
+		t.Fatalf("FallbackChain too short: %v", resolved.FallbackChain)
+	}
+	for i, want := range wantPrefix {
+		if resolved.FallbackChain[i] != want {
+			t.Fatalf("FallbackChain[%d] = %q, want %q (full=%v)", i, resolved.FallbackChain[i], want, resolved.FallbackChain)
+		}
+	}
+	for _, fb := range resolved.FallbackChain {
+		if fb == "antigravity/gemini-3.8-flash" || fb == "gemini-3.8-flash" {
+			t.Fatalf("expected -low FallbackChain not to include bare high-thinking flash base, got %v", resolved.FallbackChain)
+		}
+	}
+
+	// Verify ApplyVectorMemoryRAG does NOT inject seeded BuCloud CI/CD pinned memory into unrelated prompt
+	unrelatedReq := OpenAIChatRequest{
+		Model: "gemini-3.8-flash-low",
+		Messages: []OpenAIChatMessage{
+			{Role: "user", Content: json.RawMessage(`"Trả lời ngắn gọn 1 từ: OK"`)},
+		},
+	}
+	ragOut, ragHits := ApplyVectorMemoryRAG(unrelatedReq)
+	if ragHits != 0 || len(ragOut.Messages) != 1 {
+		t.Fatalf("expected 0 RAG hits on unrelated short prompt, got hits=%d messages=%d", ragHits, len(ragOut.Messages))
+	}
+
+	// Configure 3 enabled ProviderAntigravity accounts: first 2 return 403 VALIDATION_REQUIRED, 3rd returns 200 OK
+	accounts := []ConnectedAccount{
+		{
+			Provider:    ProviderAntigravity,
+			Email:       "locked1@gmail.com",
+			AccessToken: "ya29.locked-403-one",
+			ProjectID:   "proj-1",
+			Priority:    100,
+			ExpiresAt:   time.Now().Unix() + 3600,
+		},
+		{
+			Provider:    ProviderAntigravity,
+			Email:       "locked2@gmail.com",
+			AccessToken: "ya29.locked-403-two",
+			ProjectID:   "proj-2",
+			Priority:    90,
+			ExpiresAt:   time.Now().Unix() + 3600,
+		},
+		{
+			Provider:    ProviderAntigravity,
+			Email:       "healthy3@gmail.com",
+			AccessToken: "ya29.healthy-three",
+			ProjectID:   "proj-3",
+			Priority:    80,
+			ExpiresAt:   time.Now().Unix() + 3600,
+		},
+	}
+	for _, a := range accounts {
+		if _, err := UpsertConnectedAccount(a); err != nil {
+			t.Fatalf("UpsertConnectedAccount(%s) failed: %v", a.Email, err)
+		}
+	}
+	if _, err := SetRoutingStrategy(StrategyFillFirst); err != nil {
+		t.Fatalf("SetRoutingStrategy failed: %v", err)
+	}
+
+	var ccpaCalls atomic.Int32
+	mockCCPA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ccpaCalls.Add(1)
+		var payload ccpaRequestPayload
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("failed to decode CCPA payload: %v", err)
+		}
+		if payload.Request.GenerationConfig.ThinkingConfig == nil ||
+			payload.Request.GenerationConfig.ThinkingConfig.ThinkingBudget == nil ||
+			*payload.Request.GenerationConfig.ThinkingConfig.ThinkingBudget != 0 {
+			t.Errorf("expected low-model thinkingBudget=0 (no escalation to high), got %+v", payload.Request.GenerationConfig.ThinkingConfig)
+		}
+
+		authHdr := r.Header.Get("Authorization")
+		if authHdr == "Bearer ya29.locked-403-one" || authHdr == "Bearer ya29.locked-403-two" {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"error":{"code":403,"status":"PERMISSION_DENIED","message":"Verify your account to continue. VALIDATION_REQUIRED"}}`))
+			return
+		}
+		if authHdr != "Bearer ya29.healthy-three" {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = fmt.Fprintf(w, `{"error":{"code":401,"message":"unexpected auth %s"}}`, authHdr)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"OK\"}]}}]}}\n\ndata: [DONE]\n\n"))
+	}))
+	defer mockCCPA.Close()
+
+	upstream := NewUpstream(GatewayConfig{CCPAEndpoint: mockCCPA.URL})
+	rec := httptest.NewRecorder()
+	if err := upstream.HandleChatCompletion(context.Background(), rec, unrelatedReq, resolved, ""); err != nil {
+		t.Fatalf("HandleChatCompletion failed: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected HTTP 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if gotAcc := rec.Header().Get("X-Omni-Gateway-Account"); gotAcc != "healthy3@gmail.com" {
+		t.Fatalf("expected winning account healthy3@gmail.com, got %q", gotAcc)
+	}
+	if gotCalls := ccpaCalls.Load(); gotCalls != 3 {
+		t.Fatalf("expected 3 CCPA calls (2 fast 403 breaks + 1 healthy 200 on same -low model), got %d", gotCalls)
+	}
+
+	minCooldown := time.Now().Unix() + 3600
+	saved := LoadSavedAuthConfig()
+	for _, a := range saved.Accounts {
+		switch a.Email {
+		case "locked1@gmail.com", "locked2@gmail.com":
+			if a.CooldownUntil < minCooldown {
+				t.Fatalf("expected 2h cooldown (>= %d) on 403 account %s, got %d", minCooldown, a.Email, a.CooldownUntil)
+			}
+		case "healthy3@gmail.com":
+			if a.CooldownUntil != 0 || a.SuccessCount < 1 {
+				t.Fatalf("expected healthy3@gmail.com active with SuccessCount>=1, got %+v", a)
+			}
+		}
+	}
+}

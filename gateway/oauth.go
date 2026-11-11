@@ -1030,7 +1030,7 @@ func RecordAccountModelResult(emailOrID string, provider ProviderID, modelID str
 				acc.CooldownUntil = 0
 			} else {
 				acc.FailureCount++
-				if statusCode == http.StatusTooManyRequests || statusCode == http.StatusServiceUnavailable || statusCode == http.StatusUnauthorized || statusCode == 429 || statusCode == 503 || statusCode == 401 {
+				if statusCode == http.StatusTooManyRequests || statusCode == http.StatusServiceUnavailable || statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden || statusCode == 429 || statusCode == 503 || statusCode == 401 || statusCode == 403 {
 					mult := acc.FailureCount
 					if mult > 6 {
 						mult = 6
@@ -1041,6 +1041,8 @@ func RecordAccountModelResult(emailOrID string, provider ProviderID, modelID str
 					backoffSec := int64(10 * (1 << (mult - 1)))
 					if statusCode == http.StatusUnauthorized || statusCode == 401 {
 						backoffSec = 300 // 5m cooldown for unauthorized/expired token
+					} else if statusCode == http.StatusForbidden || statusCode == 403 {
+						backoffSec = 7200 // 2h cooldown for forbidden / VALIDATION_REQUIRED
 					}
 					acc.CooldownUntil = time.Now().Unix() + backoffSec
 				}
