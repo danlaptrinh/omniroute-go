@@ -809,3 +809,244 @@ func TestGatewayHonestTierQuotaBucketsAndUITruth(t *testing.T) {
 		}
 	}
 }
+
+func TestPeakGatesModeEndToEndAllFiveGatesPass(t *testing.T) {
+	t.Setenv("GO_WANT_HELPER_MCP_PROCESS", "1")
+
+	var (
+		mu           sync.Mutex
+		cacheEntries = make(map[string]string)
+		recordedLogs []map[string]any
+		ultraSeq     int
+		proSeq       int
+	)
+
+	ultraAccounts := []string{
+		"ntky152022@gmail.com",
+		"thuctapsinh316@gmail.com",
+		"ngocthao4599s@gmail.com",
+		"hoantuan2271@gmail.com",
+	}
+	proAccounts := []string{
+		"advietnam789@gmail.com",
+		"pro2@gmail.com",
+		"pro3@gmail.com",
+		"pro4@gmail.com",
+		"pro5@gmail.com",
+	}
+
+	var quotaItems []quotaAccountItem
+	for i, email := range ultraAccounts {
+		quotaItems = append(quotaItems, quotaAccountItem{
+			ID: fmt.Sprintf("ultra-%d", i+1), Provider: "antigravity", Email: email, Tier: "Ultra", Enabled: true, Status: "healthy",
+		})
+	}
+	for i, email := range proAccounts {
+		quotaItems = append(quotaItems, quotaAccountItem{
+			ID: fmt.Sprintf("pro-%d", i+1), Provider: "antigravity", Email: email, Tier: "Pro", Enabled: true, Status: "healthy",
+		})
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer sk-peak-admin-key-7777" {
+			http.Error(w, `{"error":{"message":"unauthorized"}}`, http.StatusUnauthorized)
+			return
+		}
+
+		switch r.URL.Path {
+		case "/v1/quota":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"accounts": quotaItems})
+
+		case "/v1/chat/completions":
+			bodyBytes, _ := io.ReadAll(r.Body)
+			var chatReq struct {
+				Model       string   `json:"model"`
+				Temperature *float64 `json:"temperature"`
+				Stream      bool     `json:"stream"`
+				Messages    []struct {
+					Content string `json:"content"`
+				} `json:"messages"`
+			}
+			_ = json.Unmarshal(bodyBytes, &chatReq)
+			rawPrompt := ""
+			if len(chatReq.Messages) > 0 {
+				rawPrompt = chatReq.Messages[0].Content
+			}
+			normCacheKey := strings.ToLower(strings.TrimSpace(chatReq.Model)) + "|" + strings.TrimSpace(rawPrompt)
+			isDeterministic := chatReq.Temperature != nil && *chatReq.Temperature <= 0.3
+
+			mu.Lock()
+			cachedText, isCacheHit := cacheEntries[normCacheKey]
+			if !isDeterministic {
+				isCacheHit = false
+			}
+			if isDeterministic && !isCacheHit {
+				cachedText = "OK"
+				cacheEntries[normCacheKey] = cachedText
+			}
+
+			var chosenAcc, resolvedMod, upstreamVer string
+			if isCacheHit {
+				chosenAcc = "in-memory-cache"
+				resolvedMod = "gemini-3-flash"
+				upstreamVer = "cache-hit"
+			} else if strings.Contains(chatReq.Model, "carbon-high") || strings.Contains(chatReq.Model, "parallel-flagship") {
+				chosenAcc = ultraAccounts[ultraSeq%len(ultraAccounts)]
+				ultraSeq++
+				resolvedMod = "gemini-3.8-flash-high"
+				upstreamVer = "gemini-3.8-flash"
+			} else {
+				chosenAcc = proAccounts[proSeq%len(proAccounts)]
+				proSeq++
+				resolvedMod = "gemini-3-flash"
+				upstreamVer = "gemini-3-flash"
+			}
+
+			cacheHdr := "MISS"
+			if isCacheHit {
+				cacheHdr = "HIT"
+			}
+
+			recordedLogs = append(recordedLogs, map[string]any{
+				"id":              fmt.Sprintf("pglog-%d", len(recordedLogs)+1),
+				"timestamp":       time.Now().UTC().Format(time.RFC3339),
+				"provider":        "antigravity",
+				"account_email":   chosenAcc,
+				"requested_model": chatReq.Model,
+				"resolved_model":  resolvedMod,
+				"upstream_model":  upstreamVer,
+				"prompt_text":     rawPrompt,
+				"status_code":     http.StatusOK,
+				"duration_ms":     int64(1),
+				"total_tokens":    16,
+			})
+			mu.Unlock()
+
+			w.Header().Set("X-Omni-Gateway-Account", chosenAcc)
+			w.Header().Set("X-Omni-Gateway-Requested-Model", chatReq.Model)
+			w.Header().Set("X-Omni-Gateway-Resolved-Model", resolvedMod)
+			w.Header().Set("X-Omni-Gateway-Upstream-Model-Version", upstreamVer)
+			w.Header().Set("X-Omni-Gateway-Cache", cacheHdr)
+
+			replyText := cachedText
+			if replyText == "" {
+				replyText = "package benchgen\n\nfunc Ready() int { return 1 }\n"
+			}
+
+			if chatReq.Stream {
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.Header().Set("Cache-Control", "no-cache")
+				_, _ = fmt.Fprintf(w, "data: {\"model\":%q,\"choices\":[{\"delta\":{\"content\":%q}}]}\n\ndata: [DONE]\n\n", upstreamVer, replyText)
+				if fl, ok := w.(http.Flusher); ok {
+					fl.Flush()
+				}
+				return
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"model": upstreamVer,
+				"choices": []map[string]any{
+					{"message": map[string]string{"role": "assistant", "content": replyText}},
+				},
+			})
+
+		case "/ui/api/logs":
+			mu.Lock()
+			out := make([]map[string]any, 0, len(recordedLogs))
+			for i := len(recordedLogs) - 1; i >= 0; i-- {
+				out = append(out, recordedLogs[i])
+			}
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"logs": out})
+
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	exePath, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable failed: %v", err)
+	}
+
+	cfg, err := parseBenchFlags([]string{
+		"-url", srv.URL,
+		"-key", "sk-peak-admin-key-7777",
+		"-mode", "peak-gates",
+		"-mcp-bin", exePath,
+		"-mcp-args", "-test.run=^TestHelperMCPProcess$",
+		"-correlate-logs=true",
+	})
+	if err != nil {
+		t.Fatalf("parseBenchFlags(-mode=peak-gates) failed: %v", err)
+	}
+
+	var outBuf bytes.Buffer
+	report, runErr := executeBenchSuite(context.Background(), cfg, &outBuf)
+	if runErr != nil {
+		t.Fatalf("executeBenchSuite(-mode=peak-gates) failed: %v\nOutput:\n%s", runErr, outBuf.String())
+	}
+	if report.PeakGates == nil || !report.PeakGates.AllPassed || report.PeakGates.PassedCount != 5 {
+		t.Fatalf("expected 5/5 Peak Gates PASSED, got %+v\nOutput:\n%s", report.PeakGates, outBuf.String())
+	}
+	if !strings.Contains(outBuf.String(), "WAVE-3 PEAK GATES SCORECARD: 5/5 PASSED") {
+		t.Errorf("expected scorecard banner in CLI output, got:\n%s", outBuf.String())
+	}
+}
+
+func TestPeakGatesScorecardFailureDetectors(t *testing.T) {
+	// Gate 1: detect Pro -n leak on carbon-high and slow auto/fast
+	g1Fail := evaluatePeakGate1(
+		summarizeConcurrencyStep(8, 12000, 0.6, []APIRequestSample{
+			{HTTPStatus: 200, Account: "pro@gmail.com", UpstreamModelVersion: "gemini-3.8-flash-n", TotalWallMs: 11500},
+		}),
+		summarizeConcurrencyStep(9, 4000, 2.2, []APIRequestSample{
+			{HTTPStatus: 200, Account: "ultra@gmail.com", UpstreamModelVersion: "gemini-3.8-flash-n", TotalWallMs: 3200},
+		}),
+		map[string]string{"pro@gmail.com": "Pro", "ultra@gmail.com": "Ultra"},
+		true,
+	)
+	if g1Fail.Passed || len(g1Fail.Failures) == 0 {
+		t.Errorf("expected Gate 1 failure on Pro '-n' hardware & slow p50, got %+v", g1Fail)
+	}
+
+	// Gate 2: detect missing [DONE], >30ms WAN cache HIT, missing cross-mode HIT, and low burst RPS
+	g2Fail := evaluatePeakGate2(
+		APIRequestSample{HTTPStatus: 200, CacheHeader: "MISS", ResponseContent: "OK", TotalWallMs: 500},
+		APIRequestSample{HTTPStatus: 200, CacheHeader: "HIT", ResponseContent: "OK", SawStreamDone: false, TotalWallMs: 45},
+		APIRequestSample{HTTPStatus: 200, CacheHeader: "MISS", ResponseContent: "OK", TotalWallMs: 500},
+		summarizeConcurrencyStep(36, 500, 72.0, []APIRequestSample{{HTTPStatus: 200, CacheHeader: "HIT"}}),
+	)
+	if g2Fail.Passed || len(g2Fail.Failures) < 3 {
+		t.Errorf("expected Gate 2 multiple failures, got %+v", g2Fail)
+	}
+
+	// Gate 3: detect HTTP 429 leakage under N=63
+	g3Fail := evaluatePeakGate3(
+		summarizeConcurrencyStep(63, 2000, 31.5, []APIRequestSample{{HTTPStatus: 429, Error: "rate limit"}}),
+		summarizeConcurrencyStep(63, 1500, 42.0, make([]APIRequestSample, 63)),
+	)
+	if g3Fail.Passed || len(g3Fail.Failures) == 0 {
+		t.Errorf("expected Gate 3 failure on 429 leakage, got %+v", g3Fail)
+	}
+
+	// Gate 4: graceful SKIP on non-admin 401 vs FAIL on excessive overhead
+	g4Skip := evaluatePeakGate4(true, "unauthorized_non_admin_key (HTTP 401)", "", 0, MetricSummary{}, MetricSummary{})
+	if !g4Skip.Passed || g4Skip.Status != "SKIP" {
+		t.Errorf("expected Gate 4 SKIP on non-admin 401, got %+v", g4Skip)
+	}
+	g4Fail := evaluatePeakGate4(true, "", "/v1/logs", 10, MetricSummary{P50: 350.0, P95: 500.0}, MetricSummary{P50: 350.0})
+	if g4Fail.Passed {
+		t.Errorf("expected Gate 4 FAIL on 350ms steady overhead, got %+v", g4Fail)
+	}
+
+	// Gate 5: detect empty upstream_model in Postgres logs and MCP error
+	g5Fail := evaluatePeakGate5(true, 20, 0, nil, MCPBatchResult{RequestedTasks: 9, VerifiedFiles: 5, IsError: true, Error: "partial"})
+	if g5Fail.Passed || len(g5Fail.Failures) < 2 {
+		t.Errorf("expected Gate 5 failure on empty upstream_model + partial MCP batch, got %+v", g5Fail)
+	}
+}
