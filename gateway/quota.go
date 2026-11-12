@@ -1189,10 +1189,11 @@ func inspectAntigravityAccount(ctx context.Context, acc *ConnectedAccount, detai
 		}
 	}
 
-	client := &http.Client{
-		Transport: SharedHTTPTransport,
-		Timeout:   4 * time.Second,
+	scopeKey := strings.TrimSpace(acc.Email)
+	if scopeKey == "" {
+		scopeKey = strings.TrimSpace(acc.ID)
 	}
+	client := AccountHTTPClient(scopeKey, acc.ProxyURL, 4*time.Second)
 
 	// 1. Call loadCodeAssist to detect tier and project
 	callCodeAssist := func() (*http.Response, error) {

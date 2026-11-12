@@ -25,7 +25,8 @@ const (
 )
 
 type deadCCPAEntry struct {
-	expiresAt time.Time
+	expiresAt  time.Time
+	statusCode int
 }
 
 // SharedHTTPTransport and SharedHTTPClient reuse warm HTTP/2 connections across all requests,
@@ -58,6 +59,7 @@ var (
 	CCPAFirstChunkTimeout   = 20 * time.Second
 	CCPAStreamIdleTimeout   = 25 * time.Second
 	CCPACandidateMaxTimeout = 10 * time.Minute
+	CCPAHedgeDelayFast      = 150 * time.Millisecond
 	CCPAHedgeDelayPro       = 4500 * time.Millisecond
 	CCPAHedgeDelayUltra     = 7000 * time.Millisecond
 
@@ -170,6 +172,10 @@ func isDeadCCPAModel(endpoint, candidate string, now time.Time) bool {
 }
 
 func markAccountDeadCCPAModel(endpoint, accScope, candidate string, ttl time.Duration) {
+	markAccountDeadCCPAModelWithStatus(endpoint, accScope, candidate, ttl, 0)
+}
+
+func markAccountDeadCCPAModelWithStatus(endpoint, accScope, candidate string, ttl time.Duration, statusCode int) {
 	candidate = strings.TrimSpace(candidate)
 	if candidate == "" {
 		return
@@ -179,7 +185,8 @@ func markAccountDeadCCPAModel(endpoint, accScope, candidate string, ttl time.Dur
 	}
 	scope := normalizeAccScope(accScope)
 	deadCCPAModelCache.Store(endpoint+"|acc:"+scope+"|"+candidate, deadCCPAEntry{
-		expiresAt: time.Now().Add(ttl),
+		expiresAt:  time.Now().Add(ttl),
+		statusCode: statusCode,
 	})
 	prefix := endpoint + "|acc:" + scope + "|"
 	workingCCPAModelCache.Range(func(k, v any) bool {
@@ -192,7 +199,7 @@ func markAccountDeadCCPAModel(endpoint, accScope, candidate string, ttl time.Dur
 	})
 }
 
-func isAccountDeadCCPAModel(endpoint, accScope, candidate string, now time.Time) bool {
+func lookupAccountDeadCCPAEntry(endpoint, accScope, candidate string, now time.Time) (deadCCPAEntry, bool) {
 	if endpoint == "" {
 		endpoint = DefaultCCPAEndpoint
 	}
@@ -200,17 +207,69 @@ func isAccountDeadCCPAModel(endpoint, accScope, candidate string, now time.Time)
 	key := endpoint + "|acc:" + scope + "|" + strings.TrimSpace(candidate)
 	val, ok := deadCCPAModelCache.Load(key)
 	if !ok {
-		return false
+		return deadCCPAEntry{}, false
 	}
 	entry, ok := val.(deadCCPAEntry)
 	if !ok {
 		deadCCPAModelCache.Delete(key)
-		return false
+		return deadCCPAEntry{}, false
 	}
 	if now.Before(entry.expiresAt) {
-		return true
+		return entry, true
 	}
 	deadCCPAModelCache.Delete(key)
+	return deadCCPAEntry{}, false
+}
+
+func isAccountDeadCCPAModel(endpoint, accScope, candidate string, now time.Time) bool {
+	_, ok := lookupAccountDeadCCPAEntry(endpoint, accScope, candidate, now)
+	return ok
+}
+
+func isAccountRateLimitedCCPAModel(endpoint, accScope, candidate string, now time.Time) bool {
+	entry, ok := lookupAccountDeadCCPAEntry(endpoint, accScope, candidate, now)
+	if !ok {
+		return false
+	}
+	return entry.statusCode == 0 || entry.statusCode == http.StatusTooManyRequests
+}
+
+func isAccountOverloadedForHint(endpoint, accScope, modelHint string, now time.Time) bool {
+	normModel := stripKnownModelPrefixes(modelHint)
+	if normModel == "" {
+		return false
+	}
+	probes := []string{normModel}
+	switch {
+	case strings.Contains(normModel, "carbon-high") || strings.Contains(normModel, "argon-high") || normModel == "gemini-4-carbon" || normModel == "gemini-4-argon":
+		probes = append(probes, "gemini-4-carbon-high", "gemini-4-argon-high", "claude-opus-4-6-thinking")
+	case strings.Contains(normModel, "carbon-medium") || strings.Contains(normModel, "argon-medium"):
+		probes = append(probes, "gemini-4-carbon-medium", "gemini-4-argon-medium", "claude-sonnet-4-6")
+	case normModel == "auto/fast":
+		probes = append(probes, "gemini-3-flash")
+	}
+	scope := normalizeAccScope(accScope)
+	for _, p := range probes {
+		if entry, ok := lookupAccountDeadCCPAEntry(endpoint, scope, p, now); ok && entry.statusCode >= 500 {
+			return true
+		}
+		suffix := "|acc:" + scope + "|" + strings.TrimSpace(p)
+		overloaded := false
+		deadCCPAModelCache.Range(func(k, v any) bool {
+			ks, okK := k.(string)
+			if !okK || !strings.HasSuffix(ks, suffix) {
+				return true
+			}
+			if e, okE := v.(deadCCPAEntry); okE && now.Before(e.expiresAt) && e.statusCode >= 500 {
+				overloaded = true
+				return false
+			}
+			return true
+		})
+		if overloaded {
+			return true
+		}
+	}
 	return false
 }
 
@@ -403,6 +462,15 @@ func (u *GatewayUpstream) ccpaHTTPClientForScope(accScope, oauthToken string) *h
 	}
 	cleanTok := strings.TrimSpace(oauthToken)
 	scope := normalizeAccScope(accScope)
+	if scope != "" && scope != "anon" {
+		if pool := getOrCreateAccountIsolatedPool(scope, ""); pool != nil {
+			if currentCCPAScopeInFlight(accScope, cleanTok) > 1 {
+				idx := int(pool.shardCounter.Add(1) % accountTransportShards)
+				return pool.ccpaClients[idx]
+			}
+			return pool.ccpaClients[0]
+		}
+	}
 	if scope == "anon" && cleanTok != "" {
 		scope = accountCacheScope(nil, cleanTok)
 	}
@@ -999,16 +1067,16 @@ func primaryFlagshipTierForModel(endpoint string, isConnected bool, resolved Res
 		switch {
 		case resolved.IsCarbonFamily || strings.HasPrefix(ccpaID, "gemini-4-carbon"):
 			if resolved.ThinkingLevel == ThinkingLevelMedium {
-				return []string{"gemini-3.8-flash-medium", "gemini-3.8-flash-high"}
+				return []string{"gemini-4-carbon-medium", "gemini-4-carbon", "claude-sonnet-4-6", "claude-opus-4-6-thinking"}
 			}
-			return []string{"gemini-3.8-flash-high"}
+			return []string{"gemini-4-carbon-high", "gemini-4-carbon", "claude-opus-4-6-thinking", "claude-sonnet-4-6"}
 		case resolved.IsArgonFamily || strings.HasPrefix(ccpaID, "gemini-4-argon"):
 			if resolved.ThinkingLevel == ThinkingLevelMedium {
-				return []string{"claude-sonnet-4-6", "claude-opus-4-6-thinking"}
+				return []string{"gemini-4-argon-medium", "gemini-4-argon", "claude-sonnet-4-6", "claude-opus-4-6-thinking"}
 			}
-			return []string{"claude-opus-4-6-thinking"}
+			return []string{"gemini-4-argon-high", "gemini-4-argon", "claude-opus-4-6-thinking", "claude-sonnet-4-6"}
 		case strings.HasPrefix(ccpaID, "gemini-3.1-pro") || strings.Contains(canon, "gemini-3.1-pro"):
-			return []string{"gemini-3.8-flash-high", "gemini-3.8-flash-tiered"}
+			return []string{"claude-opus-4-6-thinking", "claude-sonnet-4-6", "gemini-3.8-flash-high"}
 		case strings.HasPrefix(ccpaID, "gemini-3.8-flash") || strings.Contains(canon, "gemini-3.8-flash"):
 			if strings.Contains(canon, "tiered") {
 				return []string{"gemini-3.8-flash-tiered", "gemini-3.8-flash-high"}
@@ -1169,9 +1237,11 @@ func (u *GatewayUpstream) handleDirectCCPA(
 	}
 
 	var opened *ccpaOpenedAttempt
+	isDeepHedge := IsDeepReasoningGeminiModel(hedgeModelID)
+	isFastHedge := !isDeepHedge && IsFastSpeedGeminiModel(hedgeModelID) && TotalAntigravityInFlight() < 22
 	shouldHedgeTTFT := isDefaultProdEndpoint &&
 		!IsPinnedAccount(ctx) &&
-		IsDeepReasoningGeminiModel(hedgeModelID) &&
+		(isDeepHedge || isFastHedge) &&
 		primaryEmail != ""
 
 	if !shouldHedgeTTFT {
@@ -1185,17 +1255,22 @@ func (u *GatewayUpstream) handleDirectCCPA(
 		}
 		defer opened.closeAndRelease()
 	} else {
-		primaryTier := "Pro"
-		if acc, ok := lookupConnectedAntigravityAccountFast(primaryEmail); ok {
-			if t := strings.TrimSpace(acc.Tier); t != "" {
-				primaryTier = t
-			} else {
-				primaryTier = LookupCachedAccountTier(acc, nil)
+		var hedgeDelay time.Duration
+		if isFastHedge {
+			hedgeDelay = CCPAHedgeDelayFast
+		} else {
+			primaryTier := "Pro"
+			if acc, ok := lookupConnectedAntigravityAccountFast(primaryEmail); ok {
+				if t := strings.TrimSpace(acc.Tier); t != "" {
+					primaryTier = t
+				} else {
+					primaryTier = LookupCachedAccountTier(acc, nil)
+				}
 			}
-		}
-		hedgeDelay := CCPAHedgeDelayPro
-		if strings.EqualFold(strings.TrimSpace(primaryTier), "Ultra") {
-			hedgeDelay = CCPAHedgeDelayUltra
+			hedgeDelay = CCPAHedgeDelayPro
+			if strings.EqualFold(strings.TrimSpace(primaryTier), "Ultra") {
+				hedgeDelay = CCPAHedgeDelayUltra
+			}
 		}
 
 		primCtx, cancelPrim := context.WithCancel(ctx)
@@ -1418,7 +1493,9 @@ func (u *GatewayUpstream) handleDirectCCPA(
 	lastFinishReason := opened.lastFinishReason
 	cacheReq := cacheKeyRequestFromContext(ctx, req)
 
-	if !noThinking && resolved.ThinkingLevel != ThinkingLevelLow && resolved.CanonicalID != "" {
+	isAutoFastReq := strings.EqualFold(strings.TrimSpace(resolved.RequestedID), "auto/fast") ||
+		strings.EqualFold(strings.TrimSpace(resolved.CanonicalID), "auto/fast")
+	if !noThinking && !(isDefaultProdEndpoint && (isAutoFastReq || resolved.CCPAModelID == "gemini-3.8-flash-low")) && resolved.CanonicalID != "" {
 		workingCCPAModelCache.Store(endpoint+"|acc:"+normalizeAccScope(accScope)+"|"+resolved.CanonicalID, activeCCPAModel)
 	}
 
@@ -1555,7 +1632,11 @@ func (u *GatewayUpstream) handleDirectCCPA(
 
 		streamScanErr := activeScanner.Err()
 		if streamScanErr != nil && ctx.Err() == nil && (activeTimedOut.Load() || activeCandCtx.Err() != nil) {
-			markDeadCCPAModel(endpoint, activeCCPAModel, 2*time.Minute)
+			if accScope != "" && accScope != "anon" && strings.Contains(accScope, "@") {
+				markAccountDeadCCPAModelWithStatus(endpoint, accScope, activeCCPAModel, 60*time.Second, http.StatusGatewayTimeout)
+			} else {
+				markDeadCCPAModel(endpoint, activeCCPAModel, 2*time.Minute)
+			}
 		}
 
 		usage := computeCCPAUsage(req, streamedText.Len(), streamedThoughts.Len(), lastUsage)
@@ -1643,7 +1724,11 @@ func (u *GatewayUpstream) handleDirectCCPA(
 			return ctx.Err()
 		}
 		if activeTimedOut.Load() || activeCandCtx.Err() != nil {
-			markDeadCCPAModel(endpoint, activeCCPAModel, 2*time.Minute)
+			if accScope != "" && accScope != "anon" && strings.Contains(accScope, "@") {
+				markAccountDeadCCPAModelWithStatus(endpoint, accScope, activeCCPAModel, 60*time.Second, http.StatusGatewayTimeout)
+			} else {
+				markDeadCCPAModel(endpoint, activeCCPAModel, 2*time.Minute)
+			}
 		}
 		return err
 	}
@@ -1804,6 +1889,7 @@ func (u *GatewayUpstream) openCCPAStreamWithFirstChunk(
 	isDefaultProdEndpoint := strings.EqualFold(strings.TrimSpace(endpoint), DefaultCCPAEndpoint)
 
 	var lastCCPAErr error
+	saw5xxInAttempt := false
 
 	for _, candidate := range ccpaCandidates {
 		if attemptCtx.Err() != nil {
@@ -1811,9 +1897,11 @@ func (u *GatewayUpstream) openCCPAStreamWithFirstChunk(
 			return nil, attemptCtx.Err()
 		}
 
-		// Multi-Account Flagship Protection: before downgrading to a lower model tier on the current account,
-		// check if another healthy Antigravity account still has flagship quota available.
-		if PinnedAccountFromContext(attemptCtx) == "" &&
+		// Multi-Account Flagship Protection: before downgrading to a lower model tier on the current account
+		// after a 429/404, check if another healthy Antigravity account still has flagship quota available.
+		// Never abort a local step-down after a transient per-account 5xx!
+		if !saw5xxInAttempt &&
+			PinnedAccountFromContext(attemptCtx) == "" &&
 			len(flagshipTier) > 0 &&
 			!stringSliceContains(flagshipTier, candidate) &&
 			hasAlternateFlagshipAccount(endpoint, accScope, resolved.CanonicalID, flagshipTier) {
@@ -1832,13 +1920,51 @@ func (u *GatewayUpstream) openCCPAStreamWithFirstChunk(
 		if strings.Contains(candidate, "lite") && candInner.GenerationConfig.MaxOutputTokens > 32768 {
 			candInner.GenerationConfig.MaxOutputTokens = 32768
 		}
+		callerWantsThoughts := req.ThinkingConfig != nil && req.ThinkingConfig.IncludeThoughts
 		if (strings.HasPrefix(candidate, "claude-") ||
-			candidate == "gemini-3-flash" ||
-			candidate == "gemini-3.5-flash-lite" ||
 			candidate == "gemini-3.1-flash-lite" ||
 			strings.Contains(candidate, "image")) && candInner.GenerationConfig.ThinkingConfig != nil {
 			candInner.GenerationConfig.ThinkingConfig = nil
-		} else if candidate == "gemini-3.8-flash-high" || candidate == "gemini-3.8-flash-medium" || candidate == "gemini-3.8-flash-low" {
+		} else if candidate == "gemini-3-flash" {
+			if !callerWantsThoughts {
+				candInner.GenerationConfig.ThinkingConfig = &ccpaThinkingConfig{
+					IncludeThoughts: false,
+					ThinkingLevel:   ThinkingLevelLow,
+				}
+			} else {
+				lvl := req.ThinkingConfig.ThinkingLevel
+				if lvl == ThinkingLevelNone {
+					lvl = ThinkingLevelLow
+				}
+				candInner.GenerationConfig.ThinkingConfig = &ccpaThinkingConfig{
+					IncludeThoughts: true,
+					ThinkingLevel:   lvl,
+				}
+			}
+			if candInner.GenerationConfig.MaxOutputTokens > 0 && candInner.GenerationConfig.MaxOutputTokens < 1024 {
+				candInner.GenerationConfig.MaxOutputTokens += 1024
+			}
+		} else if candidate == "gemini-3.5-flash-lite" {
+			if !callerWantsThoughts {
+				zBudget := 0
+				candInner.GenerationConfig.ThinkingConfig = &ccpaThinkingConfig{
+					IncludeThoughts: false,
+					ThinkingLevel:   "",
+					ThinkingBudget:  &zBudget,
+				}
+			} else if req.ThinkingConfig.ThinkingBudget > 0 {
+				b := req.ThinkingConfig.ThinkingBudget
+				candInner.GenerationConfig.ThinkingConfig = &ccpaThinkingConfig{
+					IncludeThoughts: true,
+					ThinkingBudget:  &b,
+				}
+			} else {
+				candInner.GenerationConfig.ThinkingConfig = nil
+			}
+			if candInner.GenerationConfig.MaxOutputTokens > 0 && candInner.GenerationConfig.MaxOutputTokens < 1024 {
+				candInner.GenerationConfig.MaxOutputTokens += 1024
+			}
+		} else if candidate == "gemini-3.8-flash-high" || candidate == "gemini-3.8-flash-medium" || (isDefaultProdEndpoint && candidate == "gemini-3.8-flash-low") {
 			if !noThinking {
 				candInner.GenerationConfig.ThinkingConfig = &ccpaThinkingConfig{IncludeThoughts: true}
 			} else {
@@ -1906,8 +2032,8 @@ func (u *GatewayUpstream) openCCPAStreamWithFirstChunk(
 				return nil, attemptCtx.Err()
 			}
 			if timedOut.Load() || candErr != nil {
-				if isDefaultProdEndpoint && strings.Contains(accScope, "@") {
-					markAccountDeadCCPAModel(endpoint, accScope, candidate, 30*time.Second)
+				if strings.Contains(accScope, "@") {
+					markAccountDeadCCPAModelWithStatus(endpoint, accScope, candidate, 60*time.Second, http.StatusGatewayTimeout)
 				} else {
 					markDeadCCPAModel(endpoint, candidate, 2*time.Minute)
 				}
@@ -1935,15 +2061,31 @@ func (u *GatewayUpstream) openCCPAStreamWithFirstChunk(
 			cancelCand()
 			switch r.StatusCode {
 			case http.StatusNotFound:
-				markDeadCCPAModel(endpoint, candidate, 6*time.Hour)
+				if isDefaultProdEndpoint && strings.Contains(accScope, "@") {
+					markAccountDeadCCPAModelWithStatus(endpoint, accScope, candidate, 15*time.Minute, http.StatusNotFound)
+				} else {
+					markDeadCCPAModel(endpoint, candidate, 6*time.Hour)
+				}
 			case http.StatusTooManyRequests:
-				markAccountDeadCCPAModel(endpoint, accScope, candidate, 2*time.Minute)
+				markAccountDeadCCPAModelWithStatus(endpoint, accScope, candidate, 2*time.Minute, http.StatusTooManyRequests)
+				if strings.Contains(accScope, "@") {
+					RecordAccountModelRateLimit(accScope, candidate, 2*time.Minute)
+				}
 				if isDefaultProdEndpoint && strings.HasPrefix(candidate, "claude-") {
-					markAccountDeadCCPAModel(endpoint, accScope, "claude-opus-4-6-thinking", 2*time.Minute)
-					markAccountDeadCCPAModel(endpoint, accScope, "claude-sonnet-4-6", 2*time.Minute)
+					markAccountDeadCCPAModelWithStatus(endpoint, accScope, "claude-opus-4-6-thinking", 2*time.Minute, http.StatusTooManyRequests)
+					markAccountDeadCCPAModelWithStatus(endpoint, accScope, "claude-sonnet-4-6", 2*time.Minute, http.StatusTooManyRequests)
+					if strings.Contains(accScope, "@") {
+						RecordAccountModelRateLimit(accScope, "claude-opus-4-6-thinking", 2*time.Minute)
+						RecordAccountModelRateLimit(accScope, "claude-sonnet-4-6", 2*time.Minute)
+					}
 				}
 			case http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
-				markDeadCCPAModel(endpoint, candidate, 2*time.Minute)
+				saw5xxInAttempt = true
+				if strings.Contains(accScope, "@") {
+					markAccountDeadCCPAModelWithStatus(endpoint, accScope, candidate, 90*time.Second, r.StatusCode)
+				} else {
+					markDeadCCPAModel(endpoint, candidate, 2*time.Minute)
+				}
 			}
 			lastCCPAErr = fmt.Errorf("CCPA HTTP %d (%s): %s", r.StatusCode, candidate, strings.TrimSpace(string(errBody)))
 			if r.StatusCode == http.StatusUnauthorized || r.StatusCode == http.StatusForbidden {
@@ -2056,8 +2198,8 @@ func (u *GatewayUpstream) openCCPAStreamWithFirstChunk(
 				releaseScopeInFlight()
 				return nil, attemptCtx.Err()
 			}
-			if isDefaultProdEndpoint && strings.Contains(accScope, "@") {
-				markAccountDeadCCPAModel(endpoint, accScope, candidate, 30*time.Second)
+			if strings.Contains(accScope, "@") {
+				markAccountDeadCCPAModelWithStatus(endpoint, accScope, candidate, 60*time.Second, http.StatusGatewayTimeout)
 			} else {
 				markDeadCCPAModel(endpoint, candidate, 2*time.Minute)
 			}
@@ -2140,12 +2282,16 @@ func (u *GatewayUpstream) rotateStripedComboTargets(resolved ResolvedModel, targ
 		endpoint = DefaultCCPAEndpoint
 	}
 	now := time.Now()
+	congestedMaxSpeed := strings.EqualFold(strings.TrimSpace(endpoint), DefaultCCPAEndpoint) &&
+		(strings.EqualFold(resolved.CanonicalID, "auto/max-speed") || strings.EqualFold(resolved.RequestedID, "auto/max-speed")) &&
+		TotalAntigravityInFlight() >= 6
 
 	healthy := make([]ResolvedModel, 0, len(primaryPool))
 	degraded := make([]ResolvedModel, 0, len(primaryPool))
 	for _, t := range primaryPool {
-		if t.Provider == ProviderAntigravity && t.CCPAModelID != "" && !isVirtualCCPAIDEAlias(t.CCPAModelID) &&
-			(isDeadCCPAModel(endpoint, t.CCPAModelID, now) || allAntigravityAccountsModelExhausted(endpoint, t.CCPAModelID, now)) {
+		isClaudeCongested := congestedMaxSpeed && (strings.HasPrefix(strings.ToLower(t.CCPAModelID), "claude-") || strings.Contains(strings.ToLower(t.CanonicalID), "claude-"))
+		if isClaudeCongested || (t.Provider == ProviderAntigravity && t.CCPAModelID != "" && !isVirtualCCPAIDEAlias(t.CCPAModelID) &&
+			(isDeadCCPAModel(endpoint, t.CCPAModelID, now) || allAntigravityAccountsModelExhausted(endpoint, t.CCPAModelID, now))) {
 			degraded = append(degraded, t)
 		} else {
 			healthy = append(healthy, t)
@@ -2203,8 +2349,8 @@ func allAntigravityAccountsModelExhausted(endpoint, ccpaModelID string, now time
 
 func isVirtualCCPAIDEAlias(candidate string) bool {
 	m := strings.ToLower(strings.TrimSpace(candidate))
-	return strings.HasPrefix(m, "gemini-4-carbon") ||
-		strings.HasPrefix(m, "gemini-4-argon") ||
+	return m == "gemini-4-carbon" ||
+		m == "gemini-4-argon" ||
 		m == "gemini-3.8-flash" ||
 		strings.HasPrefix(m, "gemini-3.1-pro") ||
 		m == "gemini-2.5-pro" ||
@@ -2216,10 +2362,14 @@ func buildCCPACandidatesWithCache(endpoint, accScope string, resolved ResolvedMo
 		endpoint = DefaultCCPAEndpoint
 	}
 	isDefaultProdEndpoint := strings.EqualFold(strings.TrimSpace(endpoint), DefaultCCPAEndpoint)
+	isAutoFastExplicit := strings.EqualFold(strings.TrimSpace(resolved.RequestedID), "auto/fast") ||
+		strings.EqualFold(strings.TrimSpace(resolved.CanonicalID), "auto/fast")
 	scope := normalizeAccScope(accScope)
 	if resolved.ComboMode == ComboModeStriped && strings.TrimSpace(resolved.CCPAModelID) != "" && !isVirtualCCPAIDEAlias(resolved.CCPAModelID) {
 		cand := strings.TrimSpace(resolved.CCPAModelID)
-		if !(isDefaultProdEndpoint && strings.Contains(scope, "@") && IsAccountModelRateLimited(scope, cand)) {
+		deadOnAcc := strings.Contains(scope, "@") && isAccountDeadCCPAModel(endpoint, scope, cand, time.Now())
+		rateMasked := isDefaultProdEndpoint && strings.Contains(scope, "@") && IsAccountModelRateLimited(scope, cand)
+		if !deadOnAcc && !rateMasked {
 			return []string{cand}
 		}
 	}
@@ -2228,7 +2378,8 @@ func buildCCPACandidatesWithCache(endpoint, accScope string, resolved ResolvedMo
 
 	var raw []string
 	var cachedWinner string
-	if !noThinking && !(isDefaultProdEndpoint && resolved.ThinkingLevel == ThinkingLevelLow) && resolved.CanonicalID != "" {
+	bypassWorkingCache := isDefaultProdEndpoint && (isAutoFastExplicit || resolved.CCPAModelID == "gemini-3.8-flash-low")
+	if !noThinking && !bypassWorkingCache && resolved.CanonicalID != "" {
 		if cached, ok := workingCCPAModelCache.Load(endpoint + "|acc:" + scope + "|" + resolved.CanonicalID); ok {
 			if s, ok := cached.(string); ok && s != "" {
 				sTrim := strings.TrimSpace(s)
@@ -2258,42 +2409,31 @@ func buildCCPACandidatesWithCache(endpoint, accScope string, resolved ResolvedMo
 		reqLower := strings.ToLower(strings.TrimSpace(resolved.RequestedID))
 
 		switch {
+		case isAutoFastExplicit:
+			raw = append(raw,
+				"gemini-3-flash",
+				"gemini-3.8-flash-low",
+				"gemini-3.5-flash-lite",
+			)
 		case resolved.IsCarbonFamily || strings.HasPrefix(resolved.CCPAModelID, "gemini-4-carbon"):
 			switch resolved.ThinkingLevel {
 			case ThinkingLevelLow:
-				raw = append(raw,
-					"gemini-3-flash",
-					"gemini-3.8-flash-low",
-					"gemini-3.5-flash-lite",
-				)
+				if isAutoFastExplicit {
+					raw = append(raw,
+						"gemini-3-flash",
+						"gemini-3.8-flash-low",
+						"gemini-3.5-flash-lite",
+					)
+				} else {
+					raw = append(raw,
+						"gemini-4-carbon-low",
+						"gemini-3-flash",
+						"gemini-3.8-flash-low",
+						"gemini-3.5-flash-lite",
+					)
+				}
 			case ThinkingLevelMedium:
-				raw = append(raw,
-					"gemini-3.8-flash-medium",
-					"gemini-3.8-flash-high",
-				)
-				appendClaude("claude-sonnet-4-6")
-				raw = append(raw,
-					"gemini-3.8-flash-tiered",
-					"gemini-3-flash",
-				)
-			default:
-				raw = append(raw, "gemini-3.8-flash-high")
-				appendClaude("claude-opus-4-6-thinking", "claude-sonnet-4-6")
-				raw = append(raw,
-					"gemini-3.8-flash-tiered",
-					"gemini-3-flash",
-				)
-			}
-
-		case resolved.IsArgonFamily || strings.HasPrefix(resolved.CCPAModelID, "gemini-4-argon"):
-			switch resolved.ThinkingLevel {
-			case ThinkingLevelLow:
-				raw = append(raw,
-					"gemini-3-flash",
-					"gemini-3.8-flash-low",
-					"gemini-3.5-flash-lite",
-				)
-			case ThinkingLevelMedium:
+				raw = append(raw, "gemini-4-carbon-medium")
 				appendClaude("claude-sonnet-4-6", "claude-opus-4-6-thinking")
 				raw = append(raw,
 					"gemini-3.8-flash-medium",
@@ -2302,6 +2442,43 @@ func buildCCPACandidatesWithCache(endpoint, accScope string, resolved ResolvedMo
 					"gemini-3-flash",
 				)
 			default:
+				raw = append(raw, "gemini-4-carbon-high")
+				appendClaude("claude-opus-4-6-thinking", "claude-sonnet-4-6")
+				raw = append(raw,
+					"gemini-3.8-flash-high",
+					"gemini-3.8-flash-tiered",
+					"gemini-3-flash",
+				)
+			}
+
+		case resolved.IsArgonFamily || strings.HasPrefix(resolved.CCPAModelID, "gemini-4-argon"):
+			switch resolved.ThinkingLevel {
+			case ThinkingLevelLow:
+				if isAutoFastExplicit {
+					raw = append(raw,
+						"gemini-3-flash",
+						"gemini-3.8-flash-low",
+						"gemini-3.5-flash-lite",
+					)
+				} else {
+					raw = append(raw,
+						"gemini-4-argon-low",
+						"gemini-3-flash",
+						"gemini-3.8-flash-low",
+						"gemini-3.5-flash-lite",
+					)
+				}
+			case ThinkingLevelMedium:
+				raw = append(raw, "gemini-4-argon-medium")
+				appendClaude("claude-sonnet-4-6", "claude-opus-4-6-thinking")
+				raw = append(raw,
+					"gemini-3.8-flash-medium",
+					"gemini-3.8-flash-high",
+					"gemini-3.8-flash-tiered",
+					"gemini-3-flash",
+				)
+			default:
+				raw = append(raw, "gemini-4-argon-high")
 				appendClaude("claude-opus-4-6-thinking", "claude-sonnet-4-6")
 				raw = append(raw,
 					"gemini-3.8-flash-high",
@@ -2318,12 +2495,12 @@ func buildCCPACandidatesWithCache(endpoint, accScope string, resolved ResolvedMo
 					"gemini-3.8-flash-tiered",
 				)
 			} else {
+				appendClaude("claude-opus-4-6-thinking", "claude-sonnet-4-6")
 				raw = append(raw,
 					"gemini-3.8-flash-high",
 					"gemini-3.8-flash-tiered",
+					"gemini-3-flash",
 				)
-				appendClaude("claude-opus-4-6-thinking", "claude-sonnet-4-6")
-				raw = append(raw, "gemini-3-flash")
 			}
 
 		case strings.HasPrefix(resolved.CCPAModelID, "gemini-3.8-flash") || strings.Contains(canonLower, "gemini-3.8-flash"):
@@ -2397,17 +2574,31 @@ func buildCCPACandidatesWithCache(endpoint, accScope string, resolved ResolvedMo
 		}
 	} else {
 		switch {
+		case isDefaultProdEndpoint && isAutoFastExplicit:
+			raw = append(raw,
+				"gemini-3-flash",
+				"gemini-3.8-flash-low",
+				"gemini-3.5-flash-lite",
+			)
 		case resolved.IsCarbonFamily || strings.HasPrefix(resolved.CCPAModelID, "gemini-4-carbon"):
 			switch resolved.ThinkingLevel {
 			case ThinkingLevelLow:
-				raw = append(raw,
-					"gemini-4-carbon-low",
-					"gemini-3-flash",
-					"gemini-3.8-flash-low",
-					"gemini-3.5-flash-lite",
-					"claude-sonnet-4-6",
-					"gemini-3.8-flash-tiered",
-				)
+				if isDefaultProdEndpoint && isAutoFastExplicit {
+					raw = append(raw,
+						"gemini-3-flash",
+						"gemini-3.8-flash-low",
+						"gemini-3.5-flash-lite",
+					)
+				} else {
+					raw = append(raw,
+						"gemini-4-carbon-low",
+						"gemini-3-flash",
+						"gemini-3.8-flash-low",
+						"gemini-3.5-flash-lite",
+						"claude-sonnet-4-6",
+						"gemini-3.8-flash-tiered",
+					)
+				}
 			case ThinkingLevelMedium:
 				raw = append(raw,
 					"gemini-4-carbon-medium",
@@ -2476,7 +2667,7 @@ func buildCCPACandidatesWithCache(endpoint, accScope string, resolved ResolvedMo
 			)
 
 		case strings.HasPrefix(resolved.CCPAModelID, "gemini-3.8-flash"):
-			if resolved.CCPAModelID != "" {
+			if resolved.CCPAModelID != "" && !(isDefaultProdEndpoint && resolved.ThinkingLevel == ThinkingLevelLow) {
 				raw = append(raw, resolved.CCPAModelID)
 			}
 			if resolved.ThinkingLevel == ThinkingLevelLow {

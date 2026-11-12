@@ -622,10 +622,10 @@ func TestCCPAModelVersionHeaderLiveActiveRoleHonestLogsAndMultiAccountFlagshipFa
 			t.Fatalf("UpsertConnectedAccount(claude-fresh) failed: %v", err)
 		}
 
-		// Carbon High on connected account maps directly to Google's defaultAgentModelId gemini-3.8-flash-high (0 404s, 0 exhausted Claude hops)
+		// Carbon High on connected account preserves gemini-4-carbon-high at index 0 and prunes exhausted Claude pool (100%)
 		carbonCands := buildCCPACandidatesWithCache(DefaultCCPAEndpoint, "thuctapsinh316@gmail.com", ResolveModel("antigravity/gemini-4-carbon-high", nil), false)
-		if len(carbonCands) == 0 || carbonCands[0] != "gemini-3.8-flash-high" {
-			t.Fatalf("expected connected Carbon High primary = gemini-3.8-flash-high, got %v", carbonCands)
+		if len(carbonCands) < 2 || carbonCands[0] != "gemini-4-carbon-high" || carbonCands[1] != "gemini-3.8-flash-high" {
+			t.Fatalf("expected connected Carbon High (exhausted Claude) = [gemini-4-carbon-high, gemini-3.8-flash-high, ...], got %v", carbonCands)
 		}
 		for _, c := range carbonCands {
 			if strings.HasPrefix(c, "claude-") {
@@ -635,21 +635,29 @@ func TestCCPAModelVersionHeaderLiveActiveRoleHonestLogsAndMultiAccountFlagshipFa
 				t.Fatalf("expected zero 404/503 virtual aliases on DefaultCCPAEndpoint, found %q in %v", c, carbonCands)
 			}
 		}
+		carbonFresh := buildCCPACandidatesWithCache(DefaultCCPAEndpoint, "claude-fresh@gmail.com", ResolveModel("antigravity/gemini-4-carbon-high", nil), false)
+		if len(carbonFresh) < 3 || carbonFresh[0] != "gemini-4-carbon-high" || carbonFresh[1] != "claude-opus-4-6-thinking" || carbonFresh[2] != "claude-sonnet-4-6" {
+			t.Fatalf("expected connected Carbon High (fresh Claude) = [gemini-4-carbon-high, claude-opus-4-6-thinking, claude-sonnet-4-6, ...], got %v", carbonFresh)
+		}
 
-		// Gemini 3.1 Pro High maps primary to gemini-3.8-flash-high -> gemini-3.8-flash-tiered
+		// Gemini 3.1 Pro High maps primary to claude-opus-4-6-thinking on fresh Claude account, or gemini-3.8-flash-high when Claude is exhausted
 		proCands := buildCCPACandidatesWithCache(DefaultCCPAEndpoint, "thuctapsinh316@gmail.com", ResolveModel("antigravity/gemini-3.1-pro-high", nil), false)
 		if len(proCands) < 2 || proCands[0] != "gemini-3.8-flash-high" || proCands[1] != "gemini-3.8-flash-tiered" {
-			t.Fatalf("expected connected Gemini 3.1 Pro High = [gemini-3.8-flash-high, gemini-3.8-flash-tiered, ...], got %v", proCands)
+			t.Fatalf("expected connected Gemini 3.1 Pro High (exhausted Claude) = [gemini-3.8-flash-high, gemini-3.8-flash-tiered, ...], got %v", proCands)
+		}
+		proFresh := buildCCPACandidatesWithCache(DefaultCCPAEndpoint, "claude-fresh@gmail.com", ResolveModel("antigravity/gemini-3.1-pro-high", nil), false)
+		if len(proFresh) < 2 || proFresh[0] != "claude-opus-4-6-thinking" {
+			t.Fatalf("expected connected Gemini 3.1 Pro High (fresh Claude) primary = claude-opus-4-6-thinking, got %v", proFresh)
 		}
 
-		// Argon High on fresh Claude account maps primary to claude-opus-4-6-thinking; on exhausted Claude account maps to gemini-3.8-flash-high
+		// Argon High preserves gemini-4-argon-high at index 0, followed by claude-opus-4-6-thinking on fresh Claude or gemini-3.8-flash-high when exhausted
 		argonFresh := buildCCPACandidatesWithCache(DefaultCCPAEndpoint, "claude-fresh@gmail.com", ResolveModel("antigravity/gemini-4-argon-high", nil), false)
-		if len(argonFresh) == 0 || argonFresh[0] != "claude-opus-4-6-thinking" {
-			t.Fatalf("expected Argon High on fresh Claude account = claude-opus-4-6-thinking, got %v", argonFresh)
+		if len(argonFresh) < 2 || argonFresh[0] != "gemini-4-argon-high" || argonFresh[1] != "claude-opus-4-6-thinking" {
+			t.Fatalf("expected Argon High on fresh Claude account = [gemini-4-argon-high, claude-opus-4-6-thinking, ...], got %v", argonFresh)
 		}
 		argonExhausted := buildCCPACandidatesWithCache(DefaultCCPAEndpoint, "thuctapsinh316@gmail.com", ResolveModel("antigravity/gemini-4-argon-high", nil), false)
-		if len(argonExhausted) == 0 || argonExhausted[0] != "gemini-3.8-flash-high" {
-			t.Fatalf("expected Argon High on Claude-exhausted account = gemini-3.8-flash-high before gemini-3-flash, got %v", argonExhausted)
+		if len(argonExhausted) < 2 || argonExhausted[0] != "gemini-4-argon-high" || argonExhausted[1] != "gemini-3.8-flash-high" {
+			t.Fatalf("expected Argon High on Claude-exhausted account = [gemini-4-argon-high, gemini-3.8-flash-high, ...], got %v", argonExhausted)
 		}
 	})
 
@@ -692,7 +700,7 @@ func TestCCPAModelVersionHeaderLiveActiveRoleHonestLogsAndMultiAccountFlagshipFa
 			_ = json.NewDecoder(r.Body).Decode(&payload)
 			auth := strings.TrimSpace(r.Header.Get("Authorization"))
 
-			if isVirtualCCPAIDEAlias(payload.Model) {
+			if isVirtualCCPAIDEAlias(payload.Model) || strings.HasPrefix(payload.Model, "gemini-4-") {
 				w.WriteHeader(http.StatusNotFound)
 				return
 			}
