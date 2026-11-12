@@ -13,6 +13,51 @@ import (
 	"time"
 )
 
+// ComboModeStriped distributes concurrent requests across a combo's healthy models via atomic
+// round-robin primary selection while keeping all remaining models in the combo as instant failover.
+const ComboModeStriped ComboMode = "striped"
+
+// BuiltInStripedCombos returns built-in multi-model striped parallel combo presets that spread
+// concurrent requests across independent upstream model quota/capacity pools (Claude + Gemini).
+func BuiltInStripedCombos() []ComboModel {
+	return []ComboModel{
+		{
+			ID:          "auto/max-speed",
+			Name:        "⚡ Max-Speed Striped Parallel (Gemini 3 Flash ⇄ Gemini 3.5 Flash Lite ⇄ Claude Sonnet 4.6)",
+			Mode:        ComboModeStriped,
+			Description: "Chia tải tuần tự tốc độ siêu thanh (Atomic Round-Robin) qua 3 bể hạn mức độc lập: Gemini 3 Flash, Gemini 3.5 Flash Lite và Claude Sonnet 4.6, kèm tự động failover tức thì.",
+			Models: []string{
+				"antigravity/gemini-3-flash",
+				"antigravity/gemini-3.5-flash-lite",
+				"antigravity/claude-sonnet-4-6",
+			},
+			Roles: []string{
+				"Striped Pool 1 (Gemini 3 Flash)",
+				"Striped Pool 2 (Gemini 3.5 Flash Lite)",
+				"Striped Pool 3 (Claude Sonnet 4.6)",
+			},
+			BuiltIn: true,
+		},
+		{
+			ID:          "auto/parallel-flagship",
+			Name:        "🚀 Parallel Flagship Striped (Claude Opus 4.6 Thinking ⇄ Claude Sonnet 4.6 ⇄ Gemini 3 Flash)",
+			Mode:        ComboModeStriped,
+			Description: "Nhân 3x thông lượng coding thông minh song song trên toàn dàn tài khoản bằng cách rải đều request qua Claude Opus 4.6 Thinking, Claude Sonnet 4.6 và Gemini 3 Flash.",
+			Models: []string{
+				"antigravity/claude-opus-4-6-thinking",
+				"antigravity/claude-sonnet-4-6",
+				"antigravity/gemini-3-flash",
+			},
+			Roles: []string{
+				"Flagship Pool 1 (Claude Opus 4.6 Thinking)",
+				"Flagship Pool 2 (Claude Sonnet 4.6)",
+				"Flagship Pool 3 (Gemini 3 Flash)",
+			},
+			BuiltIn: true,
+		},
+	}
+}
+
 // SaveComboModel creates or updates a custom ComboModel in gateway_config.json.
 func SaveComboModel(combo ComboModel) ([]ComboModel, error) {
 	id := strings.TrimSpace(combo.ID)
@@ -117,6 +162,11 @@ func (s *Server) handleCombos(w http.ResponseWriter, r *http.Request) {
 					"id":          string(ComboModeNightSaver),
 					"name":        "⚡ Tối Ưu Giảm Giá Ban Đêm (Night 40%-50% Off)",
 					"description": "Tự động ưu tiên các model giảm 40%-50% phí token ban đêm của Alibaba Cloud + dự phòng Antigravity & Claude",
+				},
+				{
+					"id":          string(ComboModeStriped),
+					"name":        "🚀 Striped Song Song Đa Mô Hình (3x-4x RPS Multi-Pool)",
+					"description": "Chia tải tuần tự (Atomic Round-Robin) qua nhiều bể hạn mức model khác nhau ở mỗi request + tự động failover tức thì sang các model còn lại",
 				},
 				{
 					"id":          string(ComboModeFailover),

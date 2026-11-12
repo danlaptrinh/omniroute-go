@@ -316,7 +316,7 @@ func (r *DefaultResolver) Resolve(modelID string, defaultFallbacks []string) Res
 			if len(combo.Models) > 0 {
 				res.OmniBaseModelID = combo.Models[0]
 			}
-			if norm == "auto/fast" || norm == "fast" {
+			if norm == "auto/fast" || norm == "fast" || norm == "auto/max-speed" || norm == "max-speed" {
 				res.ThinkingLevel = ""
 				res.ReasoningEffort = ""
 				res.IncludeThoughts = false
@@ -854,7 +854,7 @@ func (r *DefaultResolver) Resolve(modelID string, defaultFallbacks []string) Res
 
 // ListCombos returns all configured OmniRoute-Go combo models (built-in presets merged with user custom combos).
 func (r *DefaultResolver) ListCombos() []ComboModel {
-	defaults := DefaultCombos()
+	defaults := append(DefaultCombos(), BuiltInStripedCombos()...)
 	saved := LoadSavedAuthConfig()
 	if len(saved.CustomCombos) == 0 {
 		return defaults
@@ -907,6 +907,8 @@ func (r *DefaultResolver) ListModels() []OpenAIModelCard {
 		tier     string
 	}{
 		// --- Combos ---
+		{"auto/max-speed", "omniroute-go", "auto", "combo"},
+		{"auto/parallel-flagship", "omniroute-go", "auto", "combo"},
 		{"auto/seo-master", "omniroute-go", "auto", "combo"},
 		{"auto/best-coding", "omniroute-go", "auto", "combo"},
 		{"auto/team-coding", "omniroute-go", "auto", "combo"},

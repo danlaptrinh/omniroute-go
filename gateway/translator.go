@@ -10,6 +10,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,7 +21,7 @@ import (
 const (
 	DefaultCCPAEndpoint        = "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse"
 	DefaultCCPAMaxOutputTokens = 65536
-	ccpaClientShards           = 8
+	ccpaClientShards           = 16
 )
 
 type deadCCPAEntry struct {
@@ -34,7 +36,9 @@ var (
 		MaxIdleConns:          256,
 		MaxIdleConnsPerHost:   64,
 		MaxConnsPerHost:       128,
-		IdleConnTimeout:       120 * time.Second,
+		WriteBufferSize:       64 * 1024,
+		ReadBufferSize:        64 * 1024,
+		IdleConnTimeout:       180 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 		ForceAttemptHTTP2:     true,
@@ -44,7 +48,11 @@ var (
 		Timeout:   180 * time.Second,
 	}
 
-	ccpaShardedClients [ccpaClientShards]*http.Client
+	ccpaShardedClients     [ccpaClientShards]*http.Client
+	ccpaShardOffset        uint64
+	stripedComboCounter    uint64
+	lastCCPAWarmupUnixNano int64
+	ccpaScopeInFlight      sync.Map // key: normalized account/token scope -> value: *atomic.Int64
 
 	// Configurable CCPA watchdog timeouts (adjustable in unit tests).
 	CCPAFirstChunkTimeout   = 20 * time.Second
@@ -60,10 +68,12 @@ func init() {
 	for i := 0; i < ccpaClientShards; i++ {
 		tr := &http.Transport{
 			Proxy:                 http.ProxyFromEnvironment,
-			MaxIdleConns:          64,
-			MaxIdleConnsPerHost:   32,
-			MaxConnsPerHost:       64,
-			IdleConnTimeout:       90 * time.Second,
+			MaxIdleConns:          128,
+			MaxIdleConnsPerHost:   64,
+			MaxConnsPerHost:       128,
+			WriteBufferSize:       64 * 1024,
+			ReadBufferSize:        64 * 1024,
+			IdleConnTimeout:       180 * time.Second,
 			TLSHandshakeTimeout:   8 * time.Second,
 			ResponseHeaderTimeout: 90 * time.Second,
 			ExpectContinueTimeout: 1 * time.Second,
@@ -202,7 +212,7 @@ func isAccountDeadCCPAModel(endpoint, accScope, candidate string, now time.Time)
 	return false
 }
 
-// ResetCCPAModelCaches clears both working and dead CCPA model caches (useful for tests and diagnostics).
+// ResetCCPAModelCaches clears both working and dead CCPA model caches and resets striped counters (useful for tests and diagnostics).
 func ResetCCPAModelCaches() {
 	workingCCPAModelCache.Range(func(k, _ any) bool {
 		workingCCPAModelCache.Delete(k)
@@ -212,6 +222,165 @@ func ResetCCPAModelCaches() {
 		deadCCPAModelCache.Delete(k)
 		return true
 	})
+	atomic.StoreUint64(&stripedComboCounter, 0)
+}
+
+// ResetStripedComboCounter resets the atomic round-robin counter used by ComboModeStriped.
+func ResetStripedComboCounter() {
+	atomic.StoreUint64(&stripedComboCounter, 0)
+}
+
+func getOrCreateScopeCounter(key string) *atomic.Int64 {
+	if existing, ok := ccpaScopeInFlight.Load(key); ok {
+		return existing.(*atomic.Int64)
+	}
+	fresh := &atomic.Int64{}
+	actual, _ := ccpaScopeInFlight.LoadOrStore(key, fresh)
+	return actual.(*atomic.Int64)
+}
+
+func acquireCCPAScopeInFlight(accScope, oauthToken string) func() {
+	sKey := normalizeAccScope(accScope)
+	tKey := accountCacheScope(nil, oauthToken)
+	var counters []*atomic.Int64
+	if sKey != "" && sKey != "anon" {
+		c := getOrCreateScopeCounter("acc:" + sKey)
+		c.Add(1)
+		counters = append(counters, c)
+	}
+	if tKey != "" && tKey != "anon" && tKey != sKey {
+		c := getOrCreateScopeCounter("tok:" + tKey)
+		c.Add(1)
+		counters = append(counters, c)
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			for _, c := range counters {
+				c.Add(-1)
+			}
+		})
+	}
+}
+
+func currentCCPAScopeInFlight(accScope, oauthToken string) int {
+	maxActive := 0
+	sKey := normalizeAccScope(accScope)
+	if sKey != "" && sKey != "anon" {
+		if inf := GetAccountInFlight(sKey); inf > maxActive {
+			maxActive = inf
+		}
+		if existing, ok := ccpaScopeInFlight.Load("acc:" + sKey); ok {
+			if n := int(existing.(*atomic.Int64).Load()); n > maxActive {
+				maxActive = n
+			}
+		}
+	}
+	tKey := accountCacheScope(nil, oauthToken)
+	if tKey != "" && tKey != "anon" {
+		if existing, ok := ccpaScopeInFlight.Load("tok:" + tKey); ok {
+			if n := int(existing.(*atomic.Int64).Load()); n > maxActive {
+				maxActive = n
+			}
+		}
+		if existing, ok := ccpaScopeInFlight.Load("acc:" + tKey); ok {
+			if n := int(existing.(*atomic.Int64).Load()); n > maxActive {
+				maxActive = n
+			}
+		}
+	}
+	return maxActive
+}
+
+// WarmupCCPAConnectionsAsync pre-establishes warm HTTP/2 TLS connections to DefaultCCPAEndpoint
+// across SharedHTTPClient and all 16 ccpaShardedClients in a non-blocking background goroutine
+// so the very first live request avoids the 300-500ms TCP + TLS handshake delay.
+func WarmupCCPAConnectionsAsync() {
+	now := time.Now().UnixNano()
+	prev := atomic.LoadInt64(&lastCCPAWarmupUnixNano)
+	if prev > 0 && now-prev < int64(30*time.Second) {
+		return
+	}
+	if !atomic.CompareAndSwapInt64(&lastCCPAWarmupUnixNano, prev, now) {
+		return
+	}
+	WarmupCCPAEndpointAsync(DefaultCCPAEndpoint)
+}
+
+// WarmupCCPAEndpointAsync pre-establishes warm HTTP/2 / TLS connections to the origin of endpoint
+// in a non-blocking background goroutine across SharedHTTPClient and all 16 ccpaShardedClients.
+func WarmupCCPAEndpointAsync(endpoint string) {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = warmupCCPAEndpoint(ctx, endpoint)
+	}()
+}
+
+func warmupCCPAEndpoint(ctx context.Context, endpoint string) int {
+	raw := strings.TrimSpace(endpoint)
+	if raw == "" {
+		raw = DefaultCCPAEndpoint
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return 0
+	}
+	originURL := parsed.Scheme + "://" + parsed.Host + "/"
+
+	clients := make([]*http.Client, 0, ccpaClientShards+1)
+	if SharedHTTPClient != nil {
+		clients = append(clients, SharedHTTPClient)
+	}
+	for i := 0; i < ccpaClientShards; i++ {
+		if ccpaShardedClients[i] != nil {
+			clients = append(clients, ccpaShardedClients[i])
+		}
+	}
+
+	sem := make(chan struct{}, 4)
+	var wg sync.WaitGroup
+	var warmed atomic.Int32
+	ua := GetAgyUserAgent()
+
+	for _, cl := range clients {
+		if ctx.Err() != nil {
+			break
+		}
+		wg.Add(1)
+		go func(c *http.Client) {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				return
+			}
+			reqCtx, cancelReq := context.WithTimeout(ctx, 3500*time.Millisecond)
+			defer cancelReq()
+			req, reqErr := http.NewRequestWithContext(reqCtx, http.MethodHead, originURL, nil)
+			if reqErr != nil {
+				return
+			}
+			req.Header.Set("User-Agent", ua)
+			resp, doErr := c.Do(req)
+			if doErr == nil && resp != nil {
+				_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+				_ = resp.Body.Close()
+				warmed.Add(1)
+			}
+		}(cl)
+	}
+	wg.Wait()
+	return int(warmed.Load())
+}
+
+func isRunningUnderGoTest() bool {
+	if len(os.Args) == 0 {
+		return false
+	}
+	arg0 := strings.ToLower(os.Args[0])
+	return strings.HasSuffix(arg0, ".test") || strings.HasSuffix(arg0, ".test.exe")
 }
 
 // GatewayUpstream implements UpstreamHandler with Standalone Direct Antigravity CCPA mode
@@ -223,19 +392,39 @@ type GatewayUpstream struct {
 }
 
 func (u *GatewayUpstream) ccpaHTTPClient(oauthToken string) *http.Client {
+	return u.ccpaHTTPClientForScope("", oauthToken)
+}
+
+func (u *GatewayUpstream) ccpaHTTPClientForScope(accScope, oauthToken string) *http.Client {
 	if u.client != nil && u.client != SharedHTTPClient {
 		return u.client
 	}
+	cleanTok := strings.TrimSpace(oauthToken)
+	scope := normalizeAccScope(accScope)
+	if scope == "anon" && cleanTok != "" {
+		scope = accountCacheScope(nil, cleanTok)
+	}
 	h := fnv.New32a()
-	_, _ = h.Write([]byte(strings.TrimSpace(oauthToken)))
-	idx := int(h.Sum32() % uint32(ccpaClientShards))
-	return ccpaShardedClients[idx]
+	_, _ = h.Write([]byte(scope))
+	_, _ = h.Write([]byte("|"))
+	_, _ = h.Write([]byte(cleanTok))
+	baseIdx := uint64(h.Sum32())
+
+	if currentCCPAScopeInFlight(accScope, cleanTok) > 1 {
+		offset := atomic.AddUint64(&ccpaShardOffset, 1)
+		return ccpaShardedClients[int((baseIdx+offset)%uint64(ccpaClientShards))]
+	}
+	return ccpaShardedClients[int(baseIdx%uint64(ccpaClientShards))]
 }
 
 // NewUpstream creates a new GatewayUpstream instance sharing the warm HTTP/2 connection pool.
 func NewUpstream(cfg GatewayConfig) *GatewayUpstream {
+	explicitDefault := strings.EqualFold(strings.TrimSpace(cfg.CCPAEndpoint), DefaultCCPAEndpoint)
 	if cfg.CCPAEndpoint == "" {
 		cfg.CCPAEndpoint = DefaultCCPAEndpoint
+	}
+	if explicitDefault && strings.TrimSpace(os.Getenv("OMNI_SKIP_CCPA_WARMUP")) == "" && !isRunningUnderGoTest() {
+		WarmupCCPAConnectionsAsync()
 	}
 	return &GatewayUpstream{
 		cfg:    cfg,
@@ -319,6 +508,9 @@ func (u *GatewayUpstream) HandleChatCompletion(
 			}
 		case ComboModeNightSaver:
 			w.Header().Set("X-Omni-Gateway-Combo-Mode", string(ComboModeNightSaver))
+		case ComboModeStriped:
+			w.Header().Set("X-Omni-Gateway-Combo-Mode", string(ComboModeStriped))
+			targets = u.rotateStripedComboTargets(resolved, targets)
 		}
 	}
 
@@ -741,6 +933,8 @@ func (u *GatewayUpstream) handleDirectCCPA(
 		endpoint = DefaultCCPAEndpoint
 	}
 	accScope := accountCacheScope(w, oauthToken)
+	releaseScopeInFlight := acquireCCPAScopeInFlight(accScope, oauthToken)
+	defer releaseScopeInFlight()
 	noThinking := req.ThinkingConfig != nil && !req.ThinkingConfig.IncludeThoughts && req.ThinkingConfig.ThinkingBudget == 0 && req.ThinkingConfig.ThinkingLevel == ThinkingLevelNone
 	ccpaCandidates := buildCCPACandidatesWithCache(endpoint, accScope, resolved, noThinking)
 
@@ -823,7 +1017,7 @@ func (u *GatewayUpstream) handleDirectCCPA(
 		httpReq.Header.Set("User-Agent", GetAgyUserAgent())
 		httpReq.Header.Set("Authorization", "Bearer "+oauthToken)
 
-		r, err := u.ccpaHTTPClient(oauthToken).Do(httpReq)
+		r, err := u.ccpaHTTPClientForScope(accScope, oauthToken).Do(httpReq)
 		if err != nil {
 			idleTimer.Stop()
 			candErr := candCtx.Err()
@@ -1235,16 +1429,103 @@ func (u *GatewayUpstream) handleDirectCCPA(
 	return json.NewEncoder(w).Encode(outResp)
 }
 
+func (u *GatewayUpstream) rotateStripedComboTargets(resolved ResolvedModel, targets []ResolvedModel) []ResolvedModel {
+	if len(targets) == 0 {
+		return targets
+	}
+	if len(targets) == 1 {
+		out := make([]ResolvedModel, 1)
+		out[0] = targets[0]
+		out[0].ComboMode = ComboModeStriped
+		return out
+	}
+
+	stripeCount := len(targets)
+	for _, combo := range NewResolver().ListCombos() {
+		if strings.EqualFold(combo.ID, resolved.CanonicalID) || strings.EqualFold(combo.ID, resolved.RequestedID) {
+			seenModels := make(map[string]struct{}, len(combo.Models))
+			validCount := 0
+			for _, m := range combo.Models {
+				m = strings.TrimSpace(m)
+				if m == "" || strings.EqualFold(m, resolved.RequestedID) || strings.EqualFold(m, resolved.CanonicalID) {
+					continue
+				}
+				if _, exists := seenModels[m]; !exists {
+					seenModels[m] = struct{}{}
+					validCount++
+				}
+			}
+			if validCount > 0 && validCount < stripeCount {
+				stripeCount = validCount
+			}
+			break
+		}
+	}
+
+	primaryPool := make([]ResolvedModel, stripeCount)
+	copy(primaryPool, targets[:stripeCount])
+	for i := range primaryPool {
+		primaryPool[i].ComboMode = ComboModeStriped
+	}
+	emergencyTail := targets[stripeCount:]
+
+	endpoint := u.cfg.CCPAEndpoint
+	if endpoint == "" {
+		endpoint = DefaultCCPAEndpoint
+	}
+	now := time.Now()
+
+	healthy := make([]ResolvedModel, 0, len(primaryPool))
+	degraded := make([]ResolvedModel, 0, len(primaryPool))
+	for _, t := range primaryPool {
+		if t.Provider == ProviderAntigravity && t.CCPAModelID != "" && !isVirtualCCPAIDEAlias(t.CCPAModelID) && isDeadCCPAModel(endpoint, t.CCPAModelID, now) {
+			degraded = append(degraded, t)
+		} else {
+			healthy = append(healthy, t)
+		}
+	}
+
+	seq := atomic.AddUint64(&stripedComboCounter, 1) - 1
+	rotated := make([]ResolvedModel, 0, len(targets))
+	if len(healthy) > 0 {
+		start := int(seq % uint64(len(healthy)))
+		rotated = append(rotated, healthy[start:]...)
+		rotated = append(rotated, healthy[:start]...)
+		rotated = append(rotated, degraded...)
+	} else {
+		start := int(seq % uint64(len(primaryPool)))
+		rotated = append(rotated, primaryPool[start:]...)
+		rotated = append(rotated, primaryPool[:start]...)
+	}
+	rotated = append(rotated, emergencyTail...)
+	return rotated
+}
+
+func isVirtualCCPAIDEAlias(candidate string) bool {
+	m := strings.ToLower(strings.TrimSpace(candidate))
+	return strings.HasPrefix(m, "gemini-4-carbon") ||
+		strings.HasPrefix(m, "gemini-4-argon") ||
+		m == "gemini-3.8-flash" ||
+		strings.HasPrefix(m, "gemini-3.1-pro") ||
+		strings.HasSuffix(m, "@default")
+}
+
 func buildCCPACandidatesWithCache(endpoint, accScope string, resolved ResolvedModel, noThinking bool) []string {
 	if endpoint == "" {
 		endpoint = DefaultCCPAEndpoint
 	}
+	if resolved.ComboMode == ComboModeStriped && strings.TrimSpace(resolved.CCPAModelID) != "" && !isVirtualCCPAIDEAlias(resolved.CCPAModelID) {
+		return []string{strings.TrimSpace(resolved.CCPAModelID)}
+	}
+	isDefaultProdEndpoint := strings.EqualFold(strings.TrimSpace(endpoint), DefaultCCPAEndpoint)
 	scope := normalizeAccScope(accScope)
 	var raw []string
+	var cachedWinner string
 	if !noThinking && resolved.CanonicalID != "" {
 		if cached, ok := workingCCPAModelCache.Load(endpoint + "|acc:" + scope + "|" + resolved.CanonicalID); ok {
 			if s, ok := cached.(string); ok && s != "" {
-				raw = append(raw, s)
+				cachedWinner = strings.TrimSpace(s)
+				raw = append(raw, cachedWinner)
 			}
 		}
 	}
@@ -1393,6 +1674,27 @@ func buildCCPACandidatesWithCache(endpoint, accScope string, resolved ResolvedMo
 		if m != "" && !seen[m] {
 			seen[m] = true
 			deduped = append(deduped, m)
+		}
+	}
+
+	// On DefaultCCPAEndpoint ONLY, place real backend CCPA model IDs ahead of virtual Antigravity IDE aliases
+	// so container cold-start requests never pay 700-1400ms probing HTTP 404 aliases.
+	if isDefaultProdEndpoint && len(deduped) > 1 {
+		realIDs := make([]string, 0, len(deduped))
+		virtualAliases := make([]string, 0, len(deduped))
+		for idx, m := range deduped {
+			if idx == 0 && cachedWinner != "" && m == cachedWinner {
+				realIDs = append(realIDs, m)
+				continue
+			}
+			if isVirtualCCPAIDEAlias(m) {
+				virtualAliases = append(virtualAliases, m)
+			} else {
+				realIDs = append(realIDs, m)
+			}
+		}
+		if len(realIDs) > 0 && len(virtualAliases) > 0 {
+			deduped = append(realIDs, virtualAliases...)
 		}
 	}
 
