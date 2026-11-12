@@ -700,6 +700,9 @@ func sendTracedChatRequestWithOpts(
 	}
 
 	temp := 0.1
+	if cfg.AllowCache && opts.Temperature == nil {
+		temp = 0.0
+	}
 	if opts.Temperature != nil {
 		temp = *opts.Temperature
 	}
@@ -2001,7 +2004,193 @@ func evaluatePeakGate1(carbonStep, fastStep ConcurrencyStepReport, tierByEmail m
 	}
 }
 
-func evaluatePeakGate2(call1, call2, call3 APIRequestSample, burstStep ConcurrencyStepReport) PeakGateResult {
+// AnthropicMessageSample captures telemetry and wire-format validation for /v1/messages calls.
+type AnthropicMessageSample struct {
+	HTTPStatus         int     `json:"http_status"`
+	CacheHeader        string  `json:"cache_header,omitempty"`
+	TotalWallMs        float64 `json:"total_wall_ms"`
+	SawMessageStart    bool    `json:"saw_message_start,omitempty"`
+	SawMessageStop     bool    `json:"saw_message_stop,omitempty"`
+	SawOpenAIChunkLeak bool    `json:"saw_openai_chunk_leak,omitempty"`
+	MessageType        string  `json:"message_type,omitempty"`
+	ResponseContent    string  `json:"response_content,omitempty"`
+	Error              string  `json:"error,omitempty"`
+}
+
+func sendTracedAnthropicRequest(
+	parentCtx context.Context,
+	client *http.Client,
+	cfg BenchConfig,
+	model string,
+	prompt string,
+	maxTokens int,
+	temp float64,
+	stream bool,
+) AnthropicMessageSample {
+	var sample AnthropicMessageSample
+	if maxTokens <= 0 {
+		maxTokens = 128
+	}
+	reqPayload := map[string]any{
+		"model":       model,
+		"max_tokens":  maxTokens,
+		"temperature": temp,
+		"stream":      stream,
+		"messages": []map[string]string{
+			{"role": "user", "content": prompt},
+		},
+	}
+	rawBody, _ := json.Marshal(reqPayload)
+
+	reqStart := time.Now()
+	reqCtx, cancel := context.WithTimeout(parentCtx, cfg.Timeout)
+	defer cancel()
+
+	endpoint := normalizeBaseURL(cfg.BaseURL) + "/v1/messages"
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, endpoint, bytes.NewReader(rawBody))
+	if err != nil {
+		sample.Error = err.Error()
+		sample.TotalWallMs = durationMs(time.Since(reqStart))
+		return sample
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept-Encoding", "gzip")
+	req.Header.Set("anthropic-version", "2023-06-01")
+	if cfg.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+cfg.APIKey)
+		req.Header.Set("x-api-key", cfg.APIKey)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		sample.Error = err.Error()
+		sample.TotalWallMs = durationMs(time.Since(reqStart))
+		return sample
+	}
+	defer resp.Body.Close()
+
+	sample.HTTPStatus = resp.StatusCode
+	sample.CacheHeader = strings.TrimSpace(resp.Header.Get("X-Omni-Gateway-Cache"))
+
+	var bodyReader io.Reader = resp.Body
+	if strings.EqualFold(strings.TrimSpace(resp.Header.Get("Content-Encoding")), "gzip") {
+		gz, gzErr := gzip.NewReader(resp.Body)
+		if gzErr != nil {
+			sample.Error = "gzip decode error: " + gzErr.Error()
+			sample.TotalWallMs = durationMs(time.Since(reqStart))
+			return sample
+		}
+		defer gz.Close()
+		bodyReader = gz
+	}
+
+	ct := strings.ToLower(resp.Header.Get("Content-Type"))
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 && (stream || strings.Contains(ct, "text/event-stream")) {
+		br := bufio.NewReaderSize(bodyReader, 32*1024)
+		var contentBuf strings.Builder
+		for {
+			line, readErr := br.ReadString('\n')
+			if len(line) > 0 {
+				trimmed := strings.TrimSpace(line)
+				if strings.HasPrefix(trimmed, "event:") {
+					evName := strings.TrimSpace(strings.TrimPrefix(trimmed, "event:"))
+					switch evName {
+					case "message_start":
+						sample.SawMessageStart = true
+					case "message_stop":
+						sample.SawMessageStop = true
+					}
+				} else if strings.HasPrefix(trimmed, "data:") {
+					payload := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
+					if payload == "[DONE]" {
+						sample.SawOpenAIChunkLeak = true
+					} else if payload != "" {
+						var ev struct {
+							Type   string `json:"type"`
+							Object string `json:"object"`
+							Delta  struct {
+								Type     string `json:"type"`
+								Text     string `json:"text"`
+								Thinking string `json:"thinking"`
+							} `json:"delta"`
+							Choices []any `json:"choices"`
+							Error   *struct {
+								Message string `json:"message"`
+							} `json:"error"`
+						}
+						if json.Unmarshal([]byte(payload), &ev) == nil {
+							if ev.Error != nil && ev.Error.Message != "" {
+								sample.Error = ev.Error.Message
+							}
+							if ev.Object == "chat.completion.chunk" || len(ev.Choices) > 0 {
+								sample.SawOpenAIChunkLeak = true
+							}
+							switch ev.Type {
+							case "message_start":
+								sample.SawMessageStart = true
+							case "message_stop":
+								sample.SawMessageStop = true
+							case "content_block_delta":
+								piece := ev.Delta.Text
+								if piece == "" {
+									piece = ev.Delta.Thinking
+								}
+								if piece != "" && contentBuf.Len() < 4096 {
+									contentBuf.WriteString(piece)
+								}
+							}
+						}
+					}
+				}
+			}
+			if readErr != nil {
+				if !errors.Is(readErr, io.EOF) && sample.Error == "" {
+					sample.Error = readErr.Error()
+				}
+				break
+			}
+		}
+		sample.ResponseContent = contentBuf.String()
+	} else {
+		rawResp, readErr := io.ReadAll(io.LimitReader(bodyReader, 4*1024*1024))
+		if readErr != nil {
+			sample.Error = readErr.Error()
+		} else if resp.StatusCode >= 400 {
+			sample.Error = extractErrorText(rawResp, resp.StatusCode)
+		} else {
+			var antResp struct {
+				Type    string `json:"type"`
+				Object  string `json:"object"`
+				Choices []any  `json:"choices"`
+				Content []struct {
+					Type     string `json:"type"`
+					Text     string `json:"text"`
+					Thinking string `json:"thinking"`
+				} `json:"content"`
+			}
+			if json.Unmarshal(rawResp, &antResp) == nil {
+				sample.MessageType = antResp.Type
+				if antResp.Object == "chat.completion" || len(antResp.Choices) > 0 {
+					sample.SawOpenAIChunkLeak = true
+				}
+				var sb strings.Builder
+				for _, block := range antResp.Content {
+					piece := block.Text
+					if piece == "" {
+						piece = block.Thinking
+					}
+					sb.WriteString(piece)
+				}
+				sample.ResponseContent = sb.String()
+			}
+		}
+	}
+
+	sample.TotalWallMs = durationMs(time.Since(reqStart))
+	return sample
+}
+
+func evaluatePeakGate2(call1, call2, call3 APIRequestSample, antCall1, antCall2, antCall3 AnthropicMessageSample, burstStep ConcurrencyStepReport) PeakGateResult {
 	var failures []string
 
 	if call1.HTTPStatus != http.StatusOK || call1.Error != "" {
@@ -2040,6 +2229,55 @@ func evaluatePeakGate2(call1, call2, call3 APIRequestSample, burstStep Concurren
 		}
 	}
 
+	// Verify /v1/messages native Anthropic SSE & JSON wire format on both MISS and HIT
+	if antCall1.HTTPStatus != http.StatusOK || antCall1.Error != "" {
+		failures = append(failures, fmt.Sprintf("/v1/messages Call#1(MISS) failed: status=%d err=%s", antCall1.HTTPStatus, antCall1.Error))
+	} else {
+		if strings.EqualFold(antCall1.CacheHeader, "HIT") {
+			failures = append(failures, "/v1/messages Call#1 expected MISS on fresh nonce prompt, got HIT")
+		}
+		if antCall1.SawOpenAIChunkLeak {
+			failures = append(failures, "/v1/messages Call#1(MISS) leaked raw OpenAI SSE wire format instead of Anthropic SSE")
+		}
+		if !antCall1.SawMessageStart || !antCall1.SawMessageStop {
+			failures = append(failures, fmt.Sprintf("/v1/messages Call#1(MISS) missing Anthropic SSE events (message_start=%v, message_stop=%v)", antCall1.SawMessageStart, antCall1.SawMessageStop))
+		}
+		if strings.TrimSpace(antCall1.ResponseContent) == "" {
+			failures = append(failures, "/v1/messages Call#1(MISS) returned empty text delta")
+		}
+	}
+
+	if antCall2.HTTPStatus != http.StatusOK || antCall2.Error != "" {
+		failures = append(failures, fmt.Sprintf("/v1/messages Call#2(stream:true HIT) failed: status=%d err=%s", antCall2.HTTPStatus, antCall2.Error))
+	} else {
+		if !strings.EqualFold(antCall2.CacheHeader, "HIT") {
+			failures = append(failures, fmt.Sprintf("/v1/messages Call#2(stream:true) expected HIT, got %q", antCall2.CacheHeader))
+		}
+		if antCall2.SawOpenAIChunkLeak || !antCall2.SawMessageStart || !antCall2.SawMessageStop {
+			failures = append(failures, fmt.Sprintf("/v1/messages Call#2(HIT) invalid Anthropic SSE (start=%v stop=%v oaiLeak=%v)", antCall2.SawMessageStart, antCall2.SawMessageStop, antCall2.SawOpenAIChunkLeak))
+		}
+		if strings.TrimSpace(antCall2.ResponseContent) == "" {
+			failures = append(failures, "/v1/messages Call#2(HIT) returned empty text delta")
+		}
+		if antCall2.TotalWallMs >= 30.0 {
+			failures = append(failures, fmt.Sprintf("/v1/messages Call#2(HIT) WAN latency %.2fms >= 30ms", antCall2.TotalWallMs))
+		}
+	}
+
+	if antCall3.HTTPStatus != http.StatusOK || antCall3.Error != "" {
+		failures = append(failures, fmt.Sprintf("/v1/messages Call#3(stream:false HIT) failed: status=%d err=%s", antCall3.HTTPStatus, antCall3.Error))
+	} else {
+		if !strings.EqualFold(antCall3.CacheHeader, "HIT") {
+			failures = append(failures, fmt.Sprintf("/v1/messages Call#3(stream:false) cross-mode expected HIT, got %q", antCall3.CacheHeader))
+		}
+		if antCall3.SawOpenAIChunkLeak || antCall3.MessageType != "message" {
+			failures = append(failures, fmt.Sprintf("/v1/messages Call#3(JSON HIT) expected Anthropic type='message', got %q (oaiLeak=%v)", antCall3.MessageType, antCall3.SawOpenAIChunkLeak))
+		}
+		if strings.TrimSpace(antCall3.ResponseContent) == "" {
+			failures = append(failures, "/v1/messages Call#3(JSON HIT) returned empty content")
+		}
+	}
+
 	burstHits := 0
 	for _, s := range burstStep.Samples {
 		if s.HTTPStatus == http.StatusOK && s.Error == "" && strings.EqualFold(s.CacheHeader, "HIT") {
@@ -2059,32 +2297,40 @@ func evaluatePeakGate2(call1, call2, call3 APIRequestSample, burstStep Concurren
 		status = "FAIL"
 	}
 	summary := fmt.Sprintf(
-		"Call#1=%s (%.1fms), Call#2(SSE)=%s [DONE=%v] (%.2fms), Call#3(JSON)=%s (%.2fms) | Burst(N=%d): %d/%d HIT, %.1f RPS (wall=%.1fms)",
+		"Chat: #1=%s (%.0fms) #2(SSE)=%s (%.1fms) #3(JSON)=%s (%.1fms) | Anth(/v1/messages): #1=%s[start..stop=%v] #2(SSE)=%s (%.1fms) #3(JSON)=%s | Burst(N=%d): %d/%d HIT, %.1f RPS",
 		firstNonEmptyStr(call1.CacheHeader, "MISS"), call1.TotalWallMs,
-		firstNonEmptyStr(call2.CacheHeader, "-"), call2.SawStreamDone, call2.TotalWallMs,
+		firstNonEmptyStr(call2.CacheHeader, "-"), call2.TotalWallMs,
 		firstNonEmptyStr(call3.CacheHeader, "-"), call3.TotalWallMs,
-		burstStep.Concurrency, burstHits, burstStep.Concurrency, burstStep.RPS, burstStep.BatchWallMs,
+		firstNonEmptyStr(antCall1.CacheHeader, "MISS"), antCall1.SawMessageStart && antCall1.SawMessageStop && !antCall1.SawOpenAIChunkLeak,
+		firstNonEmptyStr(antCall2.CacheHeader, "-"), antCall2.TotalWallMs,
+		firstNonEmptyStr(antCall3.CacheHeader, "-"),
+		burstStep.Concurrency, burstHits, burstStep.Concurrency, burstStep.RPS,
 	)
 
 	return PeakGateResult{
 		GateID:   2,
-		Name:     "stream:true Cache Population & Sub-25ms WAN Cache HIT",
+		Name:     "stream:true Cache Population (/v1/chat/completions & /v1/messages) & Sub-25ms WAN HIT",
 		Passed:   passed,
 		Status:   status,
 		Summary:  summary,
 		Failures: failures,
 		Metrics: map[string]any{
-			"call1_cache":    firstNonEmptyStr(call1.CacheHeader, "MISS"),
-			"call1_ms":       call1.TotalWallMs,
-			"call2_cache":    call2.CacheHeader,
-			"call2_ms":       call2.TotalWallMs,
-			"call2_done":     call2.SawStreamDone,
-			"call3_cache":    call3.CacheHeader,
-			"call3_ms":       call3.TotalWallMs,
-			"burst_conc":     burstStep.Concurrency,
-			"burst_hits":     burstHits,
-			"burst_rps":      burstStep.RPS,
-			"burst_wall_ms":  burstStep.BatchWallMs,
+			"call1_cache":       firstNonEmptyStr(call1.CacheHeader, "MISS"),
+			"call1_ms":          call1.TotalWallMs,
+			"call2_cache":       call2.CacheHeader,
+			"call2_ms":          call2.TotalWallMs,
+			"call2_done":        call2.SawStreamDone,
+			"call3_cache":       call3.CacheHeader,
+			"call3_ms":          call3.TotalWallMs,
+			"anth_call1_cache":  firstNonEmptyStr(antCall1.CacheHeader, "MISS"),
+			"anth_call1_sse_ok": antCall1.SawMessageStart && antCall1.SawMessageStop && !antCall1.SawOpenAIChunkLeak,
+			"anth_call2_cache":  antCall2.CacheHeader,
+			"anth_call2_ms":     antCall2.TotalWallMs,
+			"anth_call3_cache":  antCall3.CacheHeader,
+			"burst_conc":        burstStep.Concurrency,
+			"burst_hits":        burstHits,
+			"burst_rps":         burstStep.RPS,
+			"burst_wall_ms":     burstStep.BatchWallMs,
 		},
 	}
 }
@@ -2307,11 +2553,11 @@ func runPeakGates(
 	tracedSamples = append(tracedSamples, fastStep.Samples...)
 	gate1 := evaluatePeakGate1(carbonStep, fastStep, tierByEmail, hasProAccounts)
 
-	// --- Gate 2: stream:true Cache Population & Sub-25ms WAN Cache HIT ---
-	fmt.Fprintf(out, "  [Gate 2] Testing stream:true -> stream:true/false Cache HIT symmetry + N=36 warm SSE burst ...\n")
+	// --- Gate 2: stream:true Cache Population & Sub-25ms WAN Cache HIT (/v1/chat/completions & /v1/messages) ---
+	fmt.Fprintf(out, "  [Gate 2] Testing /v1/chat/completions & /v1/messages stream:true -> HIT(SSE/JSON) symmetry + N=36 warm SSE burst ...\n")
 	zeroTemp := 0.0
-	cacheOptsSSE := chatReqOpts{Temperature: &zeroTemp, MaxTokens: 32, Stream: &streamTrue}
-	cacheOptsJSON := chatReqOpts{Temperature: &zeroTemp, MaxTokens: 32, Stream: &streamFalse}
+	cacheOptsSSE := chatReqOpts{Temperature: &zeroTemp, MaxTokens: 128, Stream: &streamTrue}
+	cacheOptsJSON := chatReqOpts{Temperature: &zeroTemp, MaxTokens: 128, Stream: &streamFalse}
 	nonceTag := fmt.Sprintf("bench-trace:%s-pg2-cache-%d", runID, time.Now().UnixNano())
 	// Trailing whitespace also verifies pre-compression cache key consistency!
 	cachePrompt := fmt.Sprintf("[%s] Reply with the single word OK.   \n  ", nonceTag)
@@ -2319,6 +2565,12 @@ func runPeakGates(
 	call1 := sendTracedChatRequestWithOpts(ctx, client, cfg, "antigravity/gemini-3-flash", "", cachePrompt, nonceTag, "peak-gates", cacheOptsSSE)
 	call2 := sendTracedChatRequestWithOpts(ctx, client, cfg, "antigravity/gemini-3-flash", "", cachePrompt, "", "peak-gates", cacheOptsSSE)
 	call3 := sendTracedChatRequestWithOpts(ctx, client, cfg, "antigravity/gemini-3-flash", "", cachePrompt, "", "peak-gates", cacheOptsJSON)
+
+	anthNonceTag := fmt.Sprintf("bench-trace:%s-pg2-anth-%d", runID, time.Now().UnixNano())
+	anthCachePrompt := fmt.Sprintf("[%s] Reply with the single word OK.   \n  ", anthNonceTag)
+	antCall1 := sendTracedAnthropicRequest(ctx, client, cfg, "antigravity/gemini-3-flash", anthCachePrompt, 128, 0.0, true)
+	antCall2 := sendTracedAnthropicRequest(ctx, client, cfg, "antigravity/gemini-3-flash", anthCachePrompt, 128, 0.0, true)
+	antCall3 := sendTracedAnthropicRequest(ctx, client, cfg, "antigravity/gemini-3-flash", anthCachePrompt, 128, 0.0, false)
 
 	// Pre-warm 36 concurrent keepalive sockets/streams so the timed N=36 burst measures pure warm Cache HIT RPS
 	_ = runBurstChatStep(ctx, client, cfg, "antigravity/gemini-3-flash", 36, cacheOptsSSE, func(_ int) (string, string) {
@@ -2336,7 +2588,7 @@ func runPeakGates(
 			burstStep = burstStep2
 		}
 	}
-	gate2 := evaluatePeakGate2(call1, call2, call3, burstStep)
+	gate2 := evaluatePeakGate2(call1, call2, call3, antCall1, antCall2, antCall3, burstStep)
 
 	// --- Gate 3: Multi-Account Parallel Throughput (N=63) + Zero 429 Leakage ---
 	fmt.Fprintf(out, "  [Gate 3] Testing N=63 auto/parallel-flagship + N=63 auto/max-speed ...\n")
