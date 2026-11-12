@@ -440,88 +440,27 @@ func buildPreSerializedCacheEntry(key string, req OpenAIChatRequest, resp OpenAI
 	copy(sseUsageBytes, sseUsageBuf.Bytes())
 
 	// 3. Pre-serialize Anthropic /v1/messages JSON and SSE wire bytes
-	anthID := resp.ID
-	if !strings.HasPrefix(anthID, "msg_") {
-		shortKey := key
-		if len(shortKey) > 16 {
-			shortKey = shortKey[:16]
-		}
-		anthID = "msg_cache_" + shortKey
-	}
-	anthStopReason := "end_turn"
-	if finishReason == "length" {
-		anthStopReason = "max_tokens"
-	}
-
-	type anthContentBlock struct {
-		Type     string `json:"type"`
-		Text     string `json:"text,omitempty"`
-		Thinking string `json:"thinking,omitempty"`
-	}
-	type anthUsage struct {
-		InputTokens  int `json:"input_tokens"`
-		OutputTokens int `json:"output_tokens"`
-	}
-	type anthMessageResp struct {
-		ID           string             `json:"id"`
-		Type         string             `json:"type"`
-		Role         string             `json:"role"`
-		Model        string             `json:"model"`
-		Content      []anthContentBlock `json:"content"`
-		StopReason   *string            `json:"stop_reason"`
-		StopSequence *string            `json:"stop_sequence"`
-		Usage        anthUsage          `json:"usage"`
-	}
-
-	var blocks []anthContentBlock
-	if reasoning != "" {
-		blocks = append(blocks, anthContentBlock{Type: "thinking", Thinking: reasoning})
-	}
-	blocks = append(blocks, anthContentBlock{Type: "text", Text: content})
-
-	stopReasonCopy := anthStopReason
-	anthMsg := anthMessageResp{
-		ID:           anthID,
-		Type:         "message",
-		Role:         "assistant",
-		Model:        resp.Model,
-		Content:      blocks,
-		StopReason:   &stopReasonCopy,
-		StopSequence: nil,
-		Usage: anthUsage{
-			InputTokens:  promptToks,
-			OutputTokens: compToks,
-		},
-	}
-	anthRaw, _ := json.Marshal(anthMsg)
-	anthJSONBytes := make([]byte, 0, len(anthRaw)+1)
-	anthJSONBytes = append(anthJSONBytes, anthRaw...)
-	anthJSONBytes = append(anthJSONBytes, '\n')
+	anthID := normalizeAnthropicMessageID(resp.ID, key)
+	anthStopReason := mapOpenAIFinishReasonToAnthropic(finishReason)
+	anthJSONBytes := buildAnthropicJSONBytesWithHint(resp, model, key)
 
 	// Build Anthropic SSE sequence:
 	// message_start -> content_block_start -> content_block_delta -> content_block_stop -> message_delta -> message_stop
 	var anthSSE bytes.Buffer
-	anthSSE.Grow(len(anthRaw) + 512)
-	writeAnthSSE := func(event string, payload any) {
-		b, _ := json.Marshal(payload)
-		anthSSE.WriteString("event: ")
-		anthSSE.WriteString(event)
-		anthSSE.WriteString("\ndata: ")
-		anthSSE.Write(b)
-		anthSSE.WriteString("\n\n")
-	}
+	anthSSE.Grow(len(anthJSONBytes) + 512)
 
-	writeAnthSSE("message_start", map[string]any{
-		"type": "message_start",
-		"message": anthMessageResp{
+	emptyStr := ""
+	writeAnthropicSSEEvent(&anthSSE, "message_start", anthropicSSEMessageStart{
+		Type: "message_start",
+		Message: anthropicMessageResponse{
 			ID:           anthID,
 			Type:         "message",
 			Role:         "assistant",
 			Model:        resp.Model,
-			Content:      []anthContentBlock{},
+			Content:      []anthWireContentBlock{},
 			StopReason:   nil,
 			StopSequence: nil,
-			Usage: anthUsage{
+			Usage: anthropicUsage{
 				InputTokens:  promptToks,
 				OutputTokens: 0,
 			},
@@ -530,50 +469,52 @@ func buildPreSerializedCacheEntry(key string, req OpenAIChatRequest, resp OpenAI
 
 	blockIdx := 0
 	if reasoning != "" {
-		writeAnthSSE("content_block_start", map[string]any{
-			"type":          "content_block_start",
-			"index":         blockIdx,
-			"content_block": map[string]string{"type": "thinking", "thinking": ""},
+		rCopy := reasoning
+		writeAnthropicSSEEvent(&anthSSE, "content_block_start", anthropicSSEContentBlockStart{
+			Type:         "content_block_start",
+			Index:        blockIdx,
+			ContentBlock: anthWireContentBlock{Type: "thinking", Thinking: &emptyStr},
 		})
-		writeAnthSSE("content_block_delta", map[string]any{
-			"type":  "content_block_delta",
-			"index": blockIdx,
-			"delta": map[string]string{"type": "thinking_delta", "thinking": reasoning},
+		writeAnthropicSSEEvent(&anthSSE, "content_block_delta", anthropicSSEContentBlockDelta{
+			Type:  "content_block_delta",
+			Index: blockIdx,
+			Delta: anthWireContentBlock{Type: "thinking_delta", Thinking: &rCopy},
 		})
-		writeAnthSSE("content_block_stop", map[string]any{
-			"type":  "content_block_stop",
-			"index": blockIdx,
+		writeAnthropicSSEEvent(&anthSSE, "content_block_stop", anthropicSSEContentBlockStop{
+			Type:  "content_block_stop",
+			Index: blockIdx,
 		})
 		blockIdx++
 	}
 
-	writeAnthSSE("content_block_start", map[string]any{
-		"type":          "content_block_start",
-		"index":         blockIdx,
-		"content_block": map[string]string{"type": "text", "text": ""},
+	cCopy := content
+	writeAnthropicSSEEvent(&anthSSE, "content_block_start", anthropicSSEContentBlockStart{
+		Type:         "content_block_start",
+		Index:        blockIdx,
+		ContentBlock: anthWireContentBlock{Type: "text", Text: &emptyStr},
 	})
-	writeAnthSSE("content_block_delta", map[string]any{
-		"type":  "content_block_delta",
-		"index": blockIdx,
-		"delta": map[string]string{"type": "text_delta", "text": content},
+	writeAnthropicSSEEvent(&anthSSE, "content_block_delta", anthropicSSEContentBlockDelta{
+		Type:  "content_block_delta",
+		Index: blockIdx,
+		Delta: anthWireContentBlock{Type: "text_delta", Text: &cCopy},
 	})
-	writeAnthSSE("content_block_stop", map[string]any{
-		"type":  "content_block_stop",
-		"index": blockIdx,
+	writeAnthropicSSEEvent(&anthSSE, "content_block_stop", anthropicSSEContentBlockStop{
+		Type:  "content_block_stop",
+		Index: blockIdx,
 	})
 
-	writeAnthSSE("message_delta", map[string]any{
-		"type": "message_delta",
-		"delta": map[string]any{
-			"stop_reason":   anthStopReason,
-			"stop_sequence": nil,
+	writeAnthropicSSEEvent(&anthSSE, "message_delta", anthropicSSEMessageDelta{
+		Type: "message_delta",
+		Delta: anthropicMessageDeltaBody{
+			StopReason:   anthStopReason,
+			StopSequence: nil,
 		},
-		"usage": map[string]int{
-			"output_tokens": compToks,
+		Usage: anthropicOutputUsage{
+			OutputTokens: compToks,
 		},
 	})
-	writeAnthSSE("message_stop", map[string]string{
-		"type": "message_stop",
+	writeAnthropicSSEEvent(&anthSSE, "message_stop", anthropicSSEMessageStop{
+		Type: "message_stop",
 	})
 
 	anthSSEBytes := make([]byte, anthSSE.Len())
@@ -596,6 +537,195 @@ func buildPreSerializedCacheEntry(key string, req OpenAIChatRequest, resp OpenAI
 		AnthropicJSONBytes: anthJSONBytes,
 		AnthropicSSEBytes:  anthSSEBytes,
 	}
+}
+
+type anthWireContentBlock struct {
+	Type     string  `json:"type"`
+	Text     *string `json:"text,omitempty"`
+	Thinking *string `json:"thinking,omitempty"`
+}
+
+type anthropicUsage struct {
+	InputTokens  int `json:"input_tokens"`
+	OutputTokens int `json:"output_tokens"`
+}
+
+type anthropicOutputUsage struct {
+	OutputTokens int `json:"output_tokens"`
+}
+
+type anthropicMessageResponse struct {
+	ID           string                  `json:"id"`
+	Type         string                  `json:"type"`
+	Role         string                  `json:"role"`
+	Model        string                  `json:"model"`
+	Content      []anthWireContentBlock `json:"content"`
+	StopReason   *string                 `json:"stop_reason"`
+	StopSequence *string                 `json:"stop_sequence"`
+	Usage        anthropicUsage          `json:"usage"`
+}
+
+type anthropicSSEMessageStart struct {
+	Type    string                   `json:"type"`
+	Message anthropicMessageResponse `json:"message"`
+}
+
+type anthropicSSEContentBlockStart struct {
+	Type         string                `json:"type"`
+	Index        int                   `json:"index"`
+	ContentBlock anthWireContentBlock `json:"content_block"`
+}
+
+type anthropicSSEContentBlockDelta struct {
+	Type  string                `json:"type"`
+	Index int                   `json:"index"`
+	Delta anthWireContentBlock `json:"delta"`
+}
+
+type anthropicSSEContentBlockStop struct {
+	Type  string `json:"type"`
+	Index int    `json:"index"`
+}
+
+type anthropicMessageDeltaBody struct {
+	StopReason   string  `json:"stop_reason"`
+	StopSequence *string `json:"stop_sequence"`
+}
+
+type anthropicSSEMessageDelta struct {
+	Type  string                    `json:"type"`
+	Delta anthropicMessageDeltaBody `json:"delta"`
+	Usage anthropicOutputUsage      `json:"usage"`
+}
+
+type anthropicSSEMessageStop struct {
+	Type string `json:"type"`
+}
+
+type anthropicSSEErrorDetail struct {
+	Type    string `json:"type"`
+	Message string `json:"message"`
+}
+
+type anthropicSSEError struct {
+	Type  string                  `json:"type"`
+	Error anthropicSSEErrorDetail `json:"error"`
+}
+
+var anthMsgSeq atomic.Uint64
+
+func normalizeAnthropicMessageID(rawID, fallbackHint string) string {
+	id := strings.TrimSpace(rawID)
+	if strings.HasPrefix(id, "msg_") {
+		return id
+	}
+	if trimmed := strings.TrimPrefix(id, "chatcmpl-"); trimmed != "" {
+		return "msg_" + trimmed
+	}
+	if fallbackHint != "" {
+		shortKey := fallbackHint
+		if len(shortKey) > 16 {
+			shortKey = shortKey[:16]
+		}
+		return "msg_cache_" + shortKey
+	}
+	return "msg_" + strconv.FormatUint(anthMsgSeq.Add(1), 36)
+}
+
+func mapOpenAIFinishReasonToAnthropic(finishReason string) string {
+	switch strings.ToLower(strings.TrimSpace(finishReason)) {
+	case "length", "max_tokens":
+		return "max_tokens"
+	case "tool_calls", "function_call":
+		return "tool_use"
+	case "stop_sequence":
+		return "stop_sequence"
+	default:
+		return "end_turn"
+	}
+}
+
+func writeAnthropicSSEEvent(buf *bytes.Buffer, event string, payload any) {
+	b, _ := json.Marshal(payload)
+	buf.WriteString("event: ")
+	buf.WriteString(event)
+	buf.WriteString("\ndata: ")
+	buf.Write(b)
+	buf.WriteString("\n\n")
+}
+
+func buildAnthropicJSONBytes(resp OpenAIChatResponse, fallbackModel string) []byte {
+	return buildAnthropicJSONBytesWithHint(resp, fallbackModel, "")
+}
+
+func buildAnthropicJSONBytesWithHint(resp OpenAIChatResponse, fallbackModel, keyHint string) []byte {
+	model := strings.TrimSpace(resp.Model)
+	if model == "" {
+		model = strings.TrimSpace(fallbackModel)
+	}
+	if model == "" {
+		model = "unknown"
+	}
+
+	content := ""
+	reasoning := ""
+	finishReason := "stop"
+	if len(resp.Choices) > 0 {
+		if resp.Choices[0].Message != nil {
+			content = resp.Choices[0].Message.Content
+			reasoning = resp.Choices[0].Message.ReasoningContent
+		} else if resp.Choices[0].Delta != nil {
+			content = resp.Choices[0].Delta.Content
+			reasoning = resp.Choices[0].Delta.ReasoningContent
+		}
+		if strings.TrimSpace(resp.Choices[0].FinishReason) != "" {
+			finishReason = resp.Choices[0].FinishReason
+		}
+	}
+
+	promptToks := 0
+	compToks := 0
+	if resp.Usage != nil {
+		promptToks = resp.Usage.PromptTokens
+		compToks = resp.Usage.CompletionTokens
+		if compToks <= 0 && resp.Usage.TotalTokens > promptToks {
+			compToks = resp.Usage.TotalTokens - promptToks
+		}
+	}
+	if compToks <= 0 && (len(content) > 0 || len(reasoning) > 0) {
+		compToks = (len(content) + len(reasoning) + 3) / 4
+		if compToks <= 0 {
+			compToks = 1
+		}
+	}
+
+	blocks := make([]anthWireContentBlock, 0, 2)
+	if reasoning != "" {
+		rCopy := reasoning
+		blocks = append(blocks, anthWireContentBlock{Type: "thinking", Thinking: &rCopy})
+	}
+	cCopy := content
+	blocks = append(blocks, anthWireContentBlock{Type: "text", Text: &cCopy})
+
+	stopReason := mapOpenAIFinishReasonToAnthropic(finishReason)
+	anthMsg := anthropicMessageResponse{
+		ID:           normalizeAnthropicMessageID(resp.ID, keyHint),
+		Type:         "message",
+		Role:         "assistant",
+		Model:        model,
+		Content:      blocks,
+		StopReason:   &stopReason,
+		StopSequence: nil,
+		Usage: anthropicUsage{
+			InputTokens:  promptToks,
+			OutputTokens: compToks,
+		},
+	}
+	anthRaw, _ := json.Marshal(anthMsg)
+	anthJSONBytes := make([]byte, 0, len(anthRaw)+1)
+	anthJSONBytes = append(anthJSONBytes, anthRaw...)
+	anthJSONBytes = append(anthJSONBytes, '\n')
+	return anthJSONBytes
 }
 
 // Put stores a response in the cache with pre-serialized JSON & SSE payloads and O(1) LRU eviction.

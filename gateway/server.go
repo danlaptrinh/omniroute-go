@@ -10,15 +10,20 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
 
 const GatewayVersion = "2.0.0-omniroute-go"
 
-var cacheLogSeq atomic.Uint64
+var (
+	cacheLogSeq                 atomic.Uint64
+	fallbackAccountProxyByScope sync.Map
+)
 
 // Server exposes the OmniRoute-Go v2.0 HTTP API (/v1/models, /v1/chat/completions, /v1/messages,
 // /v1/providers, /v1/providers/strategy, /v1/providers/alibaba, /v1/oauth/url, /v1/oauth/exchange,
@@ -114,6 +119,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/providers/alibaba", s.requireAdmin(s.handleAlibabaProviderSave))
 	mux.HandleFunc("/v1/providers/import-openclaw", s.requireAdmin(s.handleProvidersList))
 	mux.HandleFunc("/v1/providers/strategy", s.requireAdmin(s.handleRoutingStrategy))
+	mux.HandleFunc("/v1/providers/account-proxy", s.requireAdmin(s.handleAccountProxy))
 	mux.HandleFunc("/v1/providers", s.requireAdmin(s.handleProvidersList))
 	mux.HandleFunc("/v1/auth/config", s.requireAdmin(s.handleAuthConfig))
 	mux.HandleFunc("/v1/auth/status", s.handleAuthStatus)
@@ -222,6 +228,7 @@ func (s *Server) handleProvidersList(w http.ResponseWriter, r *http.Request) {
 		ProjectID     string     `json:"project_id,omitempty"`
 		Region        string     `json:"region,omitempty"`
 		BaseURL       string     `json:"base_url,omitempty"`
+		ProxyURL      string     `json:"proxy_url,omitempty"`
 		InCooldown    bool       `json:"in_cooldown"`
 		CooldownLeftS int64      `json:"cooldown_left_s"`
 		SuccessCount  int64      `json:"success_count"`
@@ -267,6 +274,7 @@ func (s *Server) handleProvidersList(w http.ResponseWriter, r *http.Request) {
 			ProjectID:     a.ProjectID,
 			Region:        a.Region,
 			BaseURL:       a.BaseURL,
+			ProxyURL:      maskProxyURL(readAccountProxyURL(a)),
 			InCooldown:    cdLeft > 0,
 			CooldownLeftS: cdLeft,
 			SuccessCount:  a.SuccessCount,
@@ -332,6 +340,151 @@ func (s *Server) handleRoutingStrategy(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"status":           "ok",
 		"routing_strategy": saved.RoutingStrategy,
+	})
+}
+
+func readAccountProxyURL(acc ConnectedAccount) string {
+	v := reflect.ValueOf(acc)
+	if f := v.FieldByName("ProxyURL"); f.IsValid() && f.Kind() == reflect.String {
+		return strings.TrimSpace(f.String())
+	}
+	if key := strings.ToLower(strings.TrimSpace(acc.Email)); key != "" {
+		if raw, ok := fallbackAccountProxyByScope.Load(key); ok {
+			if s, ok := raw.(string); ok {
+				return s
+			}
+		}
+	}
+	if key := strings.ToLower(strings.TrimSpace(acc.ID)); key != "" {
+		if raw, ok := fallbackAccountProxyByScope.Load(key); ok {
+			if s, ok := raw.(string); ok {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
+func maskProxyURL(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	u, err := url.Parse(trimmed)
+	if err != nil || u.User == nil {
+		return trimmed
+	}
+	if _, hasPass := u.User.Password(); !hasPass {
+		return trimmed
+	}
+	username := u.User.Username()
+	u.User = nil
+	base := u.String()
+	schemeSep := strings.Index(base, "://")
+	if schemeSep < 0 {
+		return trimmed
+	}
+	return base[:schemeSep+3] + url.PathEscape(username) + ":***@" + base[schemeSep+3:]
+}
+
+func validateAccountProxyURL(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", nil
+	}
+	u, err := url.Parse(trimmed)
+	if err != nil {
+		return "", fmt.Errorf("invalid proxy URL: %w", err)
+	}
+	scheme := strings.ToLower(strings.TrimSpace(u.Scheme))
+	switch scheme {
+	case "http", "https", "socks5", "socks5h":
+	default:
+		return "", fmt.Errorf("unsupported proxy scheme %q (allowed: http, https, socks5, socks5h)", u.Scheme)
+	}
+	if strings.TrimSpace(u.Host) == "" {
+		return "", fmt.Errorf("proxy URL must include host:port")
+	}
+	return trimmed, nil
+}
+
+func (s *Server) handleAccountProxy(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeOpenAIError(w, http.StatusMethodNotAllowed, "only POST is supported", "invalid_request_error")
+		return
+	}
+	var req struct {
+		ID       string `json:"id"`
+		Email    string `json:"email"`
+		ProxyURL string `json:"proxy_url"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 16*1024)).Decode(&req); err != nil {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid JSON payload: "+err.Error(), "invalid_request_error")
+		return
+	}
+	targetID := strings.TrimSpace(req.ID)
+	targetEmail := strings.TrimSpace(req.Email)
+	if targetID == "" && targetEmail == "" {
+		writeOpenAIError(w, http.StatusBadRequest, "account id or email is required", "invalid_request_error")
+		return
+	}
+	normalizedProxy, err := validateAccountProxyURL(req.ProxyURL)
+	if err != nil {
+		writeOpenAIError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
+		return
+	}
+
+	configMu.Lock()
+	cfg := loadSavedAuthConfigLocked()
+	matchedIdx := -1
+	for i := range cfg.Accounts {
+		if (targetID != "" && strings.EqualFold(cfg.Accounts[i].ID, targetID)) ||
+			(targetEmail != "" && strings.EqualFold(cfg.Accounts[i].Email, targetEmail)) {
+			matchedIdx = i
+			break
+		}
+	}
+	if matchedIdx < 0 {
+		configMu.Unlock()
+		writeOpenAIError(w, http.StatusNotFound, "connected account not found", "not_found_error")
+		return
+	}
+
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+	accPtr := &cfg.Accounts[matchedIdx]
+	f := reflect.ValueOf(accPtr).Elem().FieldByName("ProxyURL")
+	if f.IsValid() && f.CanSet() && f.Kind() == reflect.String {
+		f.SetString(normalizedProxy)
+	} else {
+		for _, k := range []string{strings.ToLower(strings.TrimSpace(accPtr.Email)), strings.ToLower(strings.TrimSpace(accPtr.ID))} {
+			if k == "" {
+				continue
+			}
+			if normalizedProxy == "" {
+				fallbackAccountProxyByScope.Delete(k)
+			} else {
+				fallbackAccountProxyByScope.Store(k, normalizedProxy)
+			}
+		}
+	}
+	accPtr.UpdatedAt = nowStr
+	cfg.UpdatedAt = nowStr
+	saveErr := saveAuthConfigLocked(cfg)
+	updatedAcc := *accPtr
+	configMu.Unlock()
+
+	if saveErr != nil {
+		writeOpenAIError(w, http.StatusInternalServerError, "failed to persist proxy configuration: "+saveErr.Error(), "server_error")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"status":    "ok",
+		"id":        updatedAcc.ID,
+		"email":     updatedAcc.Email,
+		"proxy_url": maskProxyURL(readAccountProxyURL(updatedAcc)),
 	})
 }
 
@@ -1215,32 +1368,357 @@ type chatCompletionEnvelope struct {
 	Tools         []json.RawMessage `json:"tools,omitempty"`
 }
 
-type nonStreamCaptureWriter struct {
-	http.ResponseWriter
+type anthropicNonStreamBufferWriter struct {
+	hdr        http.Header
 	statusCode int
 	buf        bytes.Buffer
 }
 
-func (cw *nonStreamCaptureWriter) WriteHeader(code int) {
-	if cw.statusCode == 0 {
-		cw.statusCode = code
-	}
-	cw.ResponseWriter.WriteHeader(code)
+func (bw *anthropicNonStreamBufferWriter) Header() http.Header {
+	return bw.hdr
 }
 
-func (cw *nonStreamCaptureWriter) Write(p []byte) (int, error) {
-	if cw.statusCode == 0 {
-		cw.statusCode = http.StatusOK
+func (bw *anthropicNonStreamBufferWriter) WriteHeader(code int) {
+	if bw.statusCode == 0 {
+		bw.statusCode = code
 	}
-	if cw.statusCode == http.StatusOK && cw.buf.Len()+len(p) <= 512*1024 {
-		_, _ = cw.buf.Write(p)
-	}
-	return cw.ResponseWriter.Write(p)
 }
 
-func (cw *nonStreamCaptureWriter) Flush() {
-	if fl, ok := cw.ResponseWriter.(http.Flusher); ok {
+func (bw *anthropicNonStreamBufferWriter) Write(p []byte) (int, error) {
+	if bw.statusCode == 0 {
+		bw.statusCode = http.StatusOK
+	}
+	return bw.buf.Write(p)
+}
+
+func (bw *anthropicNonStreamBufferWriter) Flush() {}
+
+type anthropicSSEAdapterWriter struct {
+	w               http.ResponseWriter
+	fallbackModel   string
+	estimatedInput  int
+	statusCode      int
+	wroteHeader     bool
+	passthrough     bool
+	started         bool
+	doneEmitted     bool
+	sawStreamError  bool
+	hasEmittedBlock bool
+	activeBlockKind string
+	nextBlockIndex  int
+	msgID           string
+	model           string
+	finishReason    string
+	inputTokens     int
+	outputTokens    int
+	lineBuf         bytes.Buffer
+	outBuf          bytes.Buffer
+	accContent      strings.Builder
+	accReasoning    strings.Builder
+}
+
+func newAnthropicSSEAdapterWriter(w http.ResponseWriter, fallbackModel string, estimatedInput int) *anthropicSSEAdapterWriter {
+	if estimatedInput <= 0 {
+		estimatedInput = 1
+	}
+	return &anthropicSSEAdapterWriter{
+		w:              w,
+		fallbackModel:  strings.TrimSpace(fallbackModel),
+		estimatedInput: estimatedInput,
+		inputTokens:    estimatedInput,
+	}
+}
+
+func (sw *anthropicSSEAdapterWriter) Header() http.Header {
+	return sw.w.Header()
+}
+
+func (sw *anthropicSSEAdapterWriter) WriteHeader(code int) {
+	if sw.wroteHeader {
+		return
+	}
+	sw.wroteHeader = true
+	sw.statusCode = code
+	if code != http.StatusOK {
+		sw.passthrough = true
+		sw.w.WriteHeader(code)
+		return
+	}
+	hdr := sw.w.Header()
+	hdr.Set("Content-Type", "text/event-stream")
+	hdr.Set("Cache-Control", "no-cache")
+	hdr.Set("Connection", "keep-alive")
+	hdr.Set("X-Accel-Buffering", "no")
+	hdr.Del("Content-Length")
+	sw.w.WriteHeader(http.StatusOK)
+}
+
+func (sw *anthropicSSEAdapterWriter) Write(p []byte) (int, error) {
+	if !sw.wroteHeader {
+		sw.WriteHeader(http.StatusOK)
+	}
+	if sw.passthrough {
+		return sw.w.Write(p)
+	}
+	_, _ = sw.lineBuf.Write(p)
+	sw.outBuf.Reset()
+
+	for {
+		idx := bytes.IndexByte(sw.lineBuf.Bytes(), '\n')
+		if idx < 0 {
+			break
+		}
+		line := sw.lineBuf.Next(idx + 1)
+		sw.processSSELine(line)
+	}
+
+	if sw.outBuf.Len() > 0 {
+		if _, err := sw.w.Write(sw.outBuf.Bytes()); err != nil {
+			return 0, err
+		}
+	}
+	return len(p), nil
+}
+
+func (sw *anthropicSSEAdapterWriter) Flush() {
+	if fl, ok := sw.w.(http.Flusher); ok {
 		fl.Flush()
+	}
+}
+
+func (sw *anthropicSSEAdapterWriter) processSSELine(line []byte) {
+	trimmed := bytes.TrimSpace(line)
+	if len(trimmed) == 0 {
+		return
+	}
+	if trimmed[0] == ':' {
+		sw.outBuf.Write(trimmed)
+		sw.outBuf.WriteString("\n\n")
+		return
+	}
+	if bytes.HasPrefix(trimmed, []byte("data:")) {
+		payload := bytes.TrimSpace(trimmed[5:])
+		sw.processSSEPayload(payload)
+		return
+	}
+	if trimmed[0] == '{' {
+		sw.processSSEPayload(trimmed)
+	}
+}
+
+func (sw *anthropicSSEAdapterWriter) ensureMessageStart() {
+	if sw.started {
+		return
+	}
+	sw.started = true
+	if sw.msgID == "" {
+		sw.msgID = normalizeAnthropicMessageID("", "")
+	}
+	model := sw.model
+	if model == "" {
+		model = sw.fallbackModel
+	}
+	if model == "" {
+		model = "unknown"
+	}
+	writeAnthropicSSEEvent(&sw.outBuf, "message_start", anthropicSSEMessageStart{
+		Type: "message_start",
+		Message: anthropicMessageResponse{
+			ID:           sw.msgID,
+			Type:         "message",
+			Role:         "assistant",
+			Model:        model,
+			Content:      []anthWireContentBlock{},
+			StopReason:   nil,
+			StopSequence: nil,
+			Usage: anthropicUsage{
+				InputTokens:  sw.inputTokens,
+				OutputTokens: 0,
+			},
+		},
+	})
+}
+
+func (sw *anthropicSSEAdapterWriter) closeActiveBlock() {
+	if sw.activeBlockKind == "" {
+		return
+	}
+	writeAnthropicSSEEvent(&sw.outBuf, "content_block_stop", anthropicSSEContentBlockStop{
+		Type:  "content_block_stop",
+		Index: sw.nextBlockIndex,
+	})
+	sw.activeBlockKind = ""
+	sw.nextBlockIndex++
+}
+
+func (sw *anthropicSSEAdapterWriter) processSSEPayload(payload []byte) {
+	if len(payload) == 0 || sw.doneEmitted {
+		return
+	}
+	if bytes.Equal(payload, []byte("[DONE]")) {
+		sw.emitStreamEnd()
+		return
+	}
+
+	var chunk OpenAIChatResponse
+	if err := json.Unmarshal(payload, &chunk); err != nil {
+		return
+	}
+
+	if chunk.Error != nil && len(chunk.Choices) == 0 {
+		sw.sawStreamError = true
+		errType := strings.TrimSpace(chunk.Error.Type)
+		if errType == "" {
+			errType = "api_error"
+		}
+		writeAnthropicSSEEvent(&sw.outBuf, "error", anthropicSSEError{
+			Type: "error",
+			Error: anthropicSSEErrorDetail{
+				Type:    errType,
+				Message: chunk.Error.Message,
+			},
+		})
+		return
+	}
+
+	if sw.msgID == "" && strings.TrimSpace(chunk.ID) != "" {
+		sw.msgID = normalizeAnthropicMessageID(chunk.ID, "")
+	}
+	if strings.TrimSpace(chunk.Model) != "" {
+		sw.model = strings.TrimSpace(chunk.Model)
+	}
+	if chunk.Usage != nil {
+		if chunk.Usage.PromptTokens > 0 {
+			sw.inputTokens = chunk.Usage.PromptTokens
+		}
+		if chunk.Usage.CompletionTokens > 0 {
+			sw.outputTokens = chunk.Usage.CompletionTokens
+		} else if chunk.Usage.TotalTokens > sw.inputTokens {
+			sw.outputTokens = chunk.Usage.TotalTokens - sw.inputTokens
+		}
+	}
+
+	sw.ensureMessageStart()
+
+	emptyStr := ""
+	for _, choice := range chunk.Choices {
+		var reasoningDelta, textDelta string
+		if choice.Delta != nil {
+			reasoningDelta = choice.Delta.ReasoningContent
+			textDelta = choice.Delta.Content
+		} else if choice.Message != nil {
+			reasoningDelta = choice.Message.ReasoningContent
+			textDelta = choice.Message.Content
+		}
+
+		if reasoningDelta != "" {
+			if sw.activeBlockKind != "thinking" {
+				sw.closeActiveBlock()
+				writeAnthropicSSEEvent(&sw.outBuf, "content_block_start", anthropicSSEContentBlockStart{
+					Type:         "content_block_start",
+					Index:        sw.nextBlockIndex,
+					ContentBlock: anthWireContentBlock{Type: "thinking", Thinking: &emptyStr},
+				})
+				sw.activeBlockKind = "thinking"
+				sw.hasEmittedBlock = true
+			}
+			rCopy := reasoningDelta
+			writeAnthropicSSEEvent(&sw.outBuf, "content_block_delta", anthropicSSEContentBlockDelta{
+				Type:  "content_block_delta",
+				Index: sw.nextBlockIndex,
+				Delta: anthWireContentBlock{Type: "thinking_delta", Thinking: &rCopy},
+			})
+			sw.accReasoning.WriteString(reasoningDelta)
+		}
+
+		if textDelta != "" {
+			if sw.activeBlockKind != "text" {
+				sw.closeActiveBlock()
+				writeAnthropicSSEEvent(&sw.outBuf, "content_block_start", anthropicSSEContentBlockStart{
+					Type:         "content_block_start",
+					Index:        sw.nextBlockIndex,
+					ContentBlock: anthWireContentBlock{Type: "text", Text: &emptyStr},
+				})
+				sw.activeBlockKind = "text"
+				sw.hasEmittedBlock = true
+			}
+			tCopy := textDelta
+			writeAnthropicSSEEvent(&sw.outBuf, "content_block_delta", anthropicSSEContentBlockDelta{
+				Type:  "content_block_delta",
+				Index: sw.nextBlockIndex,
+				Delta: anthWireContentBlock{Type: "text_delta", Text: &tCopy},
+			})
+			sw.accContent.WriteString(textDelta)
+		}
+
+		if strings.TrimSpace(choice.FinishReason) != "" {
+			sw.finishReason = strings.TrimSpace(choice.FinishReason)
+		}
+	}
+}
+
+func (sw *anthropicSSEAdapterWriter) emitStreamEnd() {
+	if sw.doneEmitted {
+		return
+	}
+	sw.ensureMessageStart()
+	emptyStr := ""
+	if !sw.hasEmittedBlock {
+		writeAnthropicSSEEvent(&sw.outBuf, "content_block_start", anthropicSSEContentBlockStart{
+			Type:         "content_block_start",
+			Index:        sw.nextBlockIndex,
+			ContentBlock: anthWireContentBlock{Type: "text", Text: &emptyStr},
+		})
+		sw.activeBlockKind = "text"
+		sw.hasEmittedBlock = true
+	}
+	sw.closeActiveBlock()
+
+	outToks := sw.outputTokens
+	if outToks <= 0 {
+		totalLen := sw.accContent.Len() + sw.accReasoning.Len()
+		if totalLen > 0 {
+			outToks = (totalLen + 3) / 4
+			if outToks <= 0 {
+				outToks = 1
+			}
+		}
+	}
+
+	stopReason := mapOpenAIFinishReasonToAnthropic(sw.finishReason)
+	writeAnthropicSSEEvent(&sw.outBuf, "message_delta", anthropicSSEMessageDelta{
+		Type: "message_delta",
+		Delta: anthropicMessageDeltaBody{
+			StopReason:   stopReason,
+			StopSequence: nil,
+		},
+		Usage: anthropicOutputUsage{
+			OutputTokens: outToks,
+		},
+	})
+	writeAnthropicSSEEvent(&sw.outBuf, "message_stop", anthropicSSEMessageStop{
+		Type: "message_stop",
+	})
+	sw.doneEmitted = true
+}
+
+func (sw *anthropicSSEAdapterWriter) Finalize() {
+	if !sw.wroteHeader || sw.passthrough || sw.statusCode != http.StatusOK {
+		return
+	}
+	sw.outBuf.Reset()
+	if sw.lineBuf.Len() > 0 {
+		rem := sw.lineBuf.Bytes()
+		sw.lineBuf.Reset()
+		sw.processSSELine(rem)
+	}
+	if !sw.doneEmitted && !sw.sawStreamError {
+		sw.emitStreamEnd()
+	}
+	if sw.outBuf.Len() > 0 {
+		_, _ = sw.w.Write(sw.outBuf.Bytes())
+		sw.outBuf.Reset()
+		sw.Flush()
 	}
 }
 
@@ -1509,19 +1987,115 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 		ctx = WithPinnedAccount(ctx, pinAcc)
 	}
 
-	if !antReq.Stream && len(antReq.Tools) == 0 && IsCacheable(oaiReq) {
-		cw := &nonStreamCaptureWriter{ResponseWriter: w}
-		upErr := s.upstream.HandleChatCompletion(ctx, cw, oaiReq, resolved, incomingAuth)
-		if upErr == nil && (cw.statusCode == 0 || cw.statusCode == http.StatusOK) && cw.buf.Len() > 0 && !GetGlobalCache().Has(oaiReq) {
+	if !antReq.Stream {
+		bw := &anthropicNonStreamBufferWriter{hdr: make(http.Header)}
+		upErr := s.upstream.HandleChatCompletion(ctx, bw, oaiReq, resolved, incomingAuth)
+
+		for k, vals := range bw.hdr {
+			if strings.EqualFold(k, "Content-Length") {
+				continue
+			}
+			for i, v := range vals {
+				if i == 0 {
+					w.Header().Set(k, v)
+				} else {
+					w.Header().Add(k, v)
+				}
+			}
+		}
+		w.Header().Set("X-Omni-Gateway-Cache", "MISS")
+
+		code := bw.statusCode
+		if code == 0 {
+			if upErr != nil && bw.buf.Len() == 0 {
+				code = http.StatusBadGateway
+			} else {
+				code = http.StatusOK
+			}
+		}
+
+		if code != http.StatusOK {
+			w.WriteHeader(code)
+			if bw.buf.Len() > 0 {
+				_, _ = w.Write(bw.buf.Bytes())
+			}
+		} else {
 			var parsed OpenAIChatResponse
-			if decErr := json.Unmarshal(cw.buf.Bytes(), &parsed); decErr == nil && len(parsed.Choices) > 0 {
-				if parsed.Choices[0].FinishReason != "length" {
-					GetGlobalCache().Put(oaiReq, parsed)
+			if decErr := json.Unmarshal(bw.buf.Bytes(), &parsed); decErr == nil && parsed.Error == nil && (len(parsed.Choices) > 0 || parsed.Object == "chat.completion") {
+				if parsed.Usage == nil {
+					promptEst := EstimateTokens(oaiReq.Messages)
+					parsed.Usage = &OpenAIUsage{
+						PromptTokens: promptEst,
+						TotalTokens:  promptEst,
+					}
+				} else if parsed.Usage.PromptTokens <= 0 {
+					parsed.Usage.PromptTokens = EstimateTokens(oaiReq.Messages)
+				}
+
+				if len(antReq.Tools) == 0 && IsCacheable(oaiReq) && !GetGlobalCache().Has(oaiReq) {
+					if len(parsed.Choices) == 0 || parsed.Choices[0].FinishReason != "length" {
+						GetGlobalCache().Put(oaiReq, parsed)
+					}
+				}
+
+				anthBytes := buildAnthropicJSONBytes(parsed, oaiReq.Model)
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Del("Content-Length")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write(anthBytes)
+			} else {
+				w.WriteHeader(http.StatusOK)
+				if bw.buf.Len() > 0 {
+					_, _ = w.Write(bw.buf.Bytes())
 				}
 			}
 		}
 	} else {
-		_ = s.upstream.HandleChatCompletion(ctx, w, oaiReq, resolved, incomingAuth)
+		sw := newAnthropicSSEAdapterWriter(w, oaiReq.Model, EstimateTokens(oaiReq.Messages))
+		upErr := s.upstream.HandleChatCompletion(ctx, sw, oaiReq, resolved, incomingAuth)
+		sw.Finalize()
+
+		if upErr == nil && sw.statusCode == http.StatusOK && !sw.passthrough && !sw.sawStreamError &&
+			len(antReq.Tools) == 0 && IsCacheable(oaiReq) && sw.finishReason != "length" &&
+			(sw.accContent.Len() > 0 || sw.accReasoning.Len() > 0) && !GetGlobalCache().Has(oaiReq) {
+			finish := sw.finishReason
+			if finish == "" {
+				finish = "stop"
+			}
+			aggModel := sw.model
+			if aggModel == "" {
+				aggModel = oaiReq.Model
+			}
+			outToks := sw.outputTokens
+			if outToks <= 0 {
+				outToks = (sw.accContent.Len() + sw.accReasoning.Len() + 3) / 4
+				if outToks <= 0 {
+					outToks = 1
+				}
+			}
+			cacheKeyReq := oaiReq
+			cacheKeyReq.Stream = false
+			GetGlobalCache().Put(cacheKeyReq, OpenAIChatResponse{
+				ID:      sw.msgID,
+				Object:  "chat.completion",
+				Created: time.Now().Unix(),
+				Model:   aggModel,
+				Choices: []OpenAIChatChoice{{
+					Index: 0,
+					Message: &OpenAIOutputMessage{
+						Role:             "assistant",
+						Content:          sw.accContent.String(),
+						ReasoningContent: sw.accReasoning.String(),
+					},
+					FinishReason: finish,
+				}},
+				Usage: &OpenAIUsage{
+					PromptTokens:     sw.inputTokens,
+					CompletionTokens: outToks,
+					TotalTokens:      sw.inputTokens + outToks,
+				},
+			})
+		}
 	}
 
 	if apiKeyObj != nil {
