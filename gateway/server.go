@@ -478,6 +478,9 @@ func (s *Server) handleAccountProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	InvalidateAccountHTTPClients(updatedAcc.Email)
+	InvalidateAccountHTTPClients(updatedAcc.ID)
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]any{
