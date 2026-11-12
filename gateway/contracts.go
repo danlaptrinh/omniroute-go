@@ -243,6 +243,7 @@ type GatewayLogEntry struct {
 	Account          string     `json:"account,omitempty"`
 	RequestedModel   string     `json:"requested_model"`
 	ResolvedModel    string     `json:"resolved_model"`
+	UpstreamModel    string     `json:"upstream_model,omitempty"`
 	PromptText       string     `json:"prompt_text,omitempty"`
 	ResponseText     string     `json:"response_text,omitempty"`
 	PromptTokens     int        `json:"prompt_tokens,omitempty"`

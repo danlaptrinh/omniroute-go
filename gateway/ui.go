@@ -2488,6 +2488,80 @@ docker compose up -d --build</pre>
       }
     }
 
+    let latestAccountLogByEmail = {};
+
+    function normalizeModelSlugJS(m) {
+      let s = (m || '').trim().toLowerCase();
+      const prefixes = ['antigravity/', 'claude-code/', 'alibaba/', 'models/', 'google/', 'agy/', 'anthropic/', 'cc/', 'dashscope/', 'bailian/'];
+      for (let i = 0; i < prefixes.length; i++) {
+        if (s.startsWith(prefixes[i])) {
+          s = s.slice(prefixes[i].length).trim();
+          break;
+        }
+      }
+      return s;
+    }
+
+    function formatModelRoleBadge(rawModel, latestLogEntry) {
+      const raw = (rawModel || '').trim();
+      if (!raw) return 'Model';
+      let sep = '';
+      if (raw.indexOf('➔') !== -1) sep = '➔';
+      else if (raw.indexOf('->') !== -1) sep = '->';
+
+      if (sep) {
+        const parts = raw.split(sep);
+        const reqPart = (parts[0] || '').trim();
+        const actPart = parts.slice(1).join(' ' + sep + ' ').trim();
+        if (reqPart && actPart && normalizeModelSlugJS(reqPart) !== normalizeModelSlugJS(actPart)) {
+          return '<span style="color:#cbd5e1;">' + htmlEscape(reqPart) + '</span> ' +
+            '<span style="display:inline-block;padding:1px 6px;border-radius:4px;background:rgba(245,158,11,0.18);border:1px solid rgba(245,158,11,0.45);color:#fbbf24;font-weight:700;">➔ thực chạy: ' + htmlEscape(actPart) + '</span>';
+        }
+        return htmlEscape(actPart || reqPart);
+      }
+
+      if (latestLogEntry && latestLogEntry.requested_model) {
+        const normRaw = normalizeModelSlugJS(raw);
+        const normLogRes = normalizeModelSlugJS(latestLogEntry.resolved_model || '');
+        const normLogReq = normalizeModelSlugJS(latestLogEntry.requested_model || '');
+        if (normRaw === normLogRes || normRaw === normLogReq) {
+          return formatLogModelTruth(latestLogEntry);
+        }
+      }
+      return htmlEscape(raw);
+    }
+
+    function formatLogModelTruth(e) {
+      if (!e) return '';
+      const reqM = (e.requested_model || '').trim();
+      const resM = (e.resolved_model || '').trim();
+      const upM = (e.upstream_model || '').trim();
+
+      if (resM.indexOf('➔') !== -1 || resM.indexOf('->') !== -1) {
+        const baseBadge = formatModelRoleBadge(resM, null);
+        if (upM && resM.toLowerCase().indexOf(upM.toLowerCase()) === -1) {
+          return baseBadge + ' <span style="color:#38bdf8;font-size:10.5px;">[' + htmlEscape(upM) + ']</span>';
+        }
+        return baseBadge;
+      }
+
+      const normReq = normalizeModelSlugJS(reqM);
+      const normRes = normalizeModelSlugJS(resM);
+      const normUp = normalizeModelSlugJS(upM);
+
+      let actualDisplay = resM || upM || reqM;
+      if (resM && upM && normRes !== normUp) {
+        actualDisplay = resM + ' [' + upM + ']';
+      }
+
+      const hasDiff = (reqM && resM && normReq !== normRes) || (reqM && upM && normReq !== normUp);
+      if (hasDiff) {
+        return '<span style="color:#cbd5e1;">' + htmlEscape(reqM) + '</span> ' +
+          '<span style="display:inline-block;padding:1px 6px;border-radius:4px;background:rgba(245,158,11,0.18);border:1px solid rgba(245,158,11,0.45);color:#fbbf24;font-weight:700;">➔ thực chạy: ' + htmlEscape(actualDisplay) + '</span>';
+      }
+      return '<span>' + htmlEscape(actualDisplay || reqM) + '</span>';
+    }
+
     async function renderLiveExecutionMonitor(quotaData) {
       const inFlightBox = document.getElementById('liveInFlightList');
       const badgeEl = document.getElementById('liveActiveCountBadge');
@@ -2509,36 +2583,50 @@ docker compose up -d --build</pre>
       }
 
       if (activeAccs.length > 0) {
-        inFlightBox.innerHTML = activeAccs.map(a =>
-          '<div style="display:inline-flex;align-items:center;gap:8px;background:rgba(168,85,247,0.16);border:1px solid #a855f7;border-radius:8px;padding:6px 11px;margin-right:8px;margin-bottom:4px;">' +
+        inFlightBox.innerHTML = activeAccs.map(a => {
+          const accKey = (a.email || a.id || '').toLowerCase();
+          return '<div style="display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap;background:rgba(168,85,247,0.16);border:1px solid #a855f7;border-radius:8px;padding:6px 11px;margin-right:8px;margin-bottom:4px;">' +
             '<span style="color:#c084fc;font-weight:700;">🔥 ĐANG XỬ LÝ:</span>' +
             '<strong style="color:#fff;font-family:monospace;">' + htmlEscape(a.email || a.id) + '</strong>' +
-            '<span style="color:#38bdf8;font-weight:700;">➔ ' + htmlEscape(a.active_model || a.last_model || 'Model') + '</span>' +
+            '<span style="color:#38bdf8;font-weight:700;">➔ ' + formatModelRoleBadge(a.active_model || a.last_model || 'Model', a.active_model ? null : latestAccountLogByEmail[accKey]) + '</span>' +
             '<span class="badge badge-purple">' + a.in_flight + ' req</span>' +
-          '</div>'
-        ).join('');
+          '</div>';
+        }).join('');
       } else {
         inFlightBox.innerHTML = '<span style="color:#34d399;font-weight:600;">🟢 Hiện tại không có lệnh nào đang chạy ngầm — Toàn bộ ' + accounts.length + ' tài khoản đều đang rảnh 100% (Idle &amp; Sẵn sàng nhận request mới).</span>';
       }
 
       if (recentBox) {
         try {
-          const lr = await fetch('/v1/logs?limit=5');
+          const lr = await fetch('/v1/logs?limit=25');
           const ld = await lr.json();
           const rawList = (ld && (ld.data || ld.entries)) ? (ld.data || ld.entries) : [];
+          const nextLogMap = {};
+          for (let i = 0; i < rawList.length; i++) {
+            const item = rawList[i];
+            const k = (item && item.account ? item.account : '').toLowerCase();
+            if (k && !nextLogMap[k]) {
+              nextLogMap[k] = item;
+            }
+          }
+          latestAccountLogByEmail = nextLogMap;
+          renderQuotaCards();
+
           const entries = rawList.slice(0, 5);
           if (entries.length === 0) {
             recentBox.innerHTML = 'Chưa có lịch sử gọi model nào gần đây.';
           } else {
-            let rows = '<div style="font-weight:700;color:#e2e8f0;margin-bottom:5px;">⚡ 5 Lượt Chạy Thực Tế Gần Nhất (Cho biết chính xác Tài khoản nào &amp; Model nào vừa chạy):</div>' +
-              '<div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(260px, 1fr));gap:6px;">';
+            let rows = '<div style="font-weight:700;color:#e2e8f0;margin-bottom:5px;">⚡ 5 Lượt Chạy Thực Tế Gần Nhất (Hiển thị 100% sự thật Model yêu cầu ➔ Model thực chạy):</div>' +
+              '<div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(290px, 1fr));gap:6px;">';
             entries.forEach(e => {
               const latColor = e.latency_ms > 7000 ? '#f87171' : (e.latency_ms > 3000 ? '#fbbf24' : '#34d399');
               rows += '<div style="background:#131926;border:1px solid #232c3d;border-radius:6px;padding:6px 9px;display:flex;justify-content:space-between;align-items:center;gap:6px;">' +
-                '<div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' +
-                  '<span style="color:#64748b;font-family:monospace;font-size:10.5px;">[' + htmlEscape((e.timestamp || '').split(' ')[0] || '') + ']</span> ' +
-                  '<strong style="color:#38bdf8;font-family:monospace;">' + htmlEscape(e.account || e.provider || 'auto') + '</strong>' +
-                  '<div style="color:#fbbf24;font-family:monospace;font-size:11px;font-weight:600;">🤖 ' + htmlEscape(e.resolved_model || e.requested_model || '') + '</div>' +
+                '<div style="min-width:0;flex:1;">' +
+                  '<div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' +
+                    '<span style="color:#64748b;font-family:monospace;font-size:10.5px;">[' + htmlEscape((e.timestamp || '').split(' ')[0] || '') + ']</span> ' +
+                    '<strong style="color:#38bdf8;font-family:monospace;">' + htmlEscape(e.account || e.provider || 'auto') + '</strong>' +
+                  '</div>' +
+                  '<div style="color:#fbbf24;font-family:monospace;font-size:11px;font-weight:600;margin-top:2px;line-height:1.4;word-break:break-word;">🤖 ' + formatLogModelTruth(e) + '</div>' +
                 '</div>' +
                 '<div style="text-align:right;white-space:nowrap;">' +
                   '<div style="color:' + latColor + ';font-weight:700;font-family:monospace;">' + (e.latency_ms || 0) + ' ms</div>' +
@@ -2643,10 +2731,11 @@ docker compose up -d --build</pre>
                       ? '<span style="color:#c084fc;font-weight:700;">🔥 ĐANG XỬ LÝ (' + acc.in_flight + ' req)</span>'
                       : '<span style="color:#34d399;font-weight:700;">🟢 Sẵn sàng (Đang rảnh)</span>')));
 
+        const accLogKey = (acc.email || acc.id || '').toLowerCase();
         const activeOrLastModelText = isBusyNow
-          ? ('<span style="color:#c084fc;font-weight:700;">🔥 Đang chạy: ' + htmlEscape(acc.active_model || 'Model') + '</span>')
+          ? ('<span style="color:#c084fc;font-weight:700;line-height:1.4;word-break:break-word;">🔥 Đang chạy: ' + formatModelRoleBadge(acc.active_model || 'Model', null) + '</span>')
           : (acc.last_model
-              ? ('<span style="color:#fbbf24;font-weight:600;">🤖 Vừa chạy: ' + htmlEscape(acc.last_model) + '</span>' + (acc.last_latency_ms ? (' <span style="color:#94a3b8;">(' + acc.last_latency_ms + ' ms)</span>') : ''))
+              ? ('<span style="color:#fbbf24;font-weight:600;line-height:1.4;word-break:break-word;">🤖 Vừa chạy: ' + formatModelRoleBadge(acc.last_model, latestAccountLogByEmail[accLogKey]) + '</span>' + (acc.last_latency_ms ? (' <span style="color:#94a3b8;">(' + acc.last_latency_ms + ' ms)</span>') : ''))
               : '<span style="color:#64748b;">Chưa chạy model nào</span>');
 
         const validationCalloutHTML = safeValURL
@@ -3388,7 +3477,7 @@ docker compose up -d --build</pre>
                 statusBadge +
                 empBadge +
                 '<span class="badge ' + provBadge + '">' + htmlEscape(log.provider) + '</span>' +
-                '<strong>' + htmlEscape(log.resolved_model || log.requested_model) + '</strong>' +
+                '<strong style="font-family:monospace;">' + formatLogModelTruth(log) + '</strong>' +
                 (log.account ? ('<span style="color:var(--muted);font-size:11px;">(' + htmlEscape(log.account) + ')</span>') : '') +
               '</div>' +
               '<div style="display:flex;align-items:center;gap:10px;">' +
@@ -3421,7 +3510,7 @@ docker compose up -d --build</pre>
       document.getElementById('promptModalMeta').innerHTML =
         '<span><strong>👤 Nhân viên:</strong> ' + htmlEscape(empName) + '</span>' +
         (log.masked_key ? ('<span>| <strong>🔑 Key:</strong> <code>' + htmlEscape(log.masked_key) + '</code></span>') : '') +
-        '<span>| <strong>🤖 Model:</strong> ' + htmlEscape(log.resolved_model || log.requested_model) + '</span>' +
+        '<span>| <strong>🤖 Model:</strong> ' + formatLogModelTruth(log) + '</span>' +
         '<span>| <strong>⚡ Token:</strong> ' + (log.total_tokens || 0) + ' (Prompt: ' + (log.prompt_tokens || 0) + ', Output: ' + (log.completion_tokens || 0) + ')</span>' +
         '<span>| <strong>⏱️ Độ trễ:</strong> ' + (log.latency_ms || 0) + 'ms</span>' +
         '<span>| <strong>🕒 Lúc:</strong> ' + htmlEscape((log.timestamp || '').replace('T', ' ').slice(0, 19)) + '</span>';

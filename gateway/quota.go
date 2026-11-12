@@ -8,6 +8,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -74,7 +75,89 @@ var (
 	lastQuotaCheck  time.Time
 	cachedSummary   *QuotaSummary
 	quotaRefreshing int32
+
+	// CCPAFetchAvailableModelsEndpoint is optional override for v1internal:fetchAvailableModels;
+	// when empty, derived automatically from CCPARetrieveUserQuotaEndpoint so mock tests stay local.
+	CCPAFetchAvailableModelsEndpoint = ""
+
+	// accountTierCache stores live CCPA loadCodeAssist tier ("Ultra", "Pro", "Lite") keyed by lowercase email/ID.
+	accountTierCache sync.Map
+
+	// validationIsolatedAccounts tracks accounts isolated specifically for VALIDATION_REQUIRED
+	// so permanent 24h TOS_VIOLATION bans are never cleared when loadCodeAssist returns 200 OK.
+	validationIsolatedAccounts sync.Map
 )
+
+// RememberAccountTier caches the verified live tier for an account email and/or ID.
+func RememberAccountTier(email, id, tier string) {
+	t := strings.TrimSpace(tier)
+	if t == "" {
+		return
+	}
+	if e := strings.ToLower(strings.TrimSpace(email)); e != "" {
+		accountTierCache.Store(e, t)
+	}
+	if cleanID := strings.ToLower(strings.TrimSpace(id)); cleanID != "" {
+		accountTierCache.Store(cleanID, t)
+	}
+}
+
+func findCachedAccountDetail(acc ConnectedAccount, cached *QuotaSummary) *AccountQuotaDetail {
+	if cached == nil {
+		return nil
+	}
+	for i := range cached.Accounts {
+		cand := &cached.Accounts[i]
+		if (acc.ID != "" && cand.ID == acc.ID) ||
+			(acc.Email != "" && strings.EqualFold(cand.Email, acc.Email)) {
+			return cand
+		}
+	}
+	return nil
+}
+
+func inferTierFromLabel(label string) string {
+	l := strings.ToLower(strings.TrimSpace(label))
+	if l == "" {
+		return ""
+	}
+	switch {
+	case strings.Contains(l, "ultra"):
+		return "Ultra"
+	case strings.Contains(l, "lite") || strings.Contains(l, "free"):
+		return "Lite"
+	case strings.Contains(l, "pro") || strings.Contains(l, "premium"):
+		return "Pro"
+	default:
+		return ""
+	}
+}
+
+// LookupCachedAccountTier resolves an Antigravity account's tier from cached live summary,
+// live tier cache, or explicit account label — never guessing from email substrings.
+func LookupCachedAccountTier(acc ConnectedAccount, cached *QuotaSummary) string {
+	if prev := findCachedAccountDetail(acc, cached); prev != nil && strings.TrimSpace(prev.Tier) != "" {
+		return prev.Tier
+	}
+	if e := strings.ToLower(strings.TrimSpace(acc.Email)); e != "" {
+		if v, ok := accountTierCache.Load(e); ok {
+			if s, okStr := v.(string); okStr && s != "" {
+				return s
+			}
+		}
+	}
+	if cleanID := strings.ToLower(strings.TrimSpace(acc.ID)); cleanID != "" {
+		if v, ok := accountTierCache.Load(cleanID); ok {
+			if s, okStr := v.(string); okStr && s != "" {
+				return s
+			}
+		}
+	}
+	if fromLabel := inferTierFromLabel(acc.Label); fromLabel != "" {
+		return fromLabel
+	}
+	return "Pro"
+}
 
 // MaskEmail masks email addresses for display e.g. "phongsaigon11@gmail.com" -> "pho***@gmail.com".
 func MaskEmail(email string) string {
@@ -258,6 +341,10 @@ func buildInstantQuotaSummary(auth SavedGatewayAuth) *QuotaSummary {
 	diff := nextMidnight.Sub(now)
 	resetText := fmt.Sprintf("⏱️ Đặt lại sau %dh %02dm", int(diff.Hours()), int(diff.Minutes())%60)
 
+	quotaCacheMu.RLock()
+	prevSummary := cachedSummary
+	quotaCacheMu.RUnlock()
+
 	summary := &QuotaSummary{
 		TotalAccounts: len(auth.Accounts),
 		Accounts:      make([]AccountQuotaDetail, len(auth.Accounts)),
@@ -302,30 +389,42 @@ func buildInstantQuotaSummary(auth SavedGatewayAuth) *QuotaSummary {
 		case ProviderAlibaba:
 			inspectAlibabaAccount(nil, &acc, &detail, resetText)
 		default:
-			detail.Tier = "Pro"
-			if strings.Contains(strings.ToLower(acc.Email), "phongsaigon") || strings.Contains(strings.ToLower(acc.Email), "thuctapsinh") {
-				detail.Tier = "Ultra"
-			}
-			geminiWeekly := 84
-			if acc.WeeklyGeminiPercent != nil && *acc.WeeklyGeminiPercent > 0 {
-				geminiWeekly = *acc.WeeklyGeminiPercent
-			}
-			detail.SessionPercent = 98
-			detail.WeeklyPercent = geminiWeekly
-			detail.SupportedModels = []string{
-				"antigravity/gemini-4-carbon-high",
-				"antigravity/gemini-4-argon-high",
-				"antigravity/gemini-3.1-pro-high",
-				"antigravity/gemini-3.8-flash-high",
-				"antigravity/claude-opus-4-6-thinking",
-				"antigravity/claude-sonnet-4-6",
-			}
-			detail.ModelQuotas = []ModelQuotaInfo{
-				{ModelID: "group-gemini-5h", DisplayName: "Gemini Models (Giới hạn 5h)", RemainingPercent: 98, ResetTime: resetText, Status: "good"},
-				{ModelID: "group-gemini-weekly", DisplayName: "Gemini Models (Giới hạn Tuần)", RemainingPercent: geminiWeekly, ResetTime: "⏱️ Đặt lại sau 5d", Status: getQuotaStatus(geminiWeekly)},
-				{ModelID: "antigravity/gemini-4-carbon-high", DisplayName: "Gemini 4 Carbon (High)", RemainingPercent: 98, ResetTime: resetText, Status: "good"},
-				{ModelID: "gemini-4-argon-high", DisplayName: "Gemini 4 Argon (High)", RemainingPercent: 98, ResetTime: resetText, Status: "good"},
-				{ModelID: "gemini-3.1-pro-high", DisplayName: "Gemini 3.1 Pro (High / Low)", RemainingPercent: 98, ResetTime: resetText, Status: "good"},
+			detail.Tier = LookupCachedAccountTier(acc, prevSummary)
+			if prev := findCachedAccountDetail(acc, prevSummary); prev != nil && len(prev.ModelQuotas) > 0 {
+				detail.SessionPercent = prev.SessionPercent
+				detail.WeeklyPercent = prev.WeeklyPercent
+				if prev.ResetTimeText != "" {
+					detail.ResetTimeText = prev.ResetTimeText
+				}
+				if len(prev.SupportedModels) > 0 {
+					detail.SupportedModels = append([]string(nil), prev.SupportedModels...)
+				}
+				detail.ModelQuotas = append([]ModelQuotaInfo(nil), prev.ModelQuotas...)
+			} else {
+				geminiWeekly := 84
+				if acc.WeeklyGeminiPercent != nil && *acc.WeeklyGeminiPercent > 0 {
+					geminiWeekly = *acc.WeeklyGeminiPercent
+				}
+				detail.SessionPercent = 98
+				detail.WeeklyPercent = geminiWeekly
+				detail.SupportedModels = []string{
+					"antigravity/gemini-4-carbon-high",
+					"antigravity/gemini-4-argon-high",
+					"antigravity/gemini-3.1-pro-high",
+					"antigravity/gemini-3.8-flash-high",
+					"antigravity/gemini-3-flash",
+					"antigravity/claude-opus-4-6-thinking",
+					"antigravity/claude-sonnet-4-6",
+					"antigravity/gemini-3.5-flash-lite",
+				}
+				detail.ModelQuotas = []ModelQuotaInfo{
+					{ModelID: "group-gemini-5h", DisplayName: "Gemini Models (Giới hạn 5h)", RemainingPercent: 98, ResetTime: resetText, Status: "good"},
+					{ModelID: "group-gemini-weekly", DisplayName: "Gemini Models (Giới hạn Tuần)", RemainingPercent: geminiWeekly, ResetTime: "⏱️ Đặt lại sau 5d", Status: getQuotaStatus(geminiWeekly)},
+					{ModelID: "antigravity/gemini-4-carbon-high", DisplayName: "Gemini 4 Carbon (High)", RemainingPercent: 98, ResetTime: resetText, Status: "good"},
+					{ModelID: "gemini-4-argon-high", DisplayName: "Gemini 4 Argon (High)", RemainingPercent: 98, ResetTime: resetText, Status: "good"},
+					{ModelID: "gemini-3.1-pro-high", DisplayName: "Gemini 3.1 Pro (High / Low)", RemainingPercent: 98, ResetTime: resetText, Status: "good"},
+					{ModelID: "gemini-3-flash", DisplayName: "Gemini 3 Flash / 3.8 Flash", RemainingPercent: 98, ResetTime: resetText, Status: "good"},
+				}
 			}
 		}
 		summary.Accounts[i] = detail
@@ -852,14 +951,15 @@ func inspectAlibabaAccount(ctx context.Context, acc *ConnectedAccount, detail *A
 }
 
 type ccpaInternalBucket struct {
-	BucketID          string  `json:"bucketId"`
-	DisplayName       string  `json:"displayName"`
-	Window            string  `json:"window"`
-	ResetTime         string  `json:"resetTime"`
-	Description       string  `json:"description"`
-	RemainingFraction float64 `json:"remainingFraction"`
-	ModelID           string  `json:"modelId"`
-	TokenType         string  `json:"tokenType"`
+	BucketID          string   `json:"bucketId"`
+	DisplayName       string   `json:"displayName"`
+	Window            string   `json:"window"`
+	ResetTime         string   `json:"resetTime"`
+	Description       string   `json:"description"`
+	RemainingFraction *float64 `json:"remainingFraction"`
+	IsExhausted       bool     `json:"isExhausted"`
+	ModelID           string   `json:"modelId"`
+	TokenType         string   `json:"tokenType"`
 }
 
 type ccpaQuotaSummaryResponse struct {
@@ -872,6 +972,154 @@ type ccpaQuotaSummaryResponse struct {
 
 type ccpaRetrieveQuotaResponse struct {
 	Buckets []ccpaInternalBucket `json:"buckets"`
+}
+
+type ccpaAvailableModelQuotaInfo struct {
+	RemainingFraction *float64 `json:"remainingFraction"`
+	ResetTime         string   `json:"resetTime"`
+	IsExhausted       bool     `json:"isExhausted"`
+}
+
+type ccpaAvailableModelEntry struct {
+	ModelID     string                       `json:"modelId"`
+	Model       string                       `json:"model"`
+	DisplayName string                       `json:"displayName"`
+	QuotaInfo   *ccpaAvailableModelQuotaInfo `json:"quotaInfo"`
+}
+
+type ccpaFetchAvailableModelsResponse struct {
+	Models json.RawMessage `json:"models"`
+}
+
+func resolveCCPAFetchAvailableModelsEndpoint() string {
+	if explicit := strings.TrimSpace(CCPAFetchAvailableModelsEndpoint); explicit != "" {
+		return explicit
+	}
+	qURL := strings.TrimSpace(CCPARetrieveUserQuotaEndpoint)
+	switch {
+	case strings.Contains(qURL, ":retrieveUserQuota"):
+		return strings.Replace(qURL, ":retrieveUserQuota", ":fetchAvailableModels", 1)
+	case strings.Contains(qURL, "/retrieveQuota"):
+		return strings.Replace(qURL, "/retrieveQuota", "/fetchAvailableModels", 1)
+	default:
+		return ""
+	}
+}
+
+func parseCCPARemainingPercent(frac *float64, isExhausted bool, resetTime string) (int, bool) {
+	if isExhausted {
+		return 0, true
+	}
+	if frac != nil {
+		pct := int(math.Round(*frac * 100.0))
+		if pct < 0 {
+			pct = 0
+		} else if pct > 100 {
+			pct = 100
+		}
+		return pct, true
+	}
+	// In Google CCPA proto3 JSON, remainingFraction == 0.0 is omitted while resetTime is present.
+	if strings.TrimSpace(resetTime) != "" {
+		return 0, true
+	}
+	return 0, false
+}
+
+func detectAntigravityTierFromCodeAssist(currID, currName, currDesc, paidID, paidName, paidDesc, label string) string {
+	paidAll := strings.ToLower(strings.TrimSpace(paidID + " " + paidName + " " + paidDesc))
+	currAll := strings.ToLower(strings.TrimSpace(currID + " " + currName + " " + currDesc))
+	combined := strings.TrimSpace(paidAll + " " + currAll)
+
+	switch {
+	case strings.Contains(combined, "ultra"):
+		return "Ultra"
+	case strings.Contains(combined, "pro") || strings.Contains(combined, "premium"):
+		return "Pro"
+	case strings.Contains(currAll, "free") || strings.Contains(currAll, "lite"):
+		return "Lite"
+	case strings.Contains(currAll, "standard"):
+		return "Pro"
+	default:
+		if fromLbl := inferTierFromLabel(label); fromLbl != "" {
+			return fromLbl
+		}
+		return ""
+	}
+}
+
+type agyBucketTrack struct {
+	pct     int
+	reset   string
+	hasLive bool
+}
+
+func (t *agyBucketTrack) update(pct int, rst string) {
+	if !t.hasLive || pct < t.pct {
+		t.pct = pct
+		if strings.TrimSpace(rst) != "" && rst != "⏱️ Đặt lại ngay" {
+			t.reset = rst
+		} else if t.reset == "" {
+			t.reset = rst
+		}
+		t.hasLive = true
+	}
+}
+
+type agyLiveQuotaState struct {
+	geminiPro    agyBucketTrack
+	geminiFlash  agyBucketTrack
+	claudeOpus   agyBucketTrack
+	claudeSonnet agyBucketTrack
+	geminiImage  agyBucketTrack
+	geminiLite   agyBucketTrack
+}
+
+func applyCCPAModelBucketToState(rawModelID string, pct int, rst string, st *agyLiveQuotaState) {
+	m := strings.ToLower(strings.TrimSpace(rawModelID))
+	m = strings.TrimPrefix(m, "models/")
+	m = strings.TrimPrefix(m, "antigravity/")
+	if m == "" {
+		return
+	}
+	switch {
+	case strings.Contains(m, "claude-opus") || m == "model_placeholder_m26" || strings.Contains(m, "gpt-oss"):
+		st.claudeOpus.update(pct, rst)
+	case strings.Contains(m, "claude-sonnet") || m == "model_placeholder_m35":
+		st.claudeSonnet.update(pct, rst)
+	case strings.Contains(m, "image") || strings.Contains(m, "imagen"):
+		st.geminiImage.update(pct, rst)
+	case strings.Contains(m, "flash-lite"):
+		st.geminiLite.update(pct, rst)
+	case strings.Contains(m, "flash") || m == "model_placeholder_m18" || m == "model_placeholder_m47":
+		st.geminiFlash.update(pct, rst)
+	case strings.Contains(m, "carbon") || strings.Contains(m, "argon") ||
+		strings.Contains(m, "-pro") || strings.HasSuffix(m, "pro") ||
+		m == "model_placeholder_m37" || m == "model_placeholder_m417" || m == "model_placeholder_m420":
+		st.geminiPro.update(pct, rst)
+	}
+}
+
+func normalizeSupportedCCPAModel(rawID string) string {
+	clean := strings.TrimSpace(rawID)
+	clean = strings.TrimPrefix(clean, "models/")
+	lower := strings.ToLower(clean)
+	if lower == "" || strings.HasPrefix(lower, "chat_") || strings.HasPrefix(lower, "tab_") || strings.HasPrefix(lower, "text-embedding") {
+		return ""
+	}
+	switch lower {
+	case "model_placeholder_m26":
+		return "antigravity/claude-opus-4-6-thinking"
+	case "model_placeholder_m35":
+		return "antigravity/claude-sonnet-4-6"
+	}
+	if strings.HasPrefix(lower, "model_placeholder_") {
+		return clean
+	}
+	if strings.Contains(clean, "/") {
+		return clean
+	}
+	return "antigravity/" + clean
 }
 
 func inspectAntigravityAccount(ctx context.Context, acc *ConnectedAccount, detail *AccountQuotaDetail, defaultResetText string) {
@@ -912,6 +1160,7 @@ func inspectAntigravityAccount(ctx context.Context, acc *ConnectedAccount, detai
 
 	resp, err := callCodeAssist()
 	if err != nil {
+		detail.Tier = LookupCachedAccountTier(*acc, nil)
 		detail.Status = "warning"
 		detail.ErrorMessage = err.Error()
 		return
@@ -931,6 +1180,7 @@ func inspectAntigravityAccount(ctx context.Context, acc *ConnectedAccount, detai
 		}
 		if resp.StatusCode == http.StatusUnauthorized {
 			RecordAccountResult(acc.Email, ProviderAntigravity, false, 0, 0, http.StatusUnauthorized)
+			detail.Tier = LookupCachedAccountTier(*acc, nil)
 			detail.Status = "critical"
 			detail.ErrorMessage = "Token xác thực hết hạn hoặc không hợp lệ (HTTP 401)"
 			return
@@ -938,6 +1188,7 @@ func inspectAntigravityAccount(ctx context.Context, acc *ConnectedAccount, detai
 	}
 
 	if resp.StatusCode >= 400 {
+		detail.Tier = LookupCachedAccountTier(*acc, nil)
 		detail.Status = "critical"
 		detail.ErrorMessage = fmt.Sprintf("Lỗi kết nối CCPA (HTTP %d)", resp.StatusCode)
 		return
@@ -964,15 +1215,17 @@ func inspectAntigravityAccount(ctx context.Context, acc *ConnectedAccount, detai
 	}
 	_ = json.NewDecoder(resp.Body).Decode(&codeAssistBody)
 
-	tierName := "Ultra"
-	if strings.Contains(strings.ToLower(codeAssistBody.PaidTier.ID), "ultra") || strings.Contains(strings.ToLower(codeAssistBody.PaidTier.Name), "ultra") {
-		tierName = "Ultra"
-	} else if strings.Contains(strings.ToLower(codeAssistBody.PaidTier.ID), "pro") {
-		tierName = "Pro"
-	} else if codeAssistBody.CurrentTier.ID == "free-tier" {
-		tierName = "Lite"
+	tierName := detectAntigravityTierFromCodeAssist(
+		codeAssistBody.CurrentTier.ID, codeAssistBody.CurrentTier.Name, codeAssistBody.CurrentTier.Description,
+		codeAssistBody.PaidTier.ID, codeAssistBody.PaidTier.Name, codeAssistBody.PaidTier.Description,
+		acc.Label,
+	)
+	if tierName == "" {
+		tierName = LookupCachedAccountTier(*acc, nil)
 	}
 	detail.Tier = tierName
+	RememberAccountTier(acc.Email, acc.ID, tierName)
+
 	if (acc.ProjectID == "" || acc.ProjectID == "aicode-consumers") && codeAssistBody.CloudaicompanionProject != "" {
 		acc.ProjectID = codeAssistBody.CloudaicompanionProject
 		_, _ = UpsertConnectedAccount(*acc)
@@ -982,9 +1235,19 @@ func inspectAntigravityAccount(ctx context.Context, acc *ConnectedAccount, detai
 	if acctKey == "" {
 		acctKey = strings.TrimSpace(acc.ID)
 	}
+	acctKeyLower := strings.ToLower(acctKey)
 	foundValidation := false
+	foundPermanentBan := false
 	for _, t := range codeAssistBody.IneligibleTiers {
-		if strings.EqualFold(strings.TrimSpace(t.ReasonCode), "VALIDATION_REQUIRED") || strings.TrimSpace(t.ValidationURL) != "" {
+		rc := strings.ToUpper(strings.TrimSpace(t.ReasonCode))
+		if strings.Contains(rc, "TOS_VIOLATION") || strings.Contains(rc, "DISABLED") || strings.Contains(rc, "BANNED") {
+			foundPermanentBan = true
+			detail.ErrorMessage = "Tài khoản bị Google vô hiệu hóa dịch vụ (HTTP 403 TOS_VIOLATION)"
+			detail.Status = "critical"
+			detail.InCooldown = true
+			break
+		}
+		if rc == "VALIDATION_REQUIRED" || strings.TrimSpace(t.ValidationURL) != "" {
 			foundValidation = true
 			detail.ValidationURL = strings.TrimSpace(t.ValidationURL)
 			detail.ErrorMessage = "Google yêu cầu xác minh danh tính tài khoản (HTTP 403 VALIDATION_REQUIRED)"
@@ -992,14 +1255,21 @@ func inspectAntigravityAccount(ctx context.Context, acc *ConnectedAccount, detai
 				detail.Status = "warning"
 				detail.InCooldown = true
 			}
+			if acctKeyLower != "" {
+				validationIsolatedAccounts.Store(acctKeyLower, true)
+			}
 			SyncAccountValidationState(acctKey, true)
 			break
 		}
 	}
-	if !foundValidation && strings.TrimSpace(codeAssistBody.CurrentTier.ID) != "" {
-		wasValidationCooldown := acc.CooldownUntil > time.Now().Unix()+600
-		SyncAccountValidationState(acctKey, false)
-		if wasValidationCooldown {
+	if !foundValidation && !foundPermanentBan && strings.TrimSpace(codeAssistBody.CurrentTier.ID) != "" {
+		nowSec := time.Now().Unix()
+		_, trackedVal := validationIsolatedAccounts.Load(acctKeyLower)
+		// Only auto-unlock <= 2h validation cooldowns (7200s); never wipe 24h (86400s) TOS_VIOLATION bans!
+		isValidationWindow := trackedVal || (acc.CooldownUntil > nowSec+600 && acc.CooldownUntil <= nowSec+7500)
+		if isValidationWindow {
+			validationIsolatedAccounts.Delete(acctKeyLower)
+			SyncAccountValidationState(acctKey, false)
 			acc.CooldownUntil = 0
 			acc.FailureCount = 0
 			detail.InCooldown = false
@@ -1010,12 +1280,16 @@ func inspectAntigravityAccount(ctx context.Context, acc *ConnectedAccount, detai
 	// 2. Call retrieveUserQuotaSummary for weekly & 5h limits
 	claudeWeeklyPercent := 53
 	claude5hPercent := 97
+	hasClaude5hFromSummary := false
 	claudeWeeklyReset := "⏱️ Đặt lại sau 5d"
 	claude5hReset := "⏱️ Đặt lại sau 2h 55m"
 	geminiWeeklyFromSummary := -1
 	geminiWeeklyResetFromSummary := ""
 
 	summaryPayload := map[string]any{"project": acc.ProjectID}
+	if strings.TrimSpace(acc.ProjectID) == "" {
+		summaryPayload = map[string]any{}
+	}
 	summaryRaw, _ := json.Marshal(summaryPayload)
 	reqSummary, errSum := http.NewRequestWithContext(ctx, "POST", CCPARetrieveUserQuotaSummaryEndpoint, bytes.NewReader(summaryRaw))
 	if errSum == nil {
@@ -1030,11 +1304,9 @@ func inspectAntigravityAccount(ctx context.Context, acc *ConnectedAccount, detai
 				for _, g := range qsResp.Groups {
 					isGeminiGroup := strings.Contains(strings.ToLower(g.DisplayName), "gemini")
 					for _, b := range g.Buckets {
-						pct := int(math.Round(b.RemainingFraction * 100))
-						if pct < 0 {
-							pct = 0
-						} else if pct > 100 {
-							pct = 100
+						pct, okPct := parseCCPARemainingPercent(b.RemainingFraction, b.IsExhausted, b.ResetTime)
+						if !okPct {
+							continue
 						}
 						if isGeminiGroup || strings.Contains(strings.ToLower(b.BucketID), "gemini") {
 							if b.Window == "weekly" || strings.Contains(strings.ToLower(b.BucketID), "weekly") {
@@ -1048,6 +1320,7 @@ func inspectAntigravityAccount(ctx context.Context, acc *ConnectedAccount, detai
 							claudeWeeklyReset = formatResetDuration(b.ResetTime, "⏱️ Đặt lại sau 5d")
 						} else if b.BucketID == "3p-5h" || b.Window == "5h" {
 							claude5hPercent = pct
+							hasClaude5hFromSummary = true
 							if strings.TrimSpace(b.ResetTime) != "" {
 								claude5hReset = formatResetDuration(b.ResetTime, "⏱️ Đặt lại sau 2h 55m")
 							}
@@ -1058,13 +1331,74 @@ func inspectAntigravityAccount(ctx context.Context, acc *ConnectedAccount, detai
 		}
 	}
 
-	// 3. Call retrieveUserQuota for live model buckets
-	geminiPercent := 98
-	geminiReset := "⏱️ Đặt lại sau 3h 26m"
-	claudeOpusPercent := claude5hPercent
-	claudeSonnetPercent := claude5hPercent
-	geminiImagePercent := 98
-	geminiLitePercent := 98
+	// 3. Call fetchAvailableModels & retrieveUserQuota for live per-model buckets and supported model IDs
+	var liveState agyLiveQuotaState
+	discoveredSet := make(map[string]struct{})
+	addDiscoveredModel := func(rawID string) {
+		if norm := normalizeSupportedCCPAModel(rawID); norm != "" {
+			discoveredSet[norm] = struct{}{}
+		}
+	}
+
+	if fetchModelsURL := resolveCCPAFetchAvailableModelsEndpoint(); fetchModelsURL != "" {
+		reqModels, errMod := http.NewRequestWithContext(ctx, "POST", fetchModelsURL, bytes.NewReader(summaryRaw))
+		if errMod == nil {
+			reqModels.Header.Set("Authorization", "Bearer "+acc.AccessToken)
+			reqModels.Header.Set("Content-Type", "application/json")
+			reqModels.Header.Set("User-Agent", GetAgyUserAgent())
+			respModels, errModDo := client.Do(reqModels)
+			if errModDo == nil && respModels.StatusCode == http.StatusOK {
+				defer respModels.Body.Close()
+				var fmResp ccpaFetchAvailableModelsResponse
+				if json.NewDecoder(respModels.Body).Decode(&fmResp) == nil && len(fmResp.Models) > 0 {
+					var modelMap map[string]ccpaAvailableModelEntry
+					if json.Unmarshal(fmResp.Models, &modelMap) == nil && len(modelMap) > 0 {
+						keys := make([]string, 0, len(modelMap))
+						for k := range modelMap {
+							keys = append(keys, k)
+						}
+						sort.Strings(keys)
+						for _, k := range keys {
+							entry := modelMap[k]
+							id := k
+							if strings.TrimSpace(id) == "" {
+								id = entry.ModelID
+							}
+							addDiscoveredModel(id)
+							if entry.Model != "" {
+								addDiscoveredModel(entry.Model)
+							}
+							if entry.QuotaInfo != nil {
+								if pct, okPct := parseCCPARemainingPercent(entry.QuotaInfo.RemainingFraction, entry.QuotaInfo.IsExhausted, entry.QuotaInfo.ResetTime); okPct {
+									rst := formatResetDuration(entry.QuotaInfo.ResetTime, defaultResetText)
+									applyCCPAModelBucketToState(id, pct, rst, &liveState)
+								}
+							}
+						}
+					} else {
+						var modelSlice []ccpaAvailableModelEntry
+						if json.Unmarshal(fmResp.Models, &modelSlice) == nil {
+							for _, entry := range modelSlice {
+								id := entry.ModelID
+								if id == "" {
+									id = entry.Model
+								}
+								addDiscoveredModel(id)
+								if entry.QuotaInfo != nil {
+									if pct, okPct := parseCCPARemainingPercent(entry.QuotaInfo.RemainingFraction, entry.QuotaInfo.IsExhausted, entry.QuotaInfo.ResetTime); okPct {
+										rst := formatResetDuration(entry.QuotaInfo.ResetTime, defaultResetText)
+										applyCCPAModelBucketToState(id, pct, rst, &liveState)
+									}
+								}
+							}
+						}
+					}
+				}
+			} else if errModDo == nil && respModels != nil {
+				_ = respModels.Body.Close()
+			}
+		}
+	}
 
 	reqQuota, errQuota := http.NewRequestWithContext(ctx, "POST", CCPARetrieveUserQuotaEndpoint, bytes.NewReader(summaryRaw))
 	if errQuota == nil {
@@ -1076,33 +1410,117 @@ func inspectAntigravityAccount(ctx context.Context, acc *ConnectedAccount, detai
 			defer respQuota.Body.Close()
 			var qResp ccpaRetrieveQuotaResponse
 			if errDec := json.NewDecoder(respQuota.Body).Decode(&qResp); errDec == nil {
+				// Authoritative per-bucket response overrides initial fetchAvailableModels values per bucket family
+				var quotaBucketsState agyLiveQuotaState
 				for _, b := range qResp.Buckets {
-					pct := int(math.Round(b.RemainingFraction * 100))
-					if pct < 0 {
-						pct = 0
-					} else if pct > 100 {
-						pct = 100
+					id := b.ModelID
+					if id == "" {
+						id = b.BucketID
+					}
+					addDiscoveredModel(id)
+					pct, okPct := parseCCPARemainingPercent(b.RemainingFraction, b.IsExhausted, b.ResetTime)
+					if !okPct {
+						continue
 					}
 					rst := formatResetDuration(b.ResetTime, defaultResetText)
-
-					switch b.ModelID {
-					case "gemini-4-carbon", "gemini-4-carbon-high", "gemini-4-argon", "gemini-3.8-flash-tiered", "gemini-2.5-flash":
-						geminiPercent = pct
-						geminiReset = rst
-					case "claude-opus-4-6-thinking":
-						claudeOpusPercent = pct
-						if strings.TrimSpace(b.ResetTime) != "" && rst != "⏱️ Đặt lại ngay" {
-							claude5hReset = rst
-						}
-					case "claude-sonnet-4-6":
-						claudeSonnetPercent = pct
-					case "gemini-3.1-flash-image":
-						geminiImagePercent = pct
-					case "gemini-3.5-flash-lite", "gemini-3.1-flash-lite":
-						geminiLitePercent = pct
-					}
+					applyCCPAModelBucketToState(id, pct, rst, &quotaBucketsState)
+				}
+				if quotaBucketsState.geminiPro.hasLive {
+					liveState.geminiPro = quotaBucketsState.geminiPro
+				}
+				if quotaBucketsState.geminiFlash.hasLive {
+					liveState.geminiFlash = quotaBucketsState.geminiFlash
+				}
+				if quotaBucketsState.claudeOpus.hasLive {
+					liveState.claudeOpus = quotaBucketsState.claudeOpus
+				}
+				if quotaBucketsState.claudeSonnet.hasLive {
+					liveState.claudeSonnet = quotaBucketsState.claudeSonnet
+				}
+				if quotaBucketsState.geminiImage.hasLive {
+					liveState.geminiImage = quotaBucketsState.geminiImage
+				}
+				if quotaBucketsState.geminiLite.hasLive {
+					liveState.geminiLite = quotaBucketsState.geminiLite
 				}
 			}
+		} else if errQuotaDo == nil && respQuota != nil {
+			_ = respQuota.Body.Close()
+		}
+	}
+
+	geminiProPercent := 98
+	geminiProReset := "⏱️ Đặt lại sau 3h 26m"
+	if liveState.geminiPro.hasLive {
+		geminiProPercent = liveState.geminiPro.pct
+		if liveState.geminiPro.reset != "" {
+			geminiProReset = liveState.geminiPro.reset
+		}
+	}
+
+	geminiFlashPercent := 98
+	geminiFlashReset := geminiProReset
+	if liveState.geminiFlash.hasLive {
+		geminiFlashPercent = liveState.geminiFlash.pct
+		if liveState.geminiFlash.reset != "" {
+			geminiFlashReset = liveState.geminiFlash.reset
+		}
+	} else if liveState.geminiPro.hasLive {
+		geminiFlashPercent = geminiProPercent
+	}
+
+	geminiPercent := geminiProPercent
+	geminiReset := geminiProReset
+	if !liveState.geminiPro.hasLive && liveState.geminiFlash.hasLive {
+		geminiProPercent = geminiFlashPercent
+		geminiProReset = geminiFlashReset
+		geminiPercent = geminiFlashPercent
+		geminiReset = geminiFlashReset
+	}
+
+	claudeOpusPercent := claude5hPercent
+	if liveState.claudeOpus.hasLive {
+		claudeOpusPercent = liveState.claudeOpus.pct
+		if liveState.claudeOpus.reset != "" && liveState.claudeOpus.reset != "⏱️ Đặt lại ngay" {
+			claude5hReset = liveState.claudeOpus.reset
+		}
+	}
+	claudeSonnetPercent := claude5hPercent
+	if liveState.claudeSonnet.hasLive {
+		claudeSonnetPercent = liveState.claudeSonnet.pct
+		if !liveState.claudeOpus.hasLive && liveState.claudeSonnet.reset != "" && liveState.claudeSonnet.reset != "⏱️ Đặt lại ngay" {
+			claude5hReset = liveState.claudeSonnet.reset
+		}
+	}
+	if !hasClaude5hFromSummary && (liveState.claudeOpus.hasLive || liveState.claudeSonnet.hasLive) {
+		switch {
+		case liveState.claudeOpus.hasLive && liveState.claudeSonnet.hasLive:
+			if claudeOpusPercent < claudeSonnetPercent {
+				claude5hPercent = claudeOpusPercent
+			} else {
+				claude5hPercent = claudeSonnetPercent
+			}
+		case liveState.claudeOpus.hasLive:
+			claude5hPercent = claudeOpusPercent
+		default:
+			claude5hPercent = claudeSonnetPercent
+		}
+	}
+
+	geminiImagePercent := 98
+	geminiImageReset := geminiReset
+	if liveState.geminiImage.hasLive {
+		geminiImagePercent = liveState.geminiImage.pct
+		if liveState.geminiImage.reset != "" {
+			geminiImageReset = liveState.geminiImage.reset
+		}
+	}
+	geminiLitePercent := geminiFlashPercent
+	geminiLiteReset := geminiFlashReset
+	if liveState.geminiLite.hasLive {
+		geminiLitePercent = liveState.geminiLite.pct
+		if liveState.geminiLite.reset != "" {
+			geminiLiteReset = liveState.geminiLite.reset
 		}
 	}
 
@@ -1129,21 +1547,39 @@ func inspectAntigravityAccount(ctx context.Context, acc *ConnectedAccount, detai
 	detail.SessionPercent = geminiPercent
 	detail.WeeklyPercent = geminiWeeklyPercent
 
-	detail.SupportedModels = []string{
+	baseSupported := []string{
 		"antigravity/gemini-4-carbon-high",
 		"antigravity/gemini-4-carbon-medium",
 		"antigravity/gemini-4-argon-high",
-		"antigravity/gemini-4-argon-medium",
+		"antigravity/gemini-3.1-pro-high",
 		"antigravity/gemini-3.8-flash-high",
+		"antigravity/gemini-3-flash",
 		"antigravity/gemini-3.1-flash-image",
 		"antigravity/claude-opus-4-6-thinking",
 		"antigravity/claude-sonnet-4-6",
 		"antigravity/gemini-3.5-flash-lite",
 	}
+	seenSupp := make(map[string]struct{}, len(baseSupported)+len(discoveredSet))
+	supported := make([]string, 0, len(baseSupported)+len(discoveredSet))
+	for _, m := range baseSupported {
+		seenSupp[strings.ToLower(m)] = struct{}{}
+		supported = append(supported, m)
+	}
+	if len(discoveredSet) > 0 {
+		extra := make([]string, 0, len(discoveredSet))
+		for m := range discoveredSet {
+			if _, exists := seenSupp[strings.ToLower(m)]; !exists {
+				extra = append(extra, m)
+			}
+		}
+		sort.Strings(extra)
+		supported = append(supported, extra...)
+	}
+	detail.SupportedModels = supported
 
 	detail.ResetTimeText = geminiReset
 
-	// Match Antigravity native limits popup and per-model quotas
+	// Match Antigravity native limits popup and real per-model quotas (Pro vs Flash vs Claude separated!)
 	detail.ModelQuotas = []ModelQuotaInfo{
 		{
 			ModelID:          "group-gemini-5h",
@@ -1176,23 +1612,30 @@ func inspectAntigravityAccount(ctx context.Context, acc *ConnectedAccount, detai
 		{
 			ModelID:          "antigravity/gemini-4-carbon-high",
 			DisplayName:      "Gemini 4 Carbon (High)",
-			RemainingPercent: geminiPercent,
-			ResetTime:        geminiReset,
-			Status:           getQuotaStatus(geminiPercent),
+			RemainingPercent: geminiProPercent,
+			ResetTime:        geminiProReset,
+			Status:           getQuotaStatus(geminiProPercent),
 		},
 		{
 			ModelID:          "gemini-4-argon-high",
 			DisplayName:      "Gemini 4 Argon (High)",
-			RemainingPercent: geminiPercent,
-			ResetTime:        geminiReset,
-			Status:           getQuotaStatus(geminiPercent),
+			RemainingPercent: geminiProPercent,
+			ResetTime:        geminiProReset,
+			Status:           getQuotaStatus(geminiProPercent),
 		},
 		{
 			ModelID:          "gemini-3.1-pro-high",
 			DisplayName:      "Gemini 3.1 Pro (High / Low)",
-			RemainingPercent: geminiPercent,
-			ResetTime:        geminiReset,
-			Status:           getQuotaStatus(geminiPercent),
+			RemainingPercent: geminiProPercent,
+			ResetTime:        geminiProReset,
+			Status:           getQuotaStatus(geminiProPercent),
+		},
+		{
+			ModelID:          "gemini-3-flash",
+			DisplayName:      "Gemini 3 Flash / 3.8 Flash",
+			RemainingPercent: geminiFlashPercent,
+			ResetTime:        geminiFlashReset,
+			Status:           getQuotaStatus(geminiFlashPercent),
 		},
 		{
 			ModelID:          "claude-opus-4-6-thinking",
@@ -1212,14 +1655,14 @@ func inspectAntigravityAccount(ctx context.Context, acc *ConnectedAccount, detai
 			ModelID:          "gemini-3.1-flash-image",
 			DisplayName:      "Gemini 3.1 Flash Image (Imagen 3)",
 			RemainingPercent: geminiImagePercent,
-			ResetTime:        geminiReset,
+			ResetTime:        geminiImageReset,
 			Status:           getQuotaStatus(geminiImagePercent),
 		},
 		{
 			ModelID:          "gemini-3.5-flash-lite",
 			DisplayName:      "Gemini 3.5 Flash Lite",
 			RemainingPercent: geminiLitePercent,
-			ResetTime:        geminiReset,
+			ResetTime:        geminiLiteReset,
 			Status:           getQuotaStatus(geminiLitePercent),
 		},
 	}
