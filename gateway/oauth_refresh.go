@@ -91,7 +91,14 @@ func RefreshClaudeToken(ctx context.Context, acc *ConnectedAccount) error {
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "claude-code/2.1.0")
 
-	resp, err := oauthHTTPClient.Do(req)
+	scopeKey := strings.TrimSpace(acc.Email)
+	if scopeKey == "" {
+		scopeKey = strings.TrimSpace(acc.ID)
+	}
+	if scopeKey != "" {
+		scopeKey = "claude:" + scopeKey
+	}
+	resp, err := oauthClientForAccount(scopeKey, acc.ProxyURL, 8*time.Second).Do(req)
 	if err != nil {
 		return err
 	}
@@ -825,6 +832,10 @@ func ExecuteAntigravityWithReactiveRefresh(
 				RecordAccountModelResult(accountEmail, ProviderAntigravity, loggedModel, true, lat, usedTokens, http.StatusOK)
 				nowCheck := time.Now()
 				for _, bm := range []string{
+					"gemini-4-carbon-high",
+					"gemini-4-carbon-medium",
+					"gemini-4-argon-high",
+					"gemini-4-argon-medium",
 					"gemini-3.8-flash-high",
 					"gemini-3.8-flash-medium",
 					"gemini-3.8-flash-low",
@@ -835,7 +846,7 @@ func ExecuteAntigravityWithReactiveRefresh(
 					"gemini-3.5-flash-lite",
 					"gemini-3.1-flash-lite",
 				} {
-					if isAccountDeadCCPAModel(u.cfg.CCPAEndpoint, accountEmail, bm, nowCheck) {
+					if isAccountRateLimitedCCPAModel(u.cfg.CCPAEndpoint, accountEmail, bm, nowCheck) {
 						RecordAccountModelRateLimit(accountEmail, bm, 2*time.Minute)
 					}
 				}
@@ -932,10 +943,14 @@ func FetchClaudeUsageWithRefresh(ctx context.Context, acc *ConnectedAccount) (*h
 		}
 	}
 
-	client := &http.Client{
-		Transport: SharedHTTPTransport,
-		Timeout:   3500 * time.Millisecond,
+	scopeKey := strings.TrimSpace(acc.Email)
+	if scopeKey == "" {
+		scopeKey = strings.TrimSpace(acc.ID)
 	}
+	if scopeKey != "" {
+		scopeKey = "claude:" + scopeKey
+	}
+	client := AccountHTTPClient(scopeKey, acc.ProxyURL, 3500*time.Millisecond)
 
 	doGet := func() (*http.Response, error) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, ClaudeOAuthUsageEndpoint, nil)

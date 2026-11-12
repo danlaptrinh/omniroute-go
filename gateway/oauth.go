@@ -5,12 +5,15 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -89,6 +92,7 @@ type ConnectedAccount struct {
 	RefreshToken        string     `json:"refresh_token,omitempty"`
 	APIKey              string     `json:"api_key,omitempty"`
 	BaseURL             string     `json:"base_url,omitempty"`
+	ProxyURL            string     `json:"proxy_url,omitempty"`
 	Region              string     `json:"region,omitempty"`
 	ExpiresAt           int64      `json:"expires_at,omitempty"`
 	ProjectID           string     `json:"project_id,omitempty"`
@@ -402,6 +406,9 @@ func UpsertConnectedAccount(acc ConnectedAccount) (SavedGatewayAuth, error) {
 			if acc.Tier == "" && existing.Tier != "" {
 				acc.Tier = existing.Tier
 			}
+			if acc.ProxyURL == "" && existing.ProxyURL != "" {
+				acc.ProxyURL = existing.ProxyURL
+			}
 			if acc.QuotaUsedPercent == nil && existing.QuotaUsedPercent != nil {
 				acc.QuotaUsedPercent = existing.QuotaUsedPercent
 			}
@@ -484,12 +491,265 @@ func RemoveConnectedAccount(identifier string) (SavedGatewayAuth, error) {
 	configMu.Unlock()
 
 	if ident != "" {
+		EvictAccountTransportPool(ident)
 		_ = DeleteAccountFromPostgres(ident)
 		for _, extra := range extraIdentifiers {
+			EvictAccountTransportPool(extra)
 			_ = DeleteAccountFromPostgres(extra)
 		}
 	}
 	return cfg, err
+}
+
+const accountTransportShards = 4
+
+type accountIsolatedPool struct {
+	key          string
+	proxyURL     string
+	tlsCache     tls.ClientSessionCache
+	transports   [accountTransportShards]*http.Transport
+	ccpaClients  [accountTransportShards]*http.Client
+	shardCounter atomic.Uint64
+}
+
+var (
+	accountTransportPools sync.Map       // key: normScope + "|" + cleanProxyURL -> *accountIsolatedPool
+	testAccountRootCAs    *x509.CertPool // nil in production; used by local TLS isolation unit tests
+)
+
+// ValidateAccountProxyURL validates an optional per-account outbound proxy URL (http, https, socks5, socks5h).
+func ValidateAccountProxyURL(raw string) (string, error) {
+	clean := strings.TrimSpace(raw)
+	if clean == "" {
+		return "", nil
+	}
+	u, err := url.Parse(clean)
+	if err != nil {
+		return "", fmt.Errorf("invalid proxy URL: %w", err)
+	}
+	scheme := strings.ToLower(strings.TrimSpace(u.Scheme))
+	switch scheme {
+	case "http", "https", "socks5", "socks5h":
+	default:
+		return "", fmt.Errorf("unsupported proxy scheme %q (expected http, https, socks5, or socks5h)", u.Scheme)
+	}
+	if strings.TrimSpace(u.Host) == "" {
+		return "", errors.New("proxy URL host cannot be empty")
+	}
+	return clean, nil
+}
+
+// GetAccountProxyURL returns the configured ProxyURL for an account matching emailOrID, or "" if unset.
+func GetAccountProxyURL(emailOrID string) string {
+	target := strings.TrimSpace(emailOrID)
+	if target == "" || strings.EqualFold(target, "anon") {
+		return ""
+	}
+	for _, a := range readAuthAccountsSnapshotFast() {
+		if (a.Email != "" && strings.EqualFold(a.Email, target)) || (a.ID != "" && strings.EqualFold(a.ID, target)) {
+			return strings.TrimSpace(a.ProxyURL)
+		}
+	}
+	return ""
+}
+
+// SetAccountProxyURL updates (or clears when proxyURL == "") the outbound ProxyURL for emailOrID,
+// persists the config synchronously, and evicts that account's transport pool so new connections take effect immediately.
+func SetAccountProxyURL(emailOrID, proxyURL string) error {
+	ident := strings.TrimSpace(emailOrID)
+	if ident == "" {
+		return errors.New("account identifier cannot be empty")
+	}
+	cleanProxy, err := ValidateAccountProxyURL(proxyURL)
+	if err != nil {
+		return err
+	}
+
+	var matchedEmail, matchedID string
+	configMu.Lock()
+	cfg := loadSavedAuthConfigLocked()
+	found := false
+	for i := range cfg.Accounts {
+		if (cfg.Accounts[i].ID != "" && strings.EqualFold(cfg.Accounts[i].ID, ident)) ||
+			(cfg.Accounts[i].Email != "" && strings.EqualFold(cfg.Accounts[i].Email, ident)) {
+			cfg.Accounts[i].ProxyURL = cleanProxy
+			matchedEmail = cfg.Accounts[i].Email
+			matchedID = cfg.Accounts[i].ID
+			found = true
+			break
+		}
+	}
+	if !found {
+		configMu.Unlock()
+		return fmt.Errorf("account %q not found", ident)
+	}
+	cfg.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	saveErr := saveAuthConfigLocked(cfg)
+	configMu.Unlock()
+
+	EvictAccountTransportPool(ident)
+	if matchedEmail != "" {
+		EvictAccountTransportPool(matchedEmail)
+	}
+	if matchedID != "" {
+		EvictAccountTransportPool(matchedID)
+	}
+	return saveErr
+}
+
+func closeIsolatedPool(p *accountIsolatedPool) {
+	if p == nil {
+		return
+	}
+	for _, tr := range p.transports {
+		if tr != nil {
+			tr.CloseIdleConnections()
+		}
+	}
+}
+
+// EvictAccountTransportPool closes idle connections and removes cached transport pools for emailOrID.
+func EvictAccountTransportPool(emailOrID string) {
+	norm := strings.ToLower(strings.TrimSpace(emailOrID))
+	if norm == "" {
+		return
+	}
+	prefixes := []string{norm + "|"}
+	for _, a := range readAuthAccountsSnapshotFast() {
+		if strings.EqualFold(a.ID, norm) || strings.EqualFold(a.Email, norm) {
+			if em := strings.ToLower(strings.TrimSpace(a.Email)); em != "" {
+				prefixes = append(prefixes, em+"|")
+			}
+			if id := strings.ToLower(strings.TrimSpace(a.ID)); id != "" {
+				prefixes = append(prefixes, id+"|")
+			}
+		}
+	}
+	accountTransportPools.Range(func(k, v any) bool {
+		ks, ok := k.(string)
+		if !ok {
+			return true
+		}
+		for _, pfx := range prefixes {
+			if strings.HasPrefix(ks, pfx) {
+				accountTransportPools.Delete(k)
+				if pool, okPool := v.(*accountIsolatedPool); okPool {
+					closeIsolatedPool(pool)
+				}
+				break
+			}
+		}
+		return true
+	})
+}
+
+// InvalidateAccountHTTPClients closes and evicts cached HTTP/2 transports + TLS session caches for emailOrID
+// so proxy_url updates take effect immediately on the very next request.
+func InvalidateAccountHTTPClients(emailOrID string) {
+	EvictAccountTransportPool(emailOrID)
+}
+
+// ResetAccountTransportPools closes and clears all per-account transport pools (used in tests and config reloads).
+func ResetAccountTransportPools() {
+	accountTransportPools.Range(func(k, v any) bool {
+		accountTransportPools.Delete(k)
+		if pool, okPool := v.(*accountIsolatedPool); okPool {
+			closeIsolatedPool(pool)
+		}
+		return true
+	})
+}
+
+func getOrCreateAccountIsolatedPool(accountScope, proxyURL string) *accountIsolatedPool {
+	normScope := normalizeAccScope(accountScope)
+	if normScope == "" || normScope == "anon" {
+		return nil
+	}
+	cleanProxy := strings.TrimSpace(proxyURL)
+	if cleanProxy == "" {
+		cleanProxy = GetAccountProxyURL(normScope)
+	}
+	poolKey := normScope + "|" + cleanProxy
+	if existing, ok := accountTransportPools.Load(poolKey); ok {
+		return existing.(*accountIsolatedPool)
+	}
+
+	proxyFn := http.ProxyFromEnvironment
+	if cleanProxy != "" {
+		if parsedProxy, err := url.Parse(cleanProxy); err == nil && parsedProxy.Host != "" {
+			proxyFn = http.ProxyURL(parsedProxy)
+		}
+	}
+
+	acctTLSCache := tls.NewLRUClientSessionCache(32)
+	fresh := &accountIsolatedPool{
+		key:      poolKey,
+		proxyURL: cleanProxy,
+		tlsCache: acctTLSCache,
+	}
+	for i := 0; i < accountTransportShards; i++ {
+		dialer := &net.Dialer{
+			Timeout:   8 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}
+		tr := &http.Transport{
+			Proxy:                 proxyFn,
+			DialContext:           dialer.DialContext,
+			MaxIdleConns:          32,
+			MaxIdleConnsPerHost:   16,
+			MaxConnsPerHost:       32,
+			WriteBufferSize:       64 * 1024,
+			ReadBufferSize:        64 * 1024,
+			IdleConnTimeout:       180 * time.Second,
+			TLSHandshakeTimeout:   8 * time.Second,
+			ResponseHeaderTimeout: 90 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+			ForceAttemptHTTP2:     true,
+			TLSClientConfig: &tls.Config{
+				MinVersion:         tls.VersionTLS12,
+				ClientSessionCache: acctTLSCache,
+				RootCAs:            testAccountRootCAs,
+			},
+		}
+		fresh.transports[i] = tr
+		fresh.ccpaClients[i] = &http.Client{Transport: tr}
+	}
+
+	actual, loaded := accountTransportPools.LoadOrStore(poolKey, fresh)
+	if loaded {
+		closeIsolatedPool(fresh)
+		return actual.(*accountIsolatedPool)
+	}
+	return fresh
+}
+
+// AccountHTTPTransport returns shard #0 of the dedicated per-account HTTP/2 transport pool for (email, proxyURL),
+// guaranteeing strict TCP socket + TLS ClientSessionCache + proxy isolation between accounts.
+func AccountHTTPTransport(email, proxyURL string) *http.Transport {
+	pool := getOrCreateAccountIsolatedPool(email, proxyURL)
+	if pool != nil && pool.transports[0] != nil {
+		return pool.transports[0]
+	}
+	return SharedHTTPTransport
+}
+
+// AccountHTTPClient returns an *http.Client backed by AccountHTTPTransport(email, proxyURL) with timeout.
+func AccountHTTPClient(email, proxyURL string, timeout time.Duration) *http.Client {
+	return &http.Client{
+		Transport: AccountHTTPTransport(email, proxyURL),
+		Timeout:   timeout,
+	}
+}
+
+func oauthClientForAccount(emailOrID, proxyURL string, timeout time.Duration) *http.Client {
+	if oauthHTTPClient != nil && oauthHTTPClient.Transport != nil && oauthHTTPClient.Transport != SharedHTTPTransport {
+		return oauthHTTPClient
+	}
+	scope := strings.TrimSpace(emailOrID)
+	if scope != "" && !strings.EqualFold(scope, "anon") {
+		return AccountHTTPClient(scope, proxyURL, timeout)
+	}
+	return oauthHTTPClient
 }
 
 // BuildOAuthAuthURL constructs the Google Antigravity OAuth 2.0 authorization URL.
@@ -596,7 +856,11 @@ func ExchangeOAuthInput(ctx context.Context, rawInput string, defaultRedirectURI
 			ccpaReq.Header.Set("Authorization", "Bearer "+tokenResp.AccessToken)
 			ccpaReq.Header.Set("User-Agent", GetAgyUserAgent())
 			ccpaReq.Header.Set("Content-Type", "application/json")
-			if ccpaResp, err := oauthHTTPClient.Do(ccpaReq); err == nil {
+			acctCl := oauthHTTPClient
+			if userEmail != "" && userEmail != "antigravity-user" {
+				acctCl = oauthClientForAccount(userEmail, "", 8*time.Second)
+			}
+			if ccpaResp, err := acctCl.Do(ccpaReq); err == nil {
 				defer ccpaResp.Body.Close()
 				if ccpaResp.StatusCode < 400 {
 					var projData struct {
@@ -848,6 +1112,9 @@ func RefreshOAuthToken(ctx context.Context, acc *ConnectedAccount) error {
 }
 
 func RefreshAntigravityToken(ctx context.Context, acc *ConnectedAccount) error {
+	if acc == nil {
+		return errors.New("nil account")
+	}
 	form := url.Values{}
 	form.Set("client_id", AgyOAuthClientID)
 	form.Set("client_secret", AgyOAuthClientSecret)
@@ -860,7 +1127,11 @@ func RefreshAntigravityToken(ctx context.Context, acc *ConnectedAccount) error {
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	resp, err := oauthHTTPClient.Do(req)
+	scopeKey := strings.TrimSpace(acc.Email)
+	if scopeKey == "" {
+		scopeKey = strings.TrimSpace(acc.ID)
+	}
+	resp, err := oauthClientForAccount(scopeKey, acc.ProxyURL, 8*time.Second).Do(req)
 	if err != nil {
 		return err
 	}
@@ -1003,7 +1274,26 @@ func isGeminiPrimaryDeepReasoningModel(modelID string) bool {
 		return false
 	}
 	m := stripKnownModelPrefixes(modelID)
-	return !strings.HasPrefix(m, "gemini-4-argon") && !strings.HasPrefix(m, "claude-")
+	return strings.HasPrefix(m, "gemini-3.8-flash") || strings.HasPrefix(m, "gemini-2.5-pro")
+}
+
+// TotalAntigravityInFlight returns the total concurrent in-flight requests across all enabled Antigravity accounts.
+func TotalAntigravityInFlight() int {
+	total := 0
+	for _, a := range readAuthAccountsSnapshotFast() {
+		if a.Disabled {
+			continue
+		}
+		p := a.Provider
+		if p == "" {
+			p = ProviderAntigravity
+		}
+		if p != ProviderAntigravity || strings.TrimSpace(a.Email) == "" {
+			continue
+		}
+		total += GetAccountInFlight(a.Email)
+	}
+	return total
 }
 
 // IsPinnedAccount reports whether ctx carries an explicit account pin via PinAccountContextKey.
@@ -1128,6 +1418,9 @@ func rateLimitProbeKeysForHint(modelHint string) []string {
 
 func isClaudePrimaryModelID(normModel string) bool {
 	return strings.HasPrefix(normModel, "claude-") ||
+		normModel == "gemini-4-carbon-high" ||
+		normModel == "gemini-4-carbon" ||
+		normModel == "gemini-4-carbon-medium" ||
 		normModel == "gemini-4-argon-high" ||
 		normModel == "gemini-4-argon" ||
 		normModel == "gemini-4-argon-medium"
@@ -1211,7 +1504,7 @@ func isDirectGeminiTierRateLimited(email, modelHint string) bool {
 		return true
 	}
 	for _, p := range probes {
-		if isAccountDeadCCPAModel(DefaultCCPAEndpoint, normEmail, p, now) {
+		if isAccountRateLimitedCCPAModel(DefaultCCPAEndpoint, normEmail, p, now) {
 			return true
 		}
 	}
@@ -1265,7 +1558,7 @@ func IsAccountModelRateLimited(email, model string) bool {
 	}
 
 	for _, p := range probes {
-		if isAccountDeadCCPAModel(DefaultCCPAEndpoint, normEmail, p, now) {
+		if isAccountRateLimitedCCPAModel(DefaultCCPAEndpoint, normEmail, p, now) {
 			return true
 		}
 	}
@@ -1600,7 +1893,23 @@ func selectProviderAccountCore(ctx context.Context, provider ProviderID, modelHi
 		}
 
 		if isHedgePickFromContext(ctx) {
-			if len(ultraCands) > 0 {
+			if IsFastSpeedGeminiModel(modelHint) {
+				if len(nonUltraCands) > 0 {
+					proLowLoad := make([]ConnectedAccount, 0, len(nonUltraCands))
+					for _, c := range nonUltraCands {
+						if GetAccountInFlight(c.Email) <= 3 {
+							proLowLoad = append(proLowLoad, c)
+						}
+					}
+					if len(proLowLoad) > 0 {
+						candidates = proLowLoad
+					} else if len(ultraCands) > 0 && minProInFlight > 3 {
+						candidates = ultraCands
+					} else {
+						candidates = nonUltraCands
+					}
+				}
+			} else if len(ultraCands) > 0 {
 				ultraLowLoad := make([]ConnectedAccount, 0, len(ultraCands))
 				for _, c := range ultraCands {
 					if GetAccountInFlight(c.Email) <= 2 {
@@ -1625,6 +1934,21 @@ func selectProviderAccountCore(ctx context.Context, provider ProviderID, modelHi
 					candidates = nonUltraCands
 				}
 			}
+		}
+	}
+
+	// 2.6 Per-Account 503/5xx Isolation Preference: if one account stepped down its primary model due to a 5xx,
+	// prefer peers whose primary model is still healthy while keeping the stepped-down account eligible if needed.
+	if provider == ProviderAntigravity && len(candidates) > 1 && strings.TrimSpace(modelHint) != "" {
+		nowCheck := time.Now()
+		nonDegraded := make([]ConnectedAccount, 0, len(candidates))
+		for _, c := range candidates {
+			if !isAccountOverloadedForHint(DefaultCCPAEndpoint, c.Email, modelHint, nowCheck) {
+				nonDegraded = append(nonDegraded, c)
+			}
+		}
+		if len(nonDegraded) > 0 {
+			candidates = nonDegraded
 		}
 	}
 

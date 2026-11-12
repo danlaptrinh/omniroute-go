@@ -73,20 +73,25 @@ func TestCCPA16ShardPoolConfigAndSameAccountConcurrencySpread(t *testing.T) {
 		}
 	}
 
-	// 2. When inFlight > 1 on the SAME account, 16 consecutive calls spread across all 16 shards!
+	// 2. When inFlight > 1 on the SAME account, consecutive calls spread across all private per-account shards
+	// and never share *http.Client / *http.Transport instances with any other account!
 	AcquireAccountInFlight(accEmail)
 	t.Cleanup(func() {
 		ReleaseAccountInFlight(accEmail)
 		ReleaseAccountInFlight(accEmail)
 	})
 
-	spreadClients := make(map[*http.Client]int, 16)
-	for i := 0; i < 16; i++ {
+	spreadClients := make(map[*http.Client]int, accountTransportShards)
+	for i := 0; i < accountTransportShards*4; i++ {
 		cl := upstream.ccpaHTTPClientForScope(accEmail, tok)
 		spreadClients[cl]++
 	}
-	if len(spreadClients) != 16 {
-		t.Fatalf("expected 16 concurrent calls on same account (inFlight=2) to spread across all 16 shards, got %d distinct shards", len(spreadClients))
+	if len(spreadClients) != accountTransportShards {
+		t.Fatalf("expected concurrent calls on same account (inFlight=2) to spread across all %d private account shards, got %d distinct shards", accountTransportShards, len(spreadClients))
+	}
+	otherClient := upstream.ccpaHTTPClientForScope("shard-test-other-acc@gmail.com", "ya29.other-account-token")
+	if _, shared := spreadClients[otherClient]; shared {
+		t.Fatalf("expected per-account CCPA client pools to be strictly disjoint across accounts")
 	}
 }
 
@@ -94,14 +99,15 @@ func TestDefaultCCPAEndpointSkipsColdStart404VirtualAliasesAndWarmup(t *testing.
 	ResetCCPAModelCaches()
 	t.Cleanup(func() { ResetCCPAModelCaches() })
 
-	// 1. Verify DefaultCCPAEndpoint places real backend CCPA IDs BEFORE virtual Antigravity IDE aliases
+	// 1. Verify DefaultCCPAEndpoint preserves Carbon 4 / Argon 4 for coding while fast-pathing auto/fast and stripping virtual 404 aliases
 	cases := []struct {
 		modelID       string
 		wantFirstReal string
 	}{
-		{"antigravity/gemini-4-carbon-high", "claude-opus-4-6-thinking"},
-		{"antigravity/gemini-4-carbon-low", "gemini-3-flash"},
-		{"antigravity/gemini-4-argon-high", "claude-opus-4-6-thinking"},
+		{"antigravity/gemini-4-carbon-high", "gemini-4-carbon-high"},
+		{"antigravity/gemini-4-carbon-low", "gemini-4-carbon-low"},
+		{"auto/fast", "gemini-3-flash"},
+		{"antigravity/gemini-4-argon-high", "gemini-4-argon-high"},
 		{"antigravity/gemini-3.1-pro-high", "claude-opus-4-6-thinking"},
 		{"antigravity/gemini-3.8-flash-high", "gemini-3-flash"},
 		{"antigravity/gemini-3.8-flash-low", "gemini-3-flash"},
@@ -384,7 +390,7 @@ func TestComboModeStripedMaxSpeedAndParallelFlagship222AndFailover(t *testing.T)
 		t.Fatalf("expected exact 2-2-2 striping on auto/parallel-flagship (winners=%v), got counts=%+v", winnersFlagship, gotFlagshipCounts)
 	}
 
-	// 4. Verify seamless failover when 1 model returns HTTP 503 on auto/max-speed
+	// 4. Verify seamless per-account 503 failover on auto/max-speed (9 requests across 3 models x 3 accounts)
 	ResetCCPAModelCaches()
 	mu.Lock()
 	callsByModel = make(map[string]int)
@@ -392,7 +398,7 @@ func TestComboModeStripedMaxSpeedAndParallelFlagship222AndFailover(t *testing.T)
 	failModel429 = ""
 	mu.Unlock()
 
-	winners503, err := runConcurrentBurst("auto/max-speed", 6)
+	winners503, err := runConcurrentBurst("auto/max-speed", 9)
 	if err != nil {
 		t.Fatalf("auto/max-speed burst with 503 on claude-sonnet-4-6 failed: %v", err)
 	}
@@ -402,18 +408,22 @@ func TestComboModeStripedMaxSpeedAndParallelFlagship222AndFailover(t *testing.T)
 		}
 	}
 
-	// Subsequent burst while claude-sonnet-4-6 is cached in deadCCPAModelCache must skip 503 completely (0 extra calls!)
+	// Ensure second warmup sweep if concurrency scheduling left 1 account unprobed on claude-sonnet-4-6,
+	// then verify once all 3 accounts recorded per-account 503, subsequent burst skips claude-sonnet-4-6 completely (0 extra calls!)
+	if _, err := runConcurrentBurst("auto/max-speed", 6); err != nil {
+		t.Fatalf("auto/max-speed warmup burst after 503 failed: %v", err)
+	}
 	mu.Lock()
 	sonnet503Before := callsByModel["claude-sonnet-4-6"]
 	mu.Unlock()
 	if _, err := runConcurrentBurst("auto/max-speed", 6); err != nil {
-		t.Fatalf("auto/max-speed second burst after 503 cache failed: %v", err)
+		t.Fatalf("auto/max-speed second burst after per-account 503 cache failed: %v", err)
 	}
 	mu.Lock()
 	sonnet503After := callsByModel["claude-sonnet-4-6"]
 	mu.Unlock()
 	if sonnet503After != sonnet503Before {
-		t.Fatalf("expected dead 503 model claude-sonnet-4-6 to be skipped on second burst (%d -> %d)", sonnet503Before, sonnet503After)
+		t.Fatalf("expected per-account dead 503 model claude-sonnet-4-6 to be skipped once all accounts observed 503 (%d -> %d)", sonnet503Before, sonnet503After)
 	}
 
 	// 5. Verify seamless failover when 1 model returns HTTP 429 across accounts on auto/parallel-flagship

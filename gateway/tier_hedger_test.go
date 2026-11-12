@@ -3,14 +3,17 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -391,23 +394,33 @@ func TestTierHedger_ThinkingLevelLowDirectFastPath(t *testing.T) {
 		t.Fatalf("SaveAuthConfig: %v", err)
 	}
 
-	lowModels := []string{
-		"antigravity/gemini-4-carbon-low",
-		"antigravity/gemini-4-argon-low",
-		"antigravity/gemini-3.8-flash-low",
-	}
-	for _, modelID := range lowModels {
-		res := ResolveModel(modelID, nil)
+	// Explicit gemini-4-carbon-low / gemini-4-argon-low preserve Carbon 4 / Argon 4 at index 0
+	// followed by gemini-3-flash -> gemini-3.8-flash-low, while gemini-3.8-flash-low and auto/fast
+	// fast-path directly to gemini-3-flash!
+	for _, tc := range []struct {
+		modelID string
+		want0   string
+		want1   string
+	}{
+		{"antigravity/gemini-4-carbon-low", "gemini-4-carbon-low", "gemini-3-flash"},
+		{"antigravity/gemini-4-argon-low", "gemini-4-argon-low", "gemini-3-flash"},
+		{"antigravity/gemini-3.8-flash-low", "gemini-3-flash", "gemini-3.8-flash-low"},
+	} {
+		res := ResolveModel(tc.modelID, nil)
 		cands := buildCCPACandidatesWithCache(DefaultCCPAEndpoint, acc.Email, res, false)
 		if len(cands) < 2 {
-			t.Fatalf("%s candidates too short: %v", modelID, cands)
+			t.Fatalf("%s candidates too short: %v", tc.modelID, cands)
 		}
-		if cands[0] != "gemini-3-flash" {
-			t.Fatalf("%s primary candidate = %q, want \"gemini-3-flash\" (full=%v)", modelID, cands[0], cands)
+		if cands[0] != tc.want0 || cands[1] != tc.want1 {
+			t.Fatalf("%s candidates = %v, want [%q, %q, ...]", tc.modelID, cands, tc.want0, tc.want1)
 		}
-		if cands[1] != "gemini-3.8-flash-low" {
-			t.Fatalf("%s secondary fallback = %q, want \"gemini-3.8-flash-low\" (full=%v)", modelID, cands[1], cands)
-		}
+	}
+
+	autoFastTarget := ResolveModel("antigravity/gemini-4-carbon-low", nil)
+	autoFastTarget.RequestedID = "auto/fast"
+	autoFastCands := buildCCPACandidatesWithCache(DefaultCCPAEndpoint, acc.Email, autoFastTarget, false)
+	if len(autoFastCands) < 2 || autoFastCands[0] != "gemini-3-flash" || autoFastCands[1] != "gemini-3.8-flash-low" {
+		t.Fatalf("auto/fast DefaultCCPAEndpoint candidates = %v, want [gemini-3-flash, gemini-3.8-flash-low, ...]", autoFastCands)
 	}
 
 	// Verify auto/fast without touching resolver.go: Models[0] remains antigravity/gemini-4-carbon-low
@@ -959,6 +972,532 @@ func TestTierHedger_ProactiveQuotaResetTimeRateLimitSync(t *testing.T) {
 	} {
 		if IsAccountModelRateLimited(acc.Email, mod) {
 			t.Fatalf("expected IsAccountModelRateLimited(%q, %q) == false after quota replenished > 0.01", acc.Email, mod)
+		}
+	}
+}
+
+func TestTierHedger_PerAccount503IsolationPreservesCarbonAndArgonAcrossPeers(t *testing.T) {
+	tmpCfg := filepath.Join(t.TempDir(), "gateway_config.json")
+	t.Setenv("GATEWAY_CONFIG_FILE", tmpCfg)
+	resetAuthCacheForTest(t)
+	clearTestCCPACaches()
+	ClearAccountModelRateLimits("")
+	GetGlobalCache().Clear()
+	t.Cleanup(func() {
+		resetAuthCacheForTest(t)
+		clearTestCCPACaches()
+		ClearAccountModelRateLimits("")
+		GetGlobalCache().Clear()
+	})
+
+	accounts := []ConnectedAccount{
+		{ID: "peer-1", Provider: ProviderAntigravity, Email: "peer1@gmail.com", AccessToken: "ya29.peer1", ProjectID: "proj-1", Tier: "Ultra", Priority: 100, ExpiresAt: time.Now().Add(2 * time.Hour).Unix()},
+		{ID: "peer-2", Provider: ProviderAntigravity, Email: "peer2@gmail.com", AccessToken: "ya29.peer2", ProjectID: "proj-2", Tier: "Ultra", Priority: 95, ExpiresAt: time.Now().Add(2 * time.Hour).Unix()},
+		{ID: "peer-3", Provider: ProviderAntigravity, Email: "peer3@gmail.com", AccessToken: "ya29.peer3", ProjectID: "proj-3", Tier: "Ultra", Priority: 90, ExpiresAt: time.Now().Add(2 * time.Hour).Unix()},
+		{ID: "peer-4", Provider: ProviderAntigravity, Email: "peer4@gmail.com", AccessToken: "ya29.peer4", ProjectID: "proj-4", Tier: "Ultra", Priority: 85, ExpiresAt: time.Now().Add(2 * time.Hour).Unix()},
+	}
+	if err := saveTestGatewayAuth(SavedGatewayAuth{
+		RoutingStrategy: StrategyFillFirst,
+		Accounts:        accounts,
+	}); err != nil {
+		t.Fatalf("saveTestGatewayAuth: %v", err)
+	}
+
+	upstream := NewUpstream(GatewayConfig{CCPAEndpoint: DefaultCCPAEndpoint})
+	upstream.client = &http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			raw, _ := io.ReadAll(r.Body)
+			var payload ccpaRequestPayload
+			_ = json.Unmarshal(raw, &payload)
+			auth := strings.TrimSpace(r.Header.Get("Authorization"))
+
+			// Only peer1 returns 503 on gemini-4-carbon-high and gemini-4-argon-high; peers 2..4 succeed 200 OK!
+			if auth == "Bearer ya29.peer1" && (payload.Model == "gemini-4-carbon-high" || payload.Model == "gemini-4-argon-high") {
+				return &http.Response{
+					StatusCode: http.StatusServiceUnavailable,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(`{"error":{"code":503,"message":"MODEL_CAPACITY_EXHAUSTED"}}`)),
+				}, nil
+			}
+			sse := fmt.Sprintf("data: {\"response\":{\"modelVersion\":%q,\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok-%s\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":6,\"candidatesTokenCount\":4,\"totalTokenCount\":10}}}\n\ndata: [DONE]\n\n", payload.Model, payload.Model)
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       io.NopCloser(strings.NewReader(sse)),
+			}, nil
+		}),
+	}
+
+	// 1. Request #1 hits peer1 (highest priority) -> gets 503 on gemini-4-carbon-high -> steps down locally on peer1 to claude-opus-4-6-thinking!
+	carbonRes := ResolveModel("antigravity/gemini-4-carbon-high", nil)
+	rec1 := httptest.NewRecorder()
+	if err := upstream.HandleChatCompletion(context.Background(), rec1, OpenAIChatRequest{
+		Model:    "antigravity/gemini-4-carbon-high",
+		Messages: []OpenAIChatMessage{{Role: "user", Content: json.RawMessage(`"503 isolation req 1"`)}},
+	}, carbonRes, ""); err != nil {
+		t.Fatalf("req 1 failed: %v", err)
+	}
+	if gotAcc := rec1.Header().Get("X-Omni-Gateway-Account"); gotAcc != "peer1@gmail.com" {
+		t.Fatalf("req 1 account = %q, want peer1@gmail.com", gotAcc)
+	}
+	if gotMod := rec1.Header().Get("X-Omni-Gateway-Resolved-Model"); gotMod != "claude-opus-4-6-thinking" {
+		t.Fatalf("req 1 expected local step-down to claude-opus-4-6-thinking on peer1, got %q", gotMod)
+	}
+
+	// Verify ZERO global poisoning!
+	now := time.Now()
+	if isDeadCCPAModel(DefaultCCPAEndpoint, "gemini-4-carbon-high", now) {
+		t.Fatalf("gemini-4-carbon-high was marked globally dead on 503 — violates strict per-account isolation!")
+	}
+	if !isAccountDeadCCPAModel(DefaultCCPAEndpoint, "peer1@gmail.com", "gemini-4-carbon-high", now) {
+		t.Fatalf("expected peer1@gmail.com to record per-account 503 on gemini-4-carbon-high")
+	}
+	if isAccountDeadCCPAModel(DefaultCCPAEndpoint, "peer2@gmail.com", "gemini-4-carbon-high", now) {
+		t.Fatalf("peer2@gmail.com must NOT inherit peer1's 503 quarantine")
+	}
+
+	// 2. Subsequent Carbon 4 & Argon 4 requests automatically route to healthy peer2..peer4 and serve FULL Carbon 4 / Argon 4!
+	for i, modID := range []string{
+		"antigravity/gemini-4-carbon-high",
+		"antigravity/gemini-4-argon-high",
+	} {
+		res := ResolveModel(modID, nil)
+		rec := httptest.NewRecorder()
+		if err := upstream.HandleChatCompletion(context.Background(), rec, OpenAIChatRequest{
+			Model:    modID,
+			Messages: []OpenAIChatMessage{{Role: "user", Content: json.RawMessage(fmt.Sprintf(`"peer coding req %d"`, i+2))}},
+		}, res, ""); err != nil {
+			t.Fatalf("peer req %d (%s) failed: %v", i+2, modID, err)
+		}
+		gotAcc := rec.Header().Get("X-Omni-Gateway-Account")
+		if gotAcc == "peer1@gmail.com" {
+			t.Fatalf("expected scheduler to prefer non-503 peer2..peer4 for %s, got peer1@gmail.com", modID)
+		}
+		wantBackend := strings.TrimPrefix(modID, "antigravity/")
+		if gotMod := rec.Header().Get("X-Omni-Gateway-Resolved-Model"); gotMod != wantBackend {
+			t.Fatalf("expected %s on %s to serve full %q (zero global downgrade!), got %q", modID, gotAcc, wantBackend, gotMod)
+		}
+	}
+}
+
+func TestStrictPerAccountHTTP2AndTLSSessionIsolation(t *testing.T) {
+	tmpCfg := filepath.Join(t.TempDir(), "gateway_config.json")
+	t.Setenv("GATEWAY_CONFIG_FILE", tmpCfg)
+	resetAuthCacheForTest(t)
+	clearTestCCPACaches()
+	ResetAccountTransportPools()
+	GetGlobalCache().Clear()
+
+	var (
+		obsMu       sync.Mutex
+		portsByKey  = make(map[string][]string)
+		protosByKey = make(map[string][]string)
+	)
+	recordObs := func(tag string, r *http.Request) {
+		_, port, _ := net.SplitHostPort(r.RemoteAddr)
+		obsMu.Lock()
+		portsByKey[tag] = append(portsByKey[tag], port)
+		protosByKey[tag] = append(protosByKey[tag], r.Proto)
+		obsMu.Unlock()
+	}
+
+	tlsSrv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth := strings.TrimSpace(r.Header.Get("Authorization"))
+		switch {
+		case strings.Contains(r.URL.Path, "streamGenerateContent"):
+			recordObs("ccpa|"+auth, r)
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, "data: {\"response\":{\"modelVersion\":\"gemini-4-carbon\",\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"iso-ok\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":4,\"candidatesTokenCount\":2,\"totalTokenCount\":6}}}\n\ndata: [DONE]\n\n")
+		case r.URL.Path == "/token":
+			_ = r.ParseForm()
+			rt := r.FormValue("refresh_token")
+			recordObs("oauth|"+rt, r)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `{"access_token":"ya29.refreshed-%s","expires_in":3600,"token_type":"Bearer"}`, rt)
+		case strings.Contains(r.URL.Path, "loadCodeAssist"):
+			recordObs("quota-load|"+auth, r)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"currentTier":{"id":"g1-ultra-tier","name":"Google AI Ultra"},"cloudaicompanionProject":"proj-iso"}`)
+		case strings.Contains(r.URL.Path, "retrieveUserQuotaSummary"):
+			recordObs("quota-sum|"+auth, r)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"groups":[]}`)
+		case strings.Contains(r.URL.Path, "fetchAvailableModels"):
+			recordObs("quota-fetch|"+auth, r)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"models":{}}`)
+		default:
+			recordObs("quota-ret|"+auth, r)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"models":{"gemini-3-flash":{"remainingFraction":0.99}}}`)
+		}
+	}))
+	tlsSrv.EnableHTTP2 = true
+	tlsSrv.StartTLS()
+	defer tlsSrv.Close()
+
+	certPool := x509.NewCertPool()
+	certPool.AddCert(tlsSrv.Certificate())
+	testAccountRootCAs = certPool
+
+	origTokURL := OAuthTokenEndpoint
+	origLoad := CCPALoadCodeAssistEndpoint
+	origSum := CCPARetrieveUserQuotaSummaryEndpoint
+	origQuota := CCPARetrieveUserQuotaEndpoint
+	origFetch := CCPAFetchAvailableModelsEndpoint
+	OAuthTokenEndpoint = tlsSrv.URL + "/token"
+	CCPALoadCodeAssistEndpoint = tlsSrv.URL + "/v1internal:loadCodeAssist"
+	CCPARetrieveUserQuotaSummaryEndpoint = tlsSrv.URL + "/v1internal:retrieveUserQuotaSummary"
+	CCPARetrieveUserQuotaEndpoint = tlsSrv.URL + "/v1internal:retrieveUserQuota"
+	CCPAFetchAvailableModelsEndpoint = tlsSrv.URL + "/v1internal:fetchAvailableModels"
+
+	t.Cleanup(func() {
+		testAccountRootCAs = nil
+		ResetAccountTransportPools()
+		OAuthTokenEndpoint = origTokURL
+		CCPALoadCodeAssistEndpoint = origLoad
+		CCPARetrieveUserQuotaSummaryEndpoint = origSum
+		CCPARetrieveUserQuotaEndpoint = origQuota
+		CCPAFetchAvailableModelsEndpoint = origFetch
+		resetAuthCacheForTest(t)
+		clearTestCCPACaches()
+		GetGlobalCache().Clear()
+	})
+
+	accA := ConnectedAccount{
+		ID:           "iso-a",
+		Provider:     ProviderAntigravity,
+		Email:        "iso-a@gmail.com",
+		AccessToken:  "ya29.iso-a",
+		RefreshToken: "rt-iso-a",
+		ProjectID:    "proj-iso-a",
+		ExpiresAt:    time.Now().Add(2 * time.Hour).Unix(),
+	}
+	accB := ConnectedAccount{
+		ID:           "iso-b",
+		Provider:     ProviderAntigravity,
+		Email:        "iso-b@gmail.com",
+		AccessToken:  "ya29.iso-b",
+		RefreshToken: "rt-iso-b",
+		ProjectID:    "proj-iso-b",
+		ExpiresAt:    time.Now().Add(2 * time.Hour).Unix(),
+	}
+	if err := saveTestGatewayAuth(SavedGatewayAuth{Accounts: []ConnectedAccount{accA, accB}}); err != nil {
+		t.Fatalf("saveTestGatewayAuth: %v", err)
+	}
+
+	// 1. Verify strictly distinct *http.Transport AND strictly distinct tls.ClientSessionCache pointers!
+	trA := AccountHTTPTransport(accA.Email, "")
+	trB := AccountHTTPTransport(accB.Email, "")
+	if trA == nil || trB == nil {
+		t.Fatalf("expected non-nil per-account *http.Transport instances")
+	}
+	if trA == trB || trA == SharedHTTPTransport || trB == SharedHTTPTransport {
+		t.Fatalf("expected strictly distinct *http.Transport pointers across accounts and SharedHTTPTransport")
+	}
+	if trA.TLSClientConfig == nil || trB.TLSClientConfig == nil ||
+		trA.TLSClientConfig.ClientSessionCache == nil || trB.TLSClientConfig.ClientSessionCache == nil {
+		t.Fatalf("expected non-nil per-account TLS ClientSessionCache")
+	}
+	if trA.TLSClientConfig.ClientSessionCache == trB.TLSClientConfig.ClientSessionCache {
+		t.Fatalf("expected strictly distinct tls.ClientSessionCache pointers across accounts!")
+	}
+
+	upstream := NewUpstream(GatewayConfig{CCPAEndpoint: tlsSrv.URL + "/v1internal:streamGenerateContent?alt=sse"})
+	ccpaClA := upstream.ccpaHTTPClientForScope(accA.Email, accA.AccessToken)
+	ccpaClB := upstream.ccpaHTTPClientForScope(accB.Email, accB.AccessToken)
+	ccpaTrA, okA := ccpaClA.Transport.(*http.Transport)
+	ccpaTrB, okB := ccpaClB.Transport.(*http.Transport)
+	if !okA || !okB || ccpaTrA == ccpaTrB || ccpaTrA.TLSClientConfig.ClientSessionCache == ccpaTrB.TLSClientConfig.ClientSessionCache {
+		t.Fatalf("expected CCPA stream clients for A and B to have distinct *http.Transport and tls.ClientSessionCache")
+	}
+
+	// 2. Live HTTP/2 socket isolation: two sequential CCPA requests on Account A reuse portA, while Account B uses strictly distinct portB!
+	res := ResolveModel("antigravity/gemini-4-carbon-high", nil)
+	for i := 0; i < 2; i++ {
+		rec := httptest.NewRecorder()
+		ctxA := WithPinnedAccount(context.Background(), accA.Email)
+		if err := upstream.HandleChatCompletion(ctxA, rec, OpenAIChatRequest{
+			Model:    "antigravity/gemini-4-carbon-high",
+			Messages: []OpenAIChatMessage{{Role: "user", Content: json.RawMessage(fmt.Sprintf(`"accA call %d"`, i+1))}},
+		}, res, ""); err != nil {
+			t.Fatalf("Account A CCPA call %d failed: %v", i+1, err)
+		}
+	}
+	recB := httptest.NewRecorder()
+	ctxB := WithPinnedAccount(context.Background(), accB.Email)
+	if err := upstream.HandleChatCompletion(ctxB, recB, OpenAIChatRequest{
+		Model:    "antigravity/gemini-4-carbon-high",
+		Messages: []OpenAIChatMessage{{Role: "user", Content: json.RawMessage(`"accB call 1"`)}},
+	}, res, ""); err != nil {
+		t.Fatalf("Account B CCPA call failed: %v", err)
+	}
+
+	// Also exercise OAuth refresh & Quota inspection for both accounts over HTTP/2!
+	if err := RefreshAntigravityToken(context.Background(), &accA); err != nil {
+		t.Fatalf("RefreshAntigravityToken(A) failed: %v", err)
+	}
+	if err := RefreshAntigravityToken(context.Background(), &accB); err != nil {
+		t.Fatalf("RefreshAntigravityToken(B) failed: %v", err)
+	}
+	var qA, qB AccountQuotaDetail
+	inspectAntigravityAccount(context.Background(), &accA, &qA, "reset")
+	inspectAntigravityAccount(context.Background(), &accB, &qB, "reset")
+
+	obsMu.Lock()
+	portsA := append([]string(nil), portsByKey["ccpa|Bearer ya29.iso-a"]...)
+	portsB := append([]string(nil), portsByKey["ccpa|Bearer ya29.iso-b"]...)
+	protosA := append([]string(nil), protosByKey["ccpa|Bearer ya29.iso-a"]...)
+	oauthPortsA := append([]string(nil), portsByKey["oauth|rt-iso-a"]...)
+	oauthPortsB := append([]string(nil), portsByKey["oauth|rt-iso-b"]...)
+	quotaPortsA := append([]string(nil), portsByKey["quota-ret|Bearer "+accA.AccessToken]...)
+	quotaPortsB := append([]string(nil), portsByKey["quota-ret|Bearer "+accB.AccessToken]...)
+	obsMu.Unlock()
+
+	if len(portsA) != 2 || len(portsB) != 1 {
+		t.Fatalf("unexpected CCPA call counts: portsA=%v portsB=%v", portsA, portsB)
+	}
+	if protosA[0] != "HTTP/2.0" {
+		t.Fatalf("expected HTTP/2.0 multiplexing on per-account TLS pool, got %q", protosA[0])
+	}
+	if portsA[0] != portsA[1] {
+		t.Fatalf("expected Account A sequential HTTP/2 requests to reuse exact TCP port, got %v", portsA)
+	}
+	if portsA[0] == portsB[0] {
+		t.Fatalf("HTTP/2 cross-account socket coalescing detected: Account A and B shared port %s!", portsA[0])
+	}
+	if len(oauthPortsA) == 0 || len(oauthPortsB) == 0 || oauthPortsA[0] == oauthPortsB[0] {
+		t.Fatalf("expected distinct TCP ports on OAuth token refresh: A=%v B=%v", oauthPortsA, oauthPortsB)
+	}
+	if len(quotaPortsA) == 0 || len(quotaPortsB) == 0 || quotaPortsA[0] == quotaPortsB[0] {
+		t.Fatalf("expected distinct TCP ports on Quota inspection: A=%v B=%v", quotaPortsA, quotaPortsB)
+	}
+
+	// 3. Validate ProxyURL validation + live HTTP CONNECT tunnel routing & hot socket eviction on Account A only!
+	if _, err := ValidateAccountProxyURL("ftp://bad.example.com:21"); err == nil {
+		t.Fatalf("expected ValidateAccountProxyURL to reject unsupported ftp:// scheme")
+	}
+	for _, validPrx := range []string{"", "http://127.0.0.1:8080", "https://proxy.local:8443", "socks5://u:p@127.0.0.1:1080", "socks5h://127.0.0.1:1080"} {
+		if _, err := ValidateAccountProxyURL(validPrx); err != nil {
+			t.Fatalf("expected ValidateAccountProxyURL(%q) to succeed, got %v", validPrx, err)
+		}
+	}
+
+	var proxyConnectHits atomic.Int32
+	proxySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodConnect {
+			http.Error(w, "expected CONNECT", http.StatusMethodNotAllowed)
+			return
+		}
+		proxyConnectHits.Add(1)
+		targetConn, err := net.DialTimeout("tcp", r.Host, 3*time.Second)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			_ = targetConn.Close()
+			http.Error(w, "no hijacker", http.StatusInternalServerError)
+			return
+		}
+		clientConn, buf, err := hj.Hijack()
+		if err != nil {
+			_ = targetConn.Close()
+			return
+		}
+		_, _ = clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
+		if n := buf.Reader.Buffered(); n > 0 {
+			pending := make([]byte, n)
+			_, _ = buf.Read(pending)
+			_, _ = targetConn.Write(pending)
+		}
+		go func() {
+			defer targetConn.Close()
+			defer clientConn.Close()
+			_, _ = io.Copy(targetConn, clientConn)
+		}()
+		go func() {
+			defer targetConn.Close()
+			defer clientConn.Close()
+			_, _ = io.Copy(clientConn, targetConn)
+		}()
+	}))
+	defer proxySrv.Close()
+
+	if err := SetAccountProxyURL(accA.Email, proxySrv.URL); err != nil {
+		t.Fatalf("SetAccountProxyURL failed: %v", err)
+	}
+	if gotPrx := GetAccountProxyURL(accA.Email); gotPrx != proxySrv.URL {
+		t.Fatalf("GetAccountProxyURL = %q, want %q", gotPrx, proxySrv.URL)
+	}
+
+	recAPrx := httptest.NewRecorder()
+	if err := upstream.HandleChatCompletion(WithPinnedAccount(context.Background(), accA.Email), recAPrx, OpenAIChatRequest{
+		Model:    "antigravity/gemini-4-carbon-high",
+		Messages: []OpenAIChatMessage{{Role: "user", Content: json.RawMessage(`"accA via proxy"`)}},
+	}, res, ""); err != nil {
+		t.Fatalf("Account A CCPA call via proxy failed: %v", err)
+	}
+	if proxyConnectHits.Load() < 1 {
+		t.Fatalf("expected Account A CCPA stream to tunnel through configured ProxyURL, got 0 CONNECT hits")
+	}
+	hitsAfterA := proxyConnectHits.Load()
+
+	// Account B (no proxy) MUST NOT touch Account A's proxy!
+	recBDirect := httptest.NewRecorder()
+	if err := upstream.HandleChatCompletion(WithPinnedAccount(context.Background(), accB.Email), recBDirect, OpenAIChatRequest{
+		Model:    "antigravity/gemini-4-carbon-high",
+		Messages: []OpenAIChatMessage{{Role: "user", Content: json.RawMessage(`"accB direct"`)}},
+	}, res, ""); err != nil {
+		t.Fatalf("Account B direct CCPA call failed: %v", err)
+	}
+	if proxyConnectHits.Load() != hitsAfterA {
+		t.Fatalf("Account B unexpectedly routed through Account A's proxy (%d -> %d)!", hitsAfterA, proxyConnectHits.Load())
+	}
+}
+
+func TestTierHedger_Pass2FlashThinkingConfigAndMaxSpeedCongestion(t *testing.T) {
+	tmpCfg := filepath.Join(t.TempDir(), "gateway_config.json")
+	t.Setenv("GATEWAY_CONFIG_FILE", tmpCfg)
+	resetAuthCacheForTest(t)
+	clearTestCCPACaches()
+	ClearAccountModelRateLimits("")
+	GetGlobalCache().Clear()
+
+	origFastDelay := CCPAHedgeDelayFast
+	CCPAHedgeDelayFast = 35 * time.Millisecond
+	t.Cleanup(func() {
+		CCPAHedgeDelayFast = origFastDelay
+		resetAuthCacheForTest(t)
+		clearTestCCPACaches()
+		ClearAccountModelRateLimits("")
+		GetGlobalCache().Clear()
+	})
+
+	accounts := []ConnectedAccount{
+		{ID: "p2-pro1", Provider: ProviderAntigravity, Email: "p2-pro1@gmail.com", AccessToken: "ya29.p2-pro1", ProjectID: "proj-p1", Tier: "Pro", Priority: 100, ExpiresAt: time.Now().Add(2 * time.Hour).Unix()},
+		{ID: "p2-pro2", Provider: ProviderAntigravity, Email: "p2-pro2@gmail.com", AccessToken: "ya29.p2-pro2", ProjectID: "proj-p2", Tier: "Pro", Priority: 90, ExpiresAt: time.Now().Add(2 * time.Hour).Unix()},
+		{ID: "p2-ultra1", Provider: ProviderAntigravity, Email: "p2-ultra1@gmail.com", AccessToken: "ya29.p2-ultra1", ProjectID: "proj-u1", Tier: "Ultra", Priority: 95, ExpiresAt: time.Now().Add(2 * time.Hour).Unix()},
+	}
+	if err := saveTestGatewayAuth(SavedGatewayAuth{
+		RoutingStrategy: StrategyFillFirst,
+		Accounts:        accounts,
+	}); err != nil {
+		t.Fatalf("saveTestGatewayAuth: %v", err)
+	}
+
+	// 1. Verify gemini-3-flash receives thinkingLevel:"LOW", includeThoughts:false, maxOutputTokens >= 1056 on max_tokens:32,
+	// AND fast TTFT hedging races secondary Pro account (p2-pro2) rather than burning Ultra slot!
+	var (
+		capMu         sync.Mutex
+		flashPayloads []ccpaRequestPayload
+		litePayloads  []ccpaRequestPayload
+	)
+	upstream := NewUpstream(GatewayConfig{CCPAEndpoint: DefaultCCPAEndpoint})
+	upstream.client = &http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			raw, _ := io.ReadAll(r.Body)
+			var payload ccpaRequestPayload
+			_ = json.Unmarshal(raw, &payload)
+			auth := strings.TrimSpace(r.Header.Get("Authorization"))
+
+			capMu.Lock()
+			if payload.Model == "gemini-3-flash" {
+				flashPayloads = append(flashPayloads, payload)
+			} else if payload.Model == "gemini-3.5-flash-lite" {
+				litePayloads = append(litePayloads, payload)
+			}
+			capMu.Unlock()
+
+			// Stall primary p2-pro1 on gemini-3-flash so CCPAHedgeDelayFast triggers secondary Pro account!
+			if payload.Model == "gemini-3-flash" && auth == "Bearer ya29.p2-pro1" {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+					Body:       &stalledTrackingBody{ctx: r.Context()},
+				}, nil
+			}
+			sse := "data: {\"response\":{\"modelVersion\":\"fast-v1\",\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"fast-pong\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":4,\"candidatesTokenCount\":2,\"totalTokenCount\":6}}}\n\ndata: [DONE]\n\n"
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       io.NopCloser(strings.NewReader(sse)),
+			}, nil
+		}),
+	}
+
+	flashRes := ResolveModel("antigravity/gemini-3-flash", nil)
+	recFlash := httptest.NewRecorder()
+	if err := upstream.HandleChatCompletion(context.Background(), recFlash, OpenAIChatRequest{
+		Model:     "antigravity/gemini-3-flash",
+		MaxTokens: 32,
+		Messages:  []OpenAIChatMessage{{Role: "user", Content: json.RawMessage(`"Reply PONG"`)}},
+	}, flashRes, ""); err != nil {
+		t.Fatalf("gemini-3-flash hedged call failed: %v", err)
+	}
+	if gotAcc := recFlash.Header().Get("X-Omni-Gateway-Account"); gotAcc != "p2-pro2@gmail.com" {
+		t.Fatalf("expected fast TTFT hedge to pick secondary Pro account p2-pro2@gmail.com (preserving Ultra!), got %q", gotAcc)
+	}
+
+	liteRes := ResolveModel("antigravity/gemini-3.5-flash-lite", nil)
+	recLite := httptest.NewRecorder()
+	if err := upstream.HandleChatCompletion(WithPinnedAccount(context.Background(), "p2-pro2@gmail.com"), recLite, OpenAIChatRequest{
+		Model:     "antigravity/gemini-3.5-flash-lite",
+		MaxTokens: 32,
+		Messages:  []OpenAIChatMessage{{Role: "user", Content: json.RawMessage(`"Reply LITE"`)}},
+	}, liteRes, ""); err != nil {
+		t.Fatalf("gemini-3.5-flash-lite call failed: %v", err)
+	}
+
+	capMu.Lock()
+	if len(flashPayloads) == 0 {
+		t.Fatalf("expected captured gemini-3-flash payload")
+	}
+	fp := flashPayloads[0]
+	if fp.Request.GenerationConfig.ThinkingConfig == nil ||
+		fp.Request.GenerationConfig.ThinkingConfig.IncludeThoughts ||
+		fp.Request.GenerationConfig.ThinkingConfig.ThinkingLevel != ThinkingLevelLow ||
+		fp.Request.GenerationConfig.ThinkingConfig.ThinkingBudget != nil {
+		t.Fatalf("expected gemini-3-flash thinkingConfig={includeThoughts:false, thinkingLevel:LOW, budget:nil}, got %+v", fp.Request.GenerationConfig.ThinkingConfig)
+	}
+	if fp.Request.GenerationConfig.MaxOutputTokens < 1056 {
+		t.Fatalf("expected gemini-3-flash MaxOutputTokens >= 1056 when max_tokens=32, got %d", fp.Request.GenerationConfig.MaxOutputTokens)
+	}
+	if len(litePayloads) == 0 {
+		t.Fatalf("expected captured gemini-3.5-flash-lite payload")
+	}
+	lp := litePayloads[0]
+	if lp.Request.GenerationConfig.ThinkingConfig == nil ||
+		lp.Request.GenerationConfig.ThinkingConfig.IncludeThoughts ||
+		lp.Request.GenerationConfig.ThinkingConfig.ThinkingBudget == nil ||
+		*lp.Request.GenerationConfig.ThinkingConfig.ThinkingBudget != 0 {
+		t.Fatalf("expected gemini-3.5-flash-lite thinkingConfig={includeThoughts:false, thinkingBudget:0}, got %+v", lp.Request.GenerationConfig.ThinkingConfig)
+	}
+	capMu.Unlock()
+
+	// 2. Verify auto/max-speed congestion guard demotes claude-sonnet-4-6 when TotalAntigravityInFlight() >= 6!
+	for i := 0; i < 6; i++ {
+		AcquireAccountInFlight("p2-pro1@gmail.com")
+	}
+	defer func() {
+		for i := 0; i < 6; i++ {
+			ReleaseAccountInFlight("p2-pro1@gmail.com")
+		}
+	}()
+
+	maxSpeedCombo := NewResolver().Resolve("auto/max-speed", nil)
+	var comboTargets []ResolvedModel
+	for _, mID := range maxSpeedCombo.FallbackChain {
+		tRes := NewResolver().Resolve(mID, nil)
+		tRes.RequestedID = "auto/max-speed"
+		comboTargets = append(comboTargets, tRes)
+	}
+	for i := 0; i < 4; i++ {
+		rot := upstream.rotateStripedComboTargets(maxSpeedCombo, comboTargets)
+		if strings.HasPrefix(rot[0].CCPAModelID, "claude-") {
+			t.Fatalf("expected congested auto/max-speed (inFlight >= 6) to demote claude-* from primary rotation, got rot[0]=%s", rot[0].CCPAModelID)
 		}
 	}
 }
