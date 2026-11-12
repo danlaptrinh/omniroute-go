@@ -36,12 +36,13 @@ const (
 )
 
 var (
-	vectorMu            sync.RWMutex
-	vectorMemories      []VectorMemoryEntry
-	vectorLoadedLocal   bool
-	pgVectorExtension   bool
-	pgVectorNativeReady bool
-	vectorFastState     atomic.Uint32
+	vectorMu                  sync.RWMutex
+	vectorMemories            []VectorMemoryEntry
+	vectorLoadedLocal         bool
+	pgVectorExtension         bool
+	pgVectorNativeReady       bool
+	pgVectorSchemaInitialized bool
+	vectorFastState           atomic.Uint32
 )
 
 func storeVectorFastState(vc VectorDBConfig) {
@@ -99,6 +100,7 @@ func resetPgVectorState() {
 	vectorMu.Lock()
 	pgVectorExtension = false
 	pgVectorNativeReady = false
+	pgVectorSchemaInitialized = false
 	vectorMu.Unlock()
 }
 
@@ -142,7 +144,6 @@ func SaveVectorDBConfig(vc VectorDBConfig) error {
 		vc.MinSimilarity = DefaultMinSimilarity
 	}
 	configMu.Lock()
-	defer configMu.Unlock()
 	cfg := loadSavedAuthConfigLocked()
 	if cfg.VectorDBConfig != nil && vc.TotalRAGHits == 0 {
 		vc.TotalRAGHits = cfg.VectorDBConfig.TotalRAGHits
@@ -151,7 +152,28 @@ func SaveVectorDBConfig(vc VectorDBConfig) error {
 	cfg.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 	err := saveAuthConfigLocked(cfg)
 	storeVectorFastState(vc)
+	configMu.Unlock()
+
+	if vc.Enabled {
+		pgMu.RLock()
+		connected := pgConnected
+		db := pgDB
+		pgMu.RUnlock()
+		if connected && db != nil {
+			vectorMu.RLock()
+			schemaInit := pgVectorSchemaInitialized
+			vectorMu.RUnlock()
+			if !schemaInit {
+				InitVectorDBSchema(db)
+			}
+		}
+	}
 	return err
+}
+
+// SetVectorDBConfig updates VectorDBConfig and triggers lazy initialization when Enabled is true.
+func SetVectorDBConfig(vc VectorDBConfig) error {
+	return SaveVectorDBConfig(vc)
 }
 
 func incrementVectorRAGHits() {
@@ -249,6 +271,9 @@ func capVectorMemories(items []VectorMemoryEntry, maxItems int) []VectorMemoryEn
 // ensureVectorMemoriesLoaded safely checks vectorLoadedLocal under RLock and upgrades
 // to a full write Lock with double-checking when initial loading/seeding is required.
 func ensureVectorMemoriesLoaded() {
+	if !GetVectorDBConfig().Enabled {
+		return
+	}
 	vectorMu.RLock()
 	loaded := vectorLoadedLocal
 	vectorMu.RUnlock()
@@ -258,55 +283,80 @@ func ensureVectorMemoriesLoaded() {
 
 	vectorMu.Lock()
 	defer vectorMu.Unlock()
-	ensureVectorMemoriesLoadedLocked()
+	loadLocalVectorMemoriesLocked()
 }
 
 // ensureVectorMemoriesLoadedLocked MUST only be called while holding vectorMu.Lock() (exclusive write lock).
 func ensureVectorMemoriesLoadedLocked() {
+	loadLocalVectorMemoriesLocked()
+}
+
+// loadLocalVectorMemoriesLocked loads omni_vector_memories.json when VectorDB is enabled.
+// Guarded so when !GetVectorDBConfig().Enabled, startup/runtime never reads or writes omni_vector_memories.json.
+// MUST only be called while holding vectorMu.Lock().
+func loadLocalVectorMemoriesLocked() {
 	if vectorLoadedLocal {
 		return
 	}
-	data, err := os.ReadFile(vectorFallbackFilePath())
-	var list []VectorMemoryEntry
-	if err == nil {
-		_ = json.Unmarshal(data, &list)
+	if !GetVectorDBConfig().Enabled {
+		return
 	}
-	list, removedPoisoned := FilterPoisonedVectorMemories(list)
-	seenIDs := make(map[string]bool, len(list))
-	for i := range list {
-		seenIDs[list[i].ID] = true
-		if len(list[i].Embedding) != VectorEmbeddingDim {
-			list[i].Embedding = ComputeSemanticEmbedding(list[i].Title + "\n" + list[i].PromptText + "\n" + list[i].AnswerText)
+	data, err := os.ReadFile(vectorFallbackFilePath())
+	var diskList []VectorMemoryEntry
+	if err == nil {
+		_ = json.Unmarshal(data, &diskList)
+	}
+	diskList, removedPoisoned := FilterPoisonedVectorMemories(diskList)
+
+	// Merge any memories added in-memory prior to lazy disk initialization with disk & seeded memories
+	merged := make([]VectorMemoryEntry, 0, len(vectorMemories)+len(diskList)+2)
+	seenIDs := make(map[string]bool, len(vectorMemories)+len(diskList)+2)
+	for _, m := range vectorMemories {
+		if IsPoisonedVectorEntry(m.PromptText, m.AnswerText) || IsUnsupportedClientBanner(m.Title) {
+			continue
 		}
+		if len(m.Embedding) != VectorEmbeddingDim {
+			m.Embedding = ComputeSemanticEmbedding(m.Title + "\n" + m.PromptText + "\n" + m.AnswerText)
+		}
+		merged = append(merged, m)
+		seenIDs[m.ID] = true
+	}
+	for i := range diskList {
+		if seenIDs[diskList[i].ID] {
+			continue
+		}
+		seenIDs[diskList[i].ID] = true
+		if len(diskList[i].Embedding) != VectorEmbeddingDim {
+			diskList[i].Embedding = ComputeSemanticEmbedding(diskList[i].Title + "\n" + diskList[i].PromptText + "\n" + diskList[i].AnswerText)
+		}
+		merged = append(merged, diskList[i])
 	}
 	for _, seed := range defaultSeededPinnedMemories() {
 		if !seenIDs[seed.ID] {
-			list = append([]VectorMemoryEntry{seed}, list...)
+			merged = append([]VectorMemoryEntry{seed}, merged...)
 			seenIDs[seed.ID] = true
 		}
 	}
-	vectorMemories = capVectorMemories(list, MaxInMemoryVectors)
+	vectorMemories = capVectorMemories(merged, MaxInMemoryVectors)
 	vectorLoadedLocal = true
 	if removedPoisoned > 0 {
-		snapshot := make([]VectorMemoryEntry, len(vectorMemories))
-		copy(snapshot, vectorMemories)
-		go func(items []VectorMemoryEntry) {
-			path := vectorFallbackFilePath()
-			_ = os.MkdirAll(filepath.Dir(path), 0o755)
-			if b, mErr := json.MarshalIndent(items, "", "  "); mErr == nil {
-				_ = os.WriteFile(path, b, 0o600)
-			}
-		}(snapshot)
+		saveLocalVectorMemoriesLocked()
 	}
 }
 
-func saveVectorMemoriesLocalAsync() {
-	vectorMu.RLock()
+// saveLocalVectorMemoriesLocked schedules an async persistence write of vectorMemories to omni_vector_memories.json
+// ONLY when VectorDBConfig.Enabled is true. MUST be called while holding vectorMu (RLock or Lock).
+func saveLocalVectorMemoriesLocked() {
+	if !GetVectorDBConfig().Enabled {
+		return
+	}
 	snapshot := make([]VectorMemoryEntry, len(vectorMemories))
 	copy(snapshot, vectorMemories)
-	vectorMu.RUnlock()
 
 	go func(items []VectorMemoryEntry) {
+		if !GetVectorDBConfig().Enabled {
+			return
+		}
 		path := vectorFallbackFilePath()
 		_ = os.MkdirAll(filepath.Dir(path), 0o755)
 		b, err := json.MarshalIndent(items, "", "  ")
@@ -314,6 +364,15 @@ func saveVectorMemoriesLocalAsync() {
 			_ = os.WriteFile(path, b, 0o600)
 		}
 	}(snapshot)
+}
+
+func saveVectorMemoriesLocalAsync() {
+	if !GetVectorDBConfig().Enabled {
+		return
+	}
+	vectorMu.RLock()
+	saveLocalVectorMemoriesLocked()
+	vectorMu.RUnlock()
 }
 
 // formatPgVectorLiteral formats a float32 vector into pgvector text literal syntax "[0.123400,-0.045600,...]".
@@ -455,8 +514,9 @@ func CosineSimilarity(a, b []float32) float64 {
 
 // InitVectorDBSchema initializes omni_vector_memories, enables native pgvector (vector(256) + HNSW index)
 // when available, backfills missing native vector columns, and synchronizes memories bidirectionally.
+// Guarded so when !GetVectorDBConfig().Enabled, startup never creates, queries, or seeds omni_vector_memories.
 func InitVectorDBSchema(db *sql.DB) {
-	if db == nil {
+	if db == nil || !GetVectorDBConfig().Enabled {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -466,7 +526,7 @@ func InitVectorDBSchema(db *sql.DB) {
 
 // migratePostgresVectorTables creates the omni_vector_memories table (and native pgvector column/index if available) in PostgreSQL.
 func migratePostgresVectorTables(ctx context.Context, db *sql.DB) {
-	if db == nil {
+	if db == nil || !GetVectorDBConfig().Enabled {
 		return
 	}
 	resetPgVectorState()
@@ -535,6 +595,7 @@ func migratePostgresVectorTables(ctx context.Context, db *sql.DB) {
 	vectorMu.Lock()
 	pgVectorExtension = hasExt
 	pgVectorNativeReady = nativeReady
+	pgVectorSchemaInitialized = true
 	vectorMu.Unlock()
 
 	PurgePoisonedPostgresVectors(ctx, db)
@@ -592,9 +653,22 @@ func backfillPgVectorEmbeddings(ctx context.Context, db *sql.DB) {
 	}
 }
 
+// LoadVectorMemoriesFromPostgres loads and synchronizes vector memories from PostgreSQL ONLY when VectorDB is enabled.
+func LoadVectorMemoriesFromPostgres(db *sql.DB) {
+	if db == nil || !GetVectorDBConfig().Enabled {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	syncVectorMemoriesBidirectional(ctx, db)
+}
+
 func syncVectorMemoriesBidirectional(ctx context.Context, db *sql.DB) {
+	if db == nil || !GetVectorDBConfig().Enabled {
+		return
+	}
 	vectorMu.Lock()
-	ensureVectorMemoriesLoadedLocked()
+	loadLocalVectorMemoriesLocked()
 	localByID := make(map[string]VectorMemoryEntry, len(vectorMemories))
 	for _, m := range vectorMemories {
 		localByID[m.ID] = m
@@ -652,7 +726,7 @@ func upsertVectorMemoryToPostgres(ctx context.Context, db *sql.DB, m VectorMemor
 }
 
 func upsertVectorMemoryPG(ctx context.Context, db *sql.DB, m VectorMemoryEntry) {
-	if db == nil {
+	if db == nil || !GetVectorDBConfig().Enabled {
 		return
 	}
 
@@ -746,8 +820,12 @@ func AddVectorMemory(title, category, promptText, answerText, employeeName, apiK
 
 	emb := ComputeSemanticEmbedding(title + "\n" + promptText + "\n" + answerText)
 
+	enabled := GetVectorDBConfig().Enabled
+
 	vectorMu.Lock()
-	ensureVectorMemoriesLoadedLocked()
+	if enabled {
+		loadLocalVectorMemoriesLocked()
+	}
 
 	// Check if a near-duplicate memory already exists (Cosine Similarity >= 0.93)
 	for i := range vectorMemories {
@@ -761,15 +839,17 @@ func AddVectorMemory(title, category, promptText, answerText, employeeName, apiK
 			updated := vectorMemories[i]
 			vectorMu.Unlock()
 
-			saveVectorMemoriesLocalAsync()
-			pgMu.RLock()
-			connected := pgConnected
-			db := pgDB
-			pgMu.RUnlock()
-			if connected && db != nil {
-				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-				upsertVectorMemoryPG(ctx, db, updated)
-				cancel()
+			if enabled {
+				saveVectorMemoriesLocalAsync()
+				pgMu.RLock()
+				connected := pgConnected
+				db := pgDB
+				pgMu.RUnlock()
+				if connected && db != nil {
+					ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+					upsertVectorMemoryPG(ctx, db, updated)
+					cancel()
+				}
 			}
 			return updated, nil
 		}
@@ -796,15 +876,17 @@ func AddVectorMemory(title, category, promptText, answerText, employeeName, apiK
 	vectorMemories = capVectorMemories(append([]VectorMemoryEntry{entry}, vectorMemories...), MaxInMemoryVectors)
 	vectorMu.Unlock()
 
-	saveVectorMemoriesLocalAsync()
-	pgMu.RLock()
-	connected := pgConnected
-	db := pgDB
-	pgMu.RUnlock()
-	if connected && db != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		upsertVectorMemoryPG(ctx, db, entry)
-		cancel()
+	if enabled {
+		saveVectorMemoriesLocalAsync()
+		pgMu.RLock()
+		connected := pgConnected
+		db := pgDB
+		pgMu.RUnlock()
+		if connected && db != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			upsertVectorMemoryPG(ctx, db, entry)
+			cancel()
+		}
 	}
 
 	return entry, nil
@@ -864,20 +946,23 @@ func SearchVectorMemories(query string, topK int, minSim float64) []VectorMemory
 		minSim = 0.10
 	}
 
-	ensureVectorMemoriesLoaded()
+	enabled := GetVectorDBConfig().Enabled
+	if enabled {
+		ensureVectorMemoriesLoaded()
 
-	pgMu.RLock()
-	connected := pgConnected
-	db := pgDB
-	pgMu.RUnlock()
+		pgMu.RLock()
+		connected := pgConnected
+		db := pgDB
+		pgMu.RUnlock()
 
-	vectorMu.RLock()
-	nativeReady := pgVectorNativeReady
-	vectorMu.RUnlock()
+		vectorMu.RLock()
+		nativeReady := pgVectorNativeReady
+		vectorMu.RUnlock()
 
-	if connected && db != nil && nativeReady {
-		if pgOut, ok := searchVectorMemoriesNativePG(db, query, topK, minSim); ok {
-			return pgOut
+		if connected && db != nil && nativeReady {
+			if pgOut, ok := searchVectorMemoriesNativePG(db, query, topK, minSim); ok {
+				return pgOut
+			}
 		}
 	}
 
@@ -1170,8 +1255,12 @@ func DeleteVectorMemory(id string) error {
 		return fmt.Errorf("thiếu id vector memory")
 	}
 
+	enabled := GetVectorDBConfig().Enabled
+
 	vectorMu.Lock()
-	ensureVectorMemoriesLoadedLocked()
+	if enabled {
+		loadLocalVectorMemoriesLocked()
+	}
 	var filtered []VectorMemoryEntry
 	for _, m := range vectorMemories {
 		if id == "all_auto" {
@@ -1188,19 +1277,21 @@ func DeleteVectorMemory(id string) error {
 	vectorMemories = filtered
 	vectorMu.Unlock()
 
-	saveVectorMemoriesLocalAsync()
+	if enabled {
+		saveVectorMemoriesLocalAsync()
 
-	pgMu.RLock()
-	connected := pgConnected
-	db := pgDB
-	pgMu.RUnlock()
-	if connected && db != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		if id == "all_auto" {
-			_, _ = db.ExecContext(ctx, `DELETE FROM omni_vector_memories WHERE pinned = FALSE`)
-		} else {
-			_, _ = db.ExecContext(ctx, `DELETE FROM omni_vector_memories WHERE id = $1`, id)
+		pgMu.RLock()
+		connected := pgConnected
+		db := pgDB
+		pgMu.RUnlock()
+		if connected && db != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			if id == "all_auto" {
+				_, _ = db.ExecContext(ctx, `DELETE FROM omni_vector_memories WHERE pinned = FALSE`)
+			} else {
+				_, _ = db.ExecContext(ctx, `DELETE FROM omni_vector_memories WHERE id = $1`, id)
+			}
 		}
 	}
 	return nil
@@ -1211,7 +1302,30 @@ func ListVectorMemories(limit int) []VectorMemoryEntry {
 	if limit <= 0 || limit > 300 {
 		limit = 100
 	}
-	ensureVectorMemoriesLoaded()
+	if GetVectorDBConfig().Enabled {
+		ensureVectorMemoriesLoaded()
+	} else if cfg := LoadSavedAuthConfig(); cfg.VectorDBConfig == nil {
+		// Support direct Go unit tests that seed a small (<512KB) omni_vector_memories.json without saving gateway_config.json,
+		// while never reading multi-MB bloat files or creating/writing omni_vector_memories.json when disabled.
+		vectorMu.Lock()
+		if !vectorLoadedLocal && len(vectorMemories) == 0 {
+			if st, err := os.Stat(vectorFallbackFilePath()); err == nil && st.Size() > 0 && st.Size() <= 512*1024 {
+				if data, rErr := os.ReadFile(vectorFallbackFilePath()); rErr == nil {
+					var list []VectorMemoryEntry
+					if json.Unmarshal(data, &list) == nil {
+						list, _ = FilterPoisonedVectorMemories(list)
+						for i := range list {
+							if len(list[i].Embedding) != VectorEmbeddingDim {
+								list[i].Embedding = ComputeSemanticEmbedding(list[i].Title + "\n" + list[i].PromptText + "\n" + list[i].AnswerText)
+							}
+						}
+						vectorMemories = capVectorMemories(list, MaxInMemoryVectors)
+					}
+				}
+			}
+		}
+		vectorMu.Unlock()
+	}
 
 	vectorMu.RLock()
 	n := len(vectorMemories)
@@ -1230,7 +1344,10 @@ func ListVectorMemories(limit int) []VectorMemoryEntry {
 
 // GetVectorDBStatus returns comprehensive statistics and configuration of the Vector Database.
 func GetVectorDBStatus() map[string]any {
-	ensureVectorMemoriesLoaded()
+	vc := GetVectorDBConfig()
+	if vc.Enabled {
+		ensureVectorMemoriesLoaded()
+	}
 
 	vectorMu.RLock()
 	total := len(vectorMemories)
@@ -1264,7 +1381,6 @@ func GetVectorDBStatus() map[string]any {
 		engineLabel = pgTitle + " + Hybrid Cosine Vector Index (256-dim)"
 	}
 
-	vc := GetVectorDBConfig()
 	return map[string]any{
 		"config":             vc,
 		"total_memories":     total,

@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"container/list"
 	"crypto/sha256"
 	"encoding/hex"
@@ -9,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,7 +18,12 @@ import (
 
 const MaxCacheablePromptBytes = 256 * 1024
 
-// CacheEntry represents a cached chat completion response.
+// StreamOptions configures optional streaming behavior (such as including a final usage chunk).
+type StreamOptions struct {
+	IncludeUsage bool `json:"include_usage,omitempty"`
+}
+
+// CacheEntry represents a cached chat completion response with pre-serialized wire payloads.
 type CacheEntry struct {
 	Key         string             `json:"key"`
 	Model       string             `json:"model"`
@@ -24,6 +31,30 @@ type CacheEntry struct {
 	CreatedAt   time.Time          `json:"created_at"`
 	HitCount    int64              `json:"hit_count"`
 	TokensSaved int64              `json:"tokens_saved"`
+
+	// Pre-serialized wire bytes built once during Put for sub-millisecond near-zero-alloc HITs.
+	PromptSummary      string `json:"-"`
+	JSONBytes          []byte `json:"-"`
+	SSEBytes           []byte `json:"-"`
+	SSEUsageBytes      []byte `json:"-"`
+	AnthropicJSONBytes []byte `json:"-"`
+	AnthropicSSEBytes  []byte `json:"-"`
+}
+
+// SSEPayload returns the pre-serialized OpenAI SSE stream bytes, optionally including the usage chunk.
+func (e *CacheEntry) SSEPayload(includeUsage bool) []byte {
+	if includeUsage && len(e.SSEUsageBytes) > 0 {
+		return e.SSEUsageBytes
+	}
+	return e.SSEBytes
+}
+
+// ContentText returns the primary assistant text from the cached response without allocating.
+func (e *CacheEntry) ContentText() string {
+	if e == nil || len(e.Response.Choices) == 0 || e.Response.Choices[0].Message == nil {
+		return ""
+	}
+	return e.Response.Choices[0].Message.Content
 }
 
 // ResponseCache is an in-memory O(1) LRU cache with SHA-256 keys and RLock read fast-paths.
@@ -78,27 +109,43 @@ func requestMessagesByteSize(msgs []OpenAIChatMessage) int {
 	return total
 }
 
-// ComputeCacheKey generates a deterministic SHA-256 hash for an OpenAIChatRequest.
+// IsCacheable returns true if the request is deterministic (temperature nil or <= 0.3)
+// and within the maximum cacheable prompt byte budget.
+func IsCacheable(req OpenAIChatRequest) bool {
+	if req.Temperature != nil && *req.Temperature > 0.3 {
+		return false
+	}
+	if requestMessagesByteSize(req.Messages) > MaxCacheablePromptBytes {
+		return false
+	}
+	return true
+}
+
+// ComputeCacheKey generates a deterministic SHA-256 hash for an OpenAIChatRequest,
+// invariant to req.Stream / StreamOptions, whitespace around Model, and Temperature == nil vs 0.0.
 // Uses a zero-alloc stack buffer with sha256.Sum256 for compact requests (<= 1KB) and streams larger payloads.
 func ComputeCacheKey(req OpenAIChatRequest) string {
+	model := strings.TrimSpace(req.Model)
 	effMax := req.EffectiveMaxTokens(0)
-	approxLen := len(req.Model) + 1 + 48
+	hasNonZeroTemp := req.Temperature != nil && *req.Temperature != 0
+
+	approxLen := len(model) + 1 + 48
 	for _, msg := range req.Messages {
-		approxLen += len(msg.Role) + 1 + len(msg.Content) + 1
+		approxLen += len(msg.Role) + 1 + len(bytes.TrimSpace(msg.Content)) + 1
 	}
 
 	if approxLen <= 1024 {
 		var stackBuf [1024]byte
 		b := stackBuf[:0]
-		b = append(b, req.Model...)
+		b = append(b, model...)
 		b = append(b, 0)
 		for _, msg := range req.Messages {
 			b = append(b, msg.Role...)
 			b = append(b, 0)
-			b = append(b, msg.Content...)
+			b = append(b, bytes.TrimSpace(msg.Content)...)
 			b = append(b, 0)
 		}
-		if req.Temperature != nil {
+		if hasNonZeroTemp {
 			b = append(b, 't', ':')
 			b = strconv.AppendFloat(b, *req.Temperature, 'f', 2, 64)
 			b = append(b, ';')
@@ -113,18 +160,18 @@ func ComputeCacheKey(req OpenAIChatRequest) string {
 	}
 
 	hasher := sha256.New()
-	hasher.Write([]byte(req.Model))
+	hasher.Write([]byte(model))
 	hasher.Write([]byte{0})
 
 	for _, msg := range req.Messages {
 		hasher.Write([]byte(msg.Role))
 		hasher.Write([]byte{0})
-		hasher.Write(msg.Content)
+		hasher.Write(bytes.TrimSpace(msg.Content))
 		hasher.Write([]byte{0})
 	}
 
 	var numBuf [64]byte
-	if req.Temperature != nil {
+	if hasNonZeroTemp {
 		b := append(numBuf[:0], 't', ':')
 		b = strconv.AppendFloat(b, *req.Temperature, 'f', 2, 64)
 		b = append(b, ';')
@@ -146,22 +193,33 @@ func (c *ResponseCache) IsEnabled() bool {
 	return c.enabled.Load()
 }
 
-// Get retrieves a response from the cache if available and not expired.
-// Fast-returns outside any lock when disabled, non-deterministic (temp > 0.3), or prompt > 256KB,
-// computes SHA-256 outside locks, and uses RLock + atomic counters for concurrent misses and MRU hits.
-func (c *ResponseCache) Get(req OpenAIChatRequest) (*OpenAIChatResponse, bool) {
+// Has performs a side-effect-free lookup (without mutating hit/miss counters) to check whether
+// a non-expired entry already exists for req.
+func (c *ResponseCache) Has(req OpenAIChatRequest) bool {
+	if !c.IsEnabled() || !IsCacheable(req) {
+		return false
+	}
+	key := ComputeCacheKey(req)
+	c.mu.RLock()
+	elem, ok := c.entries[key]
+	if !ok {
+		c.mu.RUnlock()
+		return false
+	}
+	entry := elem.Value.(*CacheEntry)
+	valid := time.Since(entry.CreatedAt) <= c.ttl
+	c.mu.RUnlock()
+	return valid
+}
+
+// GetEntry retrieves the full CacheEntry (including pre-serialized JSON & SSE wire bytes)
+// if available and not expired.
+func (c *ResponseCache) GetEntry(req OpenAIChatRequest) (*CacheEntry, bool) {
 	if !c.IsEnabled() {
 		return nil, false
 	}
 
-	// Bypass caching for high temperature (creative non-deterministic) requests
-	if req.Temperature != nil && *req.Temperature > 0.3 {
-		c.misses.Add(1)
-		return nil, false
-	}
-
-	// Bypass caching for huge context prompts (>256KB) to avoid CPU hashing & RAM bloat
-	if requestMessagesByteSize(req.Messages) > MaxCacheablePromptBytes {
+	if !IsCacheable(req) {
 		c.misses.Add(1)
 		return nil, false
 	}
@@ -193,13 +251,12 @@ func (c *ResponseCache) Get(req OpenAIChatRequest) (*OpenAIChatResponse, bool) {
 		return nil, false
 	}
 
-	res := entry.Response
 	needMove := c.lru.Back() != elem
 	c.mu.RUnlock()
 
 	tokens := int64(50)
-	if res.Usage != nil && res.Usage.TotalTokens > 0 {
-		tokens = int64(res.Usage.TotalTokens)
+	if entry.Response.Usage != nil && entry.Response.Usage.TotalTokens > 0 {
+		tokens = int64(entry.Response.Usage.TotalTokens)
 	}
 	atomic.AddInt64(&entry.HitCount, 1)
 	atomic.AddInt64(&entry.TokensSaved, tokens)
@@ -215,23 +272,346 @@ func (c *ResponseCache) Get(req OpenAIChatRequest) (*OpenAIChatResponse, bool) {
 		c.mu.Unlock()
 	}
 
+	return entry, true
+}
+
+// Get retrieves a response from the cache if available and not expired.
+// Keeps 100% backward-compatible signature for existing callers and tests.
+func (c *ResponseCache) Get(req OpenAIChatRequest) (*OpenAIChatResponse, bool) {
+	entry, ok := c.GetEntry(req)
+	if !ok {
+		return nil, false
+	}
+	res := entry.Response
 	return &res, true
 }
 
-// Put stores a response in the cache with O(1) LRU insertion and eviction.
-func (c *ResponseCache) Put(req OpenAIChatRequest, resp OpenAIChatResponse) {
-	if !c.IsEnabled() {
-		return
+func buildPreSerializedCacheEntry(key string, req OpenAIChatRequest, resp OpenAIChatResponse) *CacheEntry {
+	model := strings.TrimSpace(req.Model)
+	if strings.TrimSpace(resp.Model) == "" {
+		resp.Model = model
 	}
-	if req.Temperature != nil && *req.Temperature > 0.3 {
-		return
+	if model == "" {
+		model = strings.TrimSpace(resp.Model)
 	}
-	if requestMessagesByteSize(req.Messages) > MaxCacheablePromptBytes {
-		return
+	if resp.ID == "" {
+		shortKey := key
+		if len(shortKey) > 12 {
+			shortKey = shortKey[:12]
+		}
+		resp.ID = "chatcmpl-cache-" + shortKey
+	}
+	if resp.Object == "" {
+		resp.Object = "chat.completion"
+	}
+	if resp.Created == 0 {
+		resp.Created = time.Now().Unix()
 	}
 
-	// Compute SHA-256 key OUTSIDE any mutex
+	content := ""
+	reasoning := ""
+	finishReason := "stop"
+	if len(resp.Choices) > 0 {
+		if resp.Choices[0].Message != nil {
+			content = resp.Choices[0].Message.Content
+			reasoning = resp.Choices[0].Message.ReasoningContent
+		} else if resp.Choices[0].Delta != nil {
+			content = resp.Choices[0].Delta.Content
+			reasoning = resp.Choices[0].Delta.ReasoningContent
+		}
+		if strings.TrimSpace(resp.Choices[0].FinishReason) != "" {
+			finishReason = resp.Choices[0].FinishReason
+		}
+	}
+
+	promptToks := 0
+	compToks := 0
+	totalToks := 0
+	if resp.Usage != nil {
+		promptToks = resp.Usage.PromptTokens
+		compToks = resp.Usage.CompletionTokens
+		totalToks = resp.Usage.TotalTokens
+	}
+	if promptToks <= 0 {
+		promptToks = EstimateTokens(req.Messages)
+	}
+	if compToks <= 0 && totalToks > promptToks {
+		compToks = totalToks - promptToks
+	} else if compToks <= 0 {
+		compToks = (len(content) + len(reasoning) + 3) / 4
+		if compToks <= 0 {
+			compToks = 1
+		}
+	}
+	if totalToks <= 0 {
+		totalToks = promptToks + compToks
+	}
+	if resp.Usage == nil {
+		resp.Usage = &OpenAIUsage{
+			PromptTokens:     promptToks,
+			CompletionTokens: compToks,
+			TotalTokens:      totalToks,
+		}
+	} else {
+		if resp.Usage.PromptTokens <= 0 {
+			resp.Usage.PromptTokens = promptToks
+		}
+		if resp.Usage.CompletionTokens <= 0 {
+			resp.Usage.CompletionTokens = compToks
+		}
+		if resp.Usage.TotalTokens <= 0 {
+			resp.Usage.TotalTokens = totalToks
+		}
+	}
+
+	// 1. Pre-serialize OpenAI non-stream JSON
+	jsonRaw, _ := json.Marshal(resp)
+	jsonBytes := make([]byte, 0, len(jsonRaw)+1)
+	jsonBytes = append(jsonBytes, jsonRaw...)
+	jsonBytes = append(jsonBytes, '\n')
+
+	// 2. Pre-serialize OpenAI SSE wire bytes (standard + include_usage variant)
+	deltaChunk := OpenAIChatResponse{
+		ID:      resp.ID,
+		Object:  "chat.completion.chunk",
+		Created: resp.Created,
+		Model:   resp.Model,
+		Choices: []OpenAIChatChoice{
+			{
+				Index: 0,
+				Delta: &OpenAIOutputMessage{
+					Role:             "assistant",
+					Content:          content,
+					ReasoningContent: reasoning,
+				},
+			},
+		},
+	}
+	stopChunk := OpenAIChatResponse{
+		ID:      resp.ID,
+		Object:  "chat.completion.chunk",
+		Created: resp.Created,
+		Model:   resp.Model,
+		Choices: []OpenAIChatChoice{
+			{
+				Index:        0,
+				Delta:        &OpenAIOutputMessage{},
+				FinishReason: finishReason,
+			},
+		},
+	}
+	usageChunk := OpenAIChatResponse{
+		ID:      resp.ID,
+		Object:  "chat.completion.chunk",
+		Created: resp.Created,
+		Model:   resp.Model,
+		Choices: []OpenAIChatChoice{},
+		Usage: &OpenAIUsage{
+			PromptTokens:     promptToks,
+			CompletionTokens: compToks,
+			TotalTokens:      totalToks,
+		},
+	}
+
+	bDelta, _ := json.Marshal(deltaChunk)
+	bStop, _ := json.Marshal(stopChunk)
+	bUsage, _ := json.Marshal(usageChunk)
+
+	var sseBuf bytes.Buffer
+	sseBuf.Grow(len(bDelta) + len(bStop) + 32)
+	sseBuf.WriteString("data: ")
+	sseBuf.Write(bDelta)
+	sseBuf.WriteString("\n\ndata: ")
+	sseBuf.Write(bStop)
+	sseBuf.WriteString("\n\ndata: [DONE]\n\n")
+	sseBytes := make([]byte, sseBuf.Len())
+	copy(sseBytes, sseBuf.Bytes())
+
+	var sseUsageBuf bytes.Buffer
+	sseUsageBuf.Grow(len(bDelta) + len(bStop) + len(bUsage) + 42)
+	sseUsageBuf.WriteString("data: ")
+	sseUsageBuf.Write(bDelta)
+	sseUsageBuf.WriteString("\n\ndata: ")
+	sseUsageBuf.Write(bStop)
+	sseUsageBuf.WriteString("\n\ndata: ")
+	sseUsageBuf.Write(bUsage)
+	sseUsageBuf.WriteString("\n\ndata: [DONE]\n\n")
+	sseUsageBytes := make([]byte, sseUsageBuf.Len())
+	copy(sseUsageBytes, sseUsageBuf.Bytes())
+
+	// 3. Pre-serialize Anthropic /v1/messages JSON and SSE wire bytes
+	anthID := resp.ID
+	if !strings.HasPrefix(anthID, "msg_") {
+		shortKey := key
+		if len(shortKey) > 16 {
+			shortKey = shortKey[:16]
+		}
+		anthID = "msg_cache_" + shortKey
+	}
+	anthStopReason := "end_turn"
+	if finishReason == "length" {
+		anthStopReason = "max_tokens"
+	}
+
+	type anthContentBlock struct {
+		Type     string `json:"type"`
+		Text     string `json:"text,omitempty"`
+		Thinking string `json:"thinking,omitempty"`
+	}
+	type anthUsage struct {
+		InputTokens  int `json:"input_tokens"`
+		OutputTokens int `json:"output_tokens"`
+	}
+	type anthMessageResp struct {
+		ID           string             `json:"id"`
+		Type         string             `json:"type"`
+		Role         string             `json:"role"`
+		Model        string             `json:"model"`
+		Content      []anthContentBlock `json:"content"`
+		StopReason   *string            `json:"stop_reason"`
+		StopSequence *string            `json:"stop_sequence"`
+		Usage        anthUsage          `json:"usage"`
+	}
+
+	var blocks []anthContentBlock
+	if reasoning != "" {
+		blocks = append(blocks, anthContentBlock{Type: "thinking", Thinking: reasoning})
+	}
+	blocks = append(blocks, anthContentBlock{Type: "text", Text: content})
+
+	stopReasonCopy := anthStopReason
+	anthMsg := anthMessageResp{
+		ID:           anthID,
+		Type:         "message",
+		Role:         "assistant",
+		Model:        resp.Model,
+		Content:      blocks,
+		StopReason:   &stopReasonCopy,
+		StopSequence: nil,
+		Usage: anthUsage{
+			InputTokens:  promptToks,
+			OutputTokens: compToks,
+		},
+	}
+	anthRaw, _ := json.Marshal(anthMsg)
+	anthJSONBytes := make([]byte, 0, len(anthRaw)+1)
+	anthJSONBytes = append(anthJSONBytes, anthRaw...)
+	anthJSONBytes = append(anthJSONBytes, '\n')
+
+	// Build Anthropic SSE sequence:
+	// message_start -> content_block_start -> content_block_delta -> content_block_stop -> message_delta -> message_stop
+	var anthSSE bytes.Buffer
+	anthSSE.Grow(len(anthRaw) + 512)
+	writeAnthSSE := func(event string, payload any) {
+		b, _ := json.Marshal(payload)
+		anthSSE.WriteString("event: ")
+		anthSSE.WriteString(event)
+		anthSSE.WriteString("\ndata: ")
+		anthSSE.Write(b)
+		anthSSE.WriteString("\n\n")
+	}
+
+	writeAnthSSE("message_start", map[string]any{
+		"type": "message_start",
+		"message": anthMessageResp{
+			ID:           anthID,
+			Type:         "message",
+			Role:         "assistant",
+			Model:        resp.Model,
+			Content:      []anthContentBlock{},
+			StopReason:   nil,
+			StopSequence: nil,
+			Usage: anthUsage{
+				InputTokens:  promptToks,
+				OutputTokens: 0,
+			},
+		},
+	})
+
+	blockIdx := 0
+	if reasoning != "" {
+		writeAnthSSE("content_block_start", map[string]any{
+			"type":          "content_block_start",
+			"index":         blockIdx,
+			"content_block": map[string]string{"type": "thinking", "thinking": ""},
+		})
+		writeAnthSSE("content_block_delta", map[string]any{
+			"type":  "content_block_delta",
+			"index": blockIdx,
+			"delta": map[string]string{"type": "thinking_delta", "thinking": reasoning},
+		})
+		writeAnthSSE("content_block_stop", map[string]any{
+			"type":  "content_block_stop",
+			"index": blockIdx,
+		})
+		blockIdx++
+	}
+
+	writeAnthSSE("content_block_start", map[string]any{
+		"type":          "content_block_start",
+		"index":         blockIdx,
+		"content_block": map[string]string{"type": "text", "text": ""},
+	})
+	writeAnthSSE("content_block_delta", map[string]any{
+		"type":  "content_block_delta",
+		"index": blockIdx,
+		"delta": map[string]string{"type": "text_delta", "text": content},
+	})
+	writeAnthSSE("content_block_stop", map[string]any{
+		"type":  "content_block_stop",
+		"index": blockIdx,
+	})
+
+	writeAnthSSE("message_delta", map[string]any{
+		"type": "message_delta",
+		"delta": map[string]any{
+			"stop_reason":   anthStopReason,
+			"stop_sequence": nil,
+		},
+		"usage": map[string]int{
+			"output_tokens": compToks,
+		},
+	})
+	writeAnthSSE("message_stop", map[string]string{
+		"type": "message_stop",
+	})
+
+	anthSSEBytes := make([]byte, anthSSE.Len())
+	copy(anthSSEBytes, anthSSE.Bytes())
+
+	promptSummary := extractPromptTextFromMessages(req.Messages)
+	if promptSummary == "" {
+		promptSummary = "[cached]"
+	}
+
+	return &CacheEntry{
+		Key:                key,
+		Model:              model,
+		Response:           resp,
+		CreatedAt:          time.Now(),
+		PromptSummary:      promptSummary,
+		JSONBytes:          jsonBytes,
+		SSEBytes:           sseBytes,
+		SSEUsageBytes:      sseUsageBytes,
+		AnthropicJSONBytes: anthJSONBytes,
+		AnthropicSSEBytes:  anthSSEBytes,
+	}
+}
+
+// Put stores a response in the cache with pre-serialized JSON & SSE payloads and O(1) LRU eviction.
+func (c *ResponseCache) Put(req OpenAIChatRequest, resp OpenAIChatResponse) {
+	if !c.IsEnabled() || !IsCacheable(req) {
+		return
+	}
+	if len(resp.Choices) > 0 && resp.Choices[0].Message != nil {
+		if IsUnsupportedClientBanner(resp.Choices[0].Message.Content) {
+			return
+		}
+	}
+
+	// Compute SHA-256 key and pre-serialize wire bytes OUTSIDE any mutex
 	key := ComputeCacheKey(req)
+	entry := buildPreSerializedCacheEntry(key, req, resp)
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -242,14 +622,9 @@ func (c *ResponseCache) Put(req OpenAIChatRequest, resp OpenAIChatResponse) {
 
 	if elem, ok := c.entries[key]; ok {
 		prev := elem.Value.(*CacheEntry)
-		elem.Value = &CacheEntry{
-			Key:         key,
-			Model:       req.Model,
-			Response:    resp,
-			CreatedAt:   time.Now(),
-			HitCount:    atomic.LoadInt64(&prev.HitCount),
-			TokensSaved: atomic.LoadInt64(&prev.TokensSaved),
-		}
+		entry.HitCount = atomic.LoadInt64(&prev.HitCount)
+		entry.TokensSaved = atomic.LoadInt64(&prev.TokensSaved)
+		elem.Value = entry
 		c.lru.MoveToBack(elem)
 		return
 	}
@@ -265,12 +640,6 @@ func (c *ResponseCache) Put(req OpenAIChatRequest, resp OpenAIChatResponse) {
 		delete(c.entries, oldestEntry.Key)
 	}
 
-	entry := &CacheEntry{
-		Key:       key,
-		Model:     req.Model,
-		Response:  resp,
-		CreatedAt: time.Now(),
-	}
 	c.entries[key] = c.lru.PushBack(entry)
 }
 
@@ -305,14 +674,17 @@ func (c *ResponseCache) Stats() map[string]any {
 	}
 
 	return map[string]any{
-		"enabled":      c.IsEnabled(),
-		"items":        items,
-		"max_entries":  maxEntries,
-		"hits":         hits,
-		"misses":       misses,
-		"hit_ratio":    ratio,
-		"tokens_saved": tokensSaved,
-		"ttl_hours":    ttlHours,
+		"enabled":            c.IsEnabled(),
+		"items":              items,
+		"total_entries":      items,
+		"max_entries":        maxEntries,
+		"max_capacity":       maxEntries,
+		"hits":               hits,
+		"misses":             misses,
+		"hit_ratio":          ratio,
+		"tokens_saved":       tokensSaved,
+		"total_tokens_saved": tokensSaved,
+		"ttl_hours":          ttlHours,
 	}
 }
 
@@ -326,12 +698,13 @@ func (s *Server) handleCacheStats(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(cache.Stats())
 	case http.MethodPost:
 		var req struct {
-			Enabled *bool `json:"enabled"`
-			Clear   bool  `json:"clear"`
+			Action  string `json:"action"`
+			Enabled *bool  `json:"enabled"`
+			Clear   bool   `json:"clear"`
 		}
 		if r.Body != nil {
 			if err := json.NewDecoder(io.LimitReader(r.Body, 64*1024)).Decode(&req); err == nil {
-				if req.Clear {
+				if req.Clear || strings.EqualFold(strings.TrimSpace(req.Action), "clear") {
 					cache.Clear()
 				}
 				if req.Enabled != nil {

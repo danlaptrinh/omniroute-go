@@ -2531,16 +2531,45 @@ docker compose up -d --build</pre>
       return htmlEscape(raw);
     }
 
+    function isLogCacheHit(e) {
+      if (!e) return false;
+      const upM = (e.upstream_model || '').trim().toLowerCase();
+      const acc = (e.account || e.account_email || '').trim().toLowerCase();
+      return upM === 'cache-hit' || acc === 'in-memory-cache';
+    }
+
+    function formatCacheHitBadge() {
+      return '<span class="badge" style="background:rgba(16,185,129,0.22);color:#34d399;border:1px solid rgba(52,211,153,0.5);font-weight:700;font-size:10.5px;">⚡ CACHE HIT</span>';
+    }
+
+    function formatAccountTierBadge(tier) {
+      const t = (tier || '').trim();
+      if (!t) return '';
+      const lower = t.toLowerCase();
+      if (lower === 'ultra') {
+        return '<span class="badge" style="background:rgba(16,185,129,0.22);color:#34d399;border:1px solid rgba(52,211,153,0.45);font-weight:700;font-size:10.5px;">Ultra</span>';
+      }
+      if (lower === 'pro') {
+        return '<span class="badge" style="background:rgba(56,189,248,0.20);color:#38bdf8;border:1px solid rgba(56,189,248,0.4);font-weight:700;font-size:10.5px;">Pro</span>';
+      }
+      return '<span class="badge" style="background:rgba(168,85,247,0.18);color:#c084fc;border:1px solid rgba(168,85,247,0.35);font-weight:600;font-size:10.5px;">' + htmlEscape(t) + '</span>';
+    }
+
     function formatLogModelTruth(e) {
       if (!e) return '';
       const reqM = (e.requested_model || '').trim();
       const resM = (e.resolved_model || '').trim();
       const upM = (e.upstream_model || '').trim();
 
+      if (isLogCacheHit(e)) {
+        const label = resM || reqM || 'cached-model';
+        return '<span>' + htmlEscape(label) + '</span> ' + formatCacheHitBadge();
+      }
+
       if (resM.indexOf('➔') !== -1 || resM.indexOf('->') !== -1) {
         const baseBadge = formatModelRoleBadge(resM, null);
         if (upM && resM.toLowerCase().indexOf(upM.toLowerCase()) === -1) {
-          return baseBadge + ' <span style="color:#38bdf8;font-size:10.5px;">[' + htmlEscape(upM) + ']</span>';
+          return baseBadge + ' <span style="display:inline-block;padding:1px 6px;border-radius:4px;background:rgba(56,189,248,0.15);border:1px solid rgba(56,189,248,0.35);color:#38bdf8;font-size:10.5px;font-weight:700;">upstream: ' + htmlEscape(upM) + '</span>';
         }
         return baseBadge;
       }
@@ -2549,17 +2578,17 @@ docker compose up -d --build</pre>
       const normRes = normalizeModelSlugJS(resM);
       const normUp = normalizeModelSlugJS(upM);
 
-      let actualDisplay = resM || upM || reqM;
-      if (resM && upM && normRes !== normUp && resM.toLowerCase().indexOf('[' + upM.toLowerCase() + ']') === -1) {
-        actualDisplay = resM + ' [' + upM + ']';
-      }
+      const upPill = (upM && normUp !== normRes)
+        ? (' <span style="display:inline-block;padding:1px 6px;border-radius:4px;background:rgba(56,189,248,0.15);border:1px solid rgba(56,189,248,0.35);color:#38bdf8;font-size:10.5px;font-weight:700;">upstream: ' + htmlEscape(upM) + '</span>')
+        : '';
 
-      const hasDiff = (reqM && resM && normReq !== normRes) || (reqM && upM && normReq !== normUp);
+      const actualDisplay = resM || upM || reqM;
+      const hasDiff = (reqM && resM && normReq !== normRes) || (!resM && reqM && upM && normReq !== normUp);
       if (hasDiff) {
         return '<span style="color:#cbd5e1;">' + htmlEscape(reqM) + '</span> ' +
-          '<span style="display:inline-block;padding:1px 6px;border-radius:4px;background:rgba(245,158,11,0.18);border:1px solid rgba(245,158,11,0.45);color:#fbbf24;font-weight:700;">➔ thực chạy: ' + htmlEscape(actualDisplay) + '</span>';
+          '<span style="display:inline-block;padding:1px 6px;border-radius:4px;background:rgba(245,158,11,0.18);border:1px solid rgba(245,158,11,0.45);color:#fbbf24;font-weight:700;">➔ thực chạy: ' + htmlEscape(actualDisplay) + '</span>' + upPill;
       }
-      return '<span>' + htmlEscape(actualDisplay || reqM) + '</span>';
+      return '<span>' + htmlEscape(actualDisplay || reqM) + '</span>' + upPill;
     }
 
     async function renderLiveExecutionMonitor(quotaData) {
@@ -2585,26 +2614,36 @@ docker compose up -d --build</pre>
       if (activeAccs.length > 0) {
         inFlightBox.innerHTML = activeAccs.map(a => {
           const accKey = (a.email || a.id || '').toLowerCase();
+          const tierBadge = a.tier ? (' ' + formatAccountTierBadge(a.tier)) : '';
           return '<div style="display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap;background:rgba(168,85,247,0.16);border:1px solid #a855f7;border-radius:8px;padding:6px 11px;margin-right:8px;margin-bottom:4px;">' +
             '<span style="color:#c084fc;font-weight:700;">🔥 ĐANG XỬ LÝ:</span>' +
             '<strong style="color:#fff;font-family:monospace;">' + htmlEscape(a.email || a.id) + '</strong>' +
+            tierBadge +
             '<span style="color:#38bdf8;font-weight:700;">➔ ' + formatModelRoleBadge(a.active_model || a.last_model || 'Model', a.active_model ? null : latestAccountLogByEmail[accKey]) + '</span>' +
             '<span class="badge badge-purple">' + a.in_flight + ' req</span>' +
           '</div>';
         }).join('');
       } else {
-        inFlightBox.innerHTML = '<span style="color:#34d399;font-weight:600;">🟢 Hiện tại không có lệnh nào đang chạy ngầm — Toàn bộ ' + accounts.length + ' tài khoản đều đang rảnh 100% (Idle &amp; Sẵn sàng nhận request mới).</span>';
+        const ultraCount = accounts.filter(a => (a.tier || '').toLowerCase() === 'ultra').length;
+        const proCount = accounts.filter(a => (a.tier || '').toLowerCase() === 'pro').length;
+        const tierSummary = (ultraCount > 0 || proCount > 0)
+          ? (' <span style="margin-left:6px;">' +
+              (ultraCount > 0 ? (formatAccountTierBadge('Ultra') + ' <strong style="color:#34d399;font-size:11.5px;margin-right:6px;">×' + ultraCount + '</strong>') : '') +
+              (proCount > 0 ? (formatAccountTierBadge('Pro') + ' <strong style="color:#38bdf8;font-size:11.5px;">×' + proCount + '</strong>') : '') +
+            '</span>')
+          : '';
+        inFlightBox.innerHTML = '<span style="color:#34d399;font-weight:600;">🟢 Hiện tại không có lệnh nào đang chạy ngầm — Toàn bộ ' + accounts.length + ' tài khoản đều đang rảnh 100% (Idle &amp; Sẵn sàng nhận request mới).</span>' + tierSummary;
       }
 
       if (recentBox) {
         try {
-          const lr = await fetch('/v1/logs?limit=25');
+          const lr = await fetch('/ui/api/logs?limit=25');
           const ld = await lr.json();
           const rawList = (ld && (ld.data || ld.entries)) ? (ld.data || ld.entries) : [];
           const nextLogMap = {};
           for (let i = 0; i < rawList.length; i++) {
             const item = rawList[i];
-            const k = (item && item.account ? item.account : '').toLowerCase();
+            const k = (item && (item.account || item.account_email) ? (item.account || item.account_email) : '').toLowerCase();
             if (k && !nextLogMap[k]) {
               nextLogMap[k] = item;
             }
@@ -2619,12 +2658,14 @@ docker compose up -d --build</pre>
             let rows = '<div style="font-weight:700;color:#e2e8f0;margin-bottom:5px;">⚡ 5 Lượt Chạy Thực Tế Gần Nhất (Hiển thị 100% sự thật Model yêu cầu ➔ Model thực chạy):</div>' +
               '<div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(290px, 1fr));gap:6px;">';
             entries.forEach(e => {
-              const latColor = e.latency_ms > 7000 ? '#f87171' : (e.latency_ms > 3000 ? '#fbbf24' : '#34d399');
-              rows += '<div style="background:#131926;border:1px solid #232c3d;border-radius:6px;padding:6px 9px;display:flex;justify-content:space-between;align-items:center;gap:6px;">' +
+              const cacheHit = isLogCacheHit(e);
+              const accLabel = e.account || e.account_email || e.provider || 'auto';
+              const latColor = cacheHit ? '#34d399' : (e.latency_ms > 7000 ? '#f87171' : (e.latency_ms > 3000 ? '#fbbf24' : '#34d399'));
+              rows += '<div style="background:#131926;border:1px solid ' + (cacheHit ? 'rgba(52,211,153,0.4)' : '#232c3d') + ';border-radius:6px;padding:6px 9px;display:flex;justify-content:space-between;align-items:center;gap:6px;">' +
                 '<div style="min-width:0;flex:1;">' +
                   '<div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' +
                     '<span style="color:#64748b;font-family:monospace;font-size:10.5px;">[' + htmlEscape((e.timestamp || '').split(' ')[0] || '') + ']</span> ' +
-                    '<strong style="color:#38bdf8;font-family:monospace;">' + htmlEscape(e.account || e.provider || 'auto') + '</strong>' +
+                    '<strong style="color:' + (cacheHit ? '#34d399' : '#38bdf8') + ';font-family:monospace;">' + htmlEscape(accLabel) + '</strong>' +
                   '</div>' +
                   '<div style="color:#fbbf24;font-family:monospace;font-size:11px;font-weight:600;margin-top:2px;line-height:1.4;word-break:break-word;">🤖 ' + formatLogModelTruth(e) + '</div>' +
                 '</div>' +
@@ -3411,7 +3452,7 @@ docker compose up -d --build</pre>
 
     async function loadLogs() {
       const box = document.getElementById('logsListBox');
-      let url = '/v1/logs?limit=80';
+      let url = '/ui/api/logs?limit=80';
       if (activeLogFilter === 'errors') url += '&errors_only=true';
       else if (activeLogFilter !== 'all') url += '&provider=' + encodeURIComponent(activeLogFilter);
 
@@ -3471,6 +3512,7 @@ docker compose up -d --build</pre>
             ('<div style="margin-top:6px;padding:8px;background:rgba(239, 68, 68, 0.1);border-radius:6px;font-family:monospace;font-size:11.5px;color:#fca5a5;white-space:pre-wrap;">' +
              htmlEscape(log.error_message) + '</div>') : '';
 
+          const accName = log.account || log.account_email || '';
           html += '<div style="background:' + bgCol + ';border:1px solid ' + borderCol + ';border-radius:8px;padding:11px 14px;">' +
             '<div style="display:flex;justify-content:space-between;align-items:center;font-size:12px;flex-wrap:wrap;gap:8px;">' +
               '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">' +
@@ -3478,7 +3520,7 @@ docker compose up -d --build</pre>
                 empBadge +
                 '<span class="badge ' + provBadge + '">' + htmlEscape(log.provider) + '</span>' +
                 '<strong style="font-family:monospace;">' + formatLogModelTruth(log) + '</strong>' +
-                (log.account ? ('<span style="color:var(--muted);font-size:11px;">(' + htmlEscape(log.account) + ')</span>') : '') +
+                (accName ? ('<span style="color:var(--muted);font-size:11px;">(' + htmlEscape(accName) + ')</span>') : '') +
               '</div>' +
               '<div style="display:flex;align-items:center;gap:10px;">' +
                 '<span style="color:var(--muted);font-size:11px;">' +
@@ -3730,12 +3772,14 @@ docker compose up -d --build</pre>
         for (const a of accs) {
           const provBadge = a.provider === 'antigravity' ? '<span class="badge badge-antigravity">Google Antigravity</span>'
             : (a.provider === 'claude-code' ? '<span class="badge badge-purple">Claude Code</span>' : '<span class="badge badge-green">Alibaba Token Plan</span>');
+          const tierBadge = a.tier ? formatAccountTierBadge(a.tier) : '';
           html += '<div style="display:flex;justify-content:space-between;align-items:center;padding:10px 14px;background:var(--card-inner);border:1px solid var(--border);border-radius:8px;flex-wrap:wrap;gap:10px;">' +
             '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">' +
               provBadge +
+              tierBadge +
               '<strong style="color:#38bdf8;font-family:monospace;font-size:13px;">' + htmlEscape(a.email || a.label || a.id) + '</strong>' +
               (a.project_id ? '<code style="font-size:11px;color:#94a3b8;background:#0b0f17;padding:2px 6px;border-radius:4px;">Project: ' + htmlEscape(a.project_id) + '</code>' : '') +
-              '<span style="font-size:11.5px;color:#34d399;">🟢 ' + (a.requests_ok || 0) + ' req (' + Number(a.total_tokens || 0).toLocaleString() + ' tokens)</span>' +
+              '<span style="font-size:11.5px;color:#34d399;">🟢 ' + (a.requests_ok || a.success_count || 0) + ' req (' + Number(a.total_tokens || 0).toLocaleString() + ' tokens)</span>' +
             '</div>' +
             '<button style="padding:4px 10px;font-size:11.5px;color:#f87171;" onclick="deleteConnectedAccount(\'' + htmlEscape(a.id) + '\', \'' + htmlEscape(a.email || a.id) + '\')">🗑️ Xoá tài khoản</button>' +
           '</div>';
@@ -3786,11 +3830,15 @@ docker compose up -d --build</pre>
       try {
         const r = await fetch('/v1/cache');
         const d = await r.json();
-        document.getElementById('cacheStatEntries').textContent = (d.total_entries || 0) + ' / ' + (d.max_capacity || 1000);
+        const entries = (d.items !== undefined) ? d.items : (d.total_entries || 0);
+        const cap = (d.max_entries !== undefined) ? d.max_entries : (d.max_capacity || 1000);
+        const ratioText = (typeof d.hit_ratio === 'string') ? d.hit_ratio : (((d.hit_ratio || 0) * 100).toFixed(1) + '%');
+        const savedToks = (d.tokens_saved !== undefined) ? d.tokens_saved : (d.total_tokens_saved || 0);
+        document.getElementById('cacheStatEntries').textContent = entries + ' / ' + cap;
         document.getElementById('cacheStatHits').textContent = d.hits || 0;
         document.getElementById('cacheStatMisses').textContent = d.misses || 0;
-        document.getElementById('cacheStatRatio').textContent = ((d.hit_ratio || 0) * 100).toFixed(1) + '%';
-        document.getElementById('cacheStatTokens').textContent = (d.total_tokens_saved || 0).toLocaleString();
+        document.getElementById('cacheStatRatio').textContent = ratioText;
+        document.getElementById('cacheStatTokens').textContent = Number(savedToks).toLocaleString();
       } catch (e) {
         console.error('Error loading cache stats:', e);
       }
@@ -5002,7 +5050,7 @@ docker compose up -d --build</pre>
 
         html += '<div style="background:' + bgCol + ';border:1px solid ' + borderCol + ';border-radius:10px;padding:11px 12px;">' +
           '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px;">' +
-            '<span style="font-size:11px;font-weight:700;color:' + provColor + ';">SLOT #' + s.slot_index + ' • ' + htmlEscape(s.provider.toUpperCase()) + '</span>' +
+            '<span style="font-size:11px;font-weight:700;color:' + provColor + ';">SLOT #' + s.slot_index + ' • ' + htmlEscape(s.provider.toUpperCase()) + (s.tier ? (' ' + formatAccountTierBadge(s.tier)) : '') + '</span>' +
             statusBadge +
           '</div>' +
           '<div style="font-size:12.5px;font-weight:700;color:#f1f5f9;word-break:break-all;margin-bottom:4px;">' + htmlEscape(s.email) + '</div>' +
