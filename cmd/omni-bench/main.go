@@ -1669,7 +1669,7 @@ func runLogCorrelation(
 		for i := 0; i < showLimit; i++ {
 			d := rep.Diffs[i]
 			inModel := d.InternalResolvedModel
-			if d.InternalUpstreamModel != "" && stripModelPrefix(d.InternalUpstreamModel) != stripModelPrefix(inModel) {
+			if d.InternalUpstreamModel != "" && stripModelPrefix(d.InternalUpstreamModel) != stripModelPrefix(inModel) && !strings.Contains(strings.ToLower(inModel), "["+strings.ToLower(d.InternalUpstreamModel)+"]") {
 				inModel = fmt.Sprintf("%s [%s]", inModel, d.InternalUpstreamModel)
 			}
 			fmt.Fprintf(out, "  %-7s | %-26s | %-28s | %-24s | %10.1f | %10d | %+11.1f\n",
@@ -1793,10 +1793,15 @@ func stripModelPrefix(m string) string {
 func extractRightSideArrow(m string) string {
 	for _, sep := range []string{"➔", "->"} {
 		if idx := strings.LastIndex(m, sep); idx >= 0 {
-			return strings.TrimSpace(m[idx+len(sep):])
+			m = strings.TrimSpace(m[idx+len(sep):])
+			break
 		}
 	}
-	return strings.TrimSpace(m)
+	m = strings.TrimSpace(m)
+	if bIdx := strings.Index(m, " ["); bIdx > 0 && strings.HasSuffix(m, "]") {
+		m = strings.TrimSpace(m[:bIdx])
+	}
+	return m
 }
 
 func extractErrorText(body []byte, statusCode int) string {

@@ -2550,7 +2550,7 @@ docker compose up -d --build</pre>
       const normUp = normalizeModelSlugJS(upM);
 
       let actualDisplay = resM || upM || reqM;
-      if (resM && upM && normRes !== normUp) {
+      if (resM && upM && normRes !== normUp && resM.toLowerCase().indexOf('[' + upM.toLowerCase() + ']') === -1) {
         actualDisplay = resM + ' [' + upM + ']';
       }
 

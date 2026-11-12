@@ -825,6 +825,7 @@ func ExecuteAntigravityWithReactiveRefresh(
 				Account:        accountEmail,
 				RequestedModel: req.Model,
 				ResolvedModel:  loggedModel,
+				UpstreamModel:  upstreamVer,
 				StatusCode:     http.StatusOK,
 				LatencyMs:      lat,
 				TotalTokens:    usedTokens,
