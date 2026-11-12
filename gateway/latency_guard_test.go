@@ -604,3 +604,279 @@ func TestPerAccount429DoesNotDowngradeOtherAccounts(t *testing.T) {
 		t.Fatalf("expected fresh@gmail.com to call claude-opus-4-6-thinking=1 and gemini-3-flash=0, got opus=%d flash=%d", freshOpusCalls, freshFlashCalls)
 	}
 }
+
+func TestMaxCompletionTokensAnd65536DefaultUnlocked(t *testing.T) {
+	tmpCfg := filepath.Join(t.TempDir(), "gateway_config.json")
+	t.Setenv("GATEWAY_CONFIG_FILE", tmpCfg)
+	resetAuthCacheForTest(t)
+	ResetCCPAModelCaches()
+	GetGlobalCache().Clear()
+	t.Cleanup(func() {
+		ResetCCPAModelCaches()
+		GetGlobalCache().Clear()
+		resetAuthCacheForTest(t)
+	})
+
+	var mu sync.Mutex
+	var recordedMaxOut []int
+	var returnMaxTokensFinish atomic.Bool
+
+	mockCCPA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload ccpaRequestPayload
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		recordedMaxOut = append(recordedMaxOut, payload.Request.GenerationConfig.MaxOutputTokens)
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		if returnMaxTokensFinish.Load() {
+			_, _ = w.Write([]byte("data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial-truncated-code\"}]},\"finishReason\":\"MAX_TOKENS\"}]}}\n\ndata: [DONE]\n\n"))
+			return
+		}
+		_, _ = w.Write([]byte("data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"complete-65k-output\"}]},\"finishReason\":\"STOP\"}]}}\n\ndata: [DONE]\n\n"))
+	}))
+	defer mockCCPA.Close()
+
+	cfg := GatewayConfig{
+		CCPAEndpoint:  mockCCPA.URL,
+		AgyOAuthToken: "ya29.test-65k-unlock",
+		AgyProjectID:  "proj-65k",
+	}
+	srv := NewServer(cfg, NewResolver(), NewUpstream(cfg))
+	gw := httptest.NewServer(srv.Handler())
+	defer gw.Close()
+
+	// 1. Incoming request with NO max_tokens must send maxOutputTokens: 65536 to CCPA (never 0 / implicit 8192!)
+	resp1, err := http.Post(
+		gw.URL+"/v1/chat/completions",
+		"application/json",
+		strings.NewReader(`{"model":"antigravity/claude-opus-4-6-thinking","messages":[{"role":"user","content":"Generate 200KB module"}]}`),
+	)
+	if err != nil {
+		t.Fatalf("POST #1 failed: %v", err)
+	}
+	defer resp1.Body.Close()
+	if resp1.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp1.Body)
+		t.Fatalf("POST #1 status = %d: %s", resp1.StatusCode, string(b))
+	}
+	var parsed1 OpenAIChatResponse
+	if err := json.NewDecoder(resp1.Body).Decode(&parsed1); err != nil {
+		t.Fatalf("decode #1 failed: %v", err)
+	}
+	if len(parsed1.Choices) != 1 || parsed1.Choices[0].FinishReason != "stop" {
+		t.Fatalf("expected finish_reason='stop' on #1, got %+v", parsed1.Choices)
+	}
+
+	// 2. Incoming request with "max_completion_tokens": 48000 must send maxOutputTokens: 48000 to CCPA
+	resp2, err := http.Post(
+		gw.URL+"/v1/chat/completions",
+		"application/json",
+		strings.NewReader(`{"model":"antigravity/claude-opus-4-6-thinking","max_completion_tokens":48000,"messages":[{"role":"user","content":"Generate 48k module"}]}`),
+	)
+	if err != nil {
+		t.Fatalf("POST #2 failed: %v", err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp2.Body)
+		t.Fatalf("POST #2 status = %d: %s", resp2.StatusCode, string(b))
+	}
+
+	// Also verify flash-lite caps maxOutputTokens at 32768
+	respLite, err := http.Post(
+		gw.URL+"/v1/chat/completions",
+		"application/json",
+		strings.NewReader(`{"model":"antigravity/gemini-3.5-flash-lite","messages":[{"role":"user","content":"Lite ceiling check"}]}`),
+	)
+	if err != nil {
+		t.Fatalf("POST lite failed: %v", err)
+	}
+	_ = respLite.Body.Close()
+
+	mu.Lock()
+	gotMaxOut := append([]int(nil), recordedMaxOut...)
+	mu.Unlock()
+	if len(gotMaxOut) != 3 {
+		t.Fatalf("expected 3 recorded CCPA calls, got %d (%v)", len(gotMaxOut), gotMaxOut)
+	}
+	if gotMaxOut[0] != 65536 {
+		t.Fatalf("call #1 (no max_tokens) sent maxOutputTokens=%d, want 65536", gotMaxOut[0])
+	}
+	if gotMaxOut[1] != 48000 {
+		t.Fatalf("call #2 (max_completion_tokens=48000) sent maxOutputTokens=%d, want 48000", gotMaxOut[1])
+	}
+	if gotMaxOut[2] != 32768 {
+		t.Fatalf("call #3 (gemini-3.5-flash-lite) sent maxOutputTokens=%d, want 32768", gotMaxOut[2])
+	}
+
+	// 3. When CCPA returns finishReason: "MAX_TOKENS", OmniRoute returns finish_reason: "length"
+	//    (in both non-streaming and streaming) and does NOT cache the truncated output in GetGlobalCache().
+	returnMaxTokensFinish.Store(true)
+	GetGlobalCache().Clear()
+
+	zeroTemp := 0.0
+	truncReq := OpenAIChatRequest{
+		Model: "antigravity/claude-opus-4-6-thinking",
+		Messages: []OpenAIChatMessage{
+			{Role: "user", Content: json.RawMessage(`"Hit MAX_TOKENS limit non-stream"`)},
+		},
+		Temperature: &zeroTemp,
+		Stream:      false,
+	}
+	truncBody, _ := json.Marshal(truncReq)
+	resp3, err := http.Post(gw.URL+"/v1/chat/completions", "application/json", strings.NewReader(string(truncBody)))
+	if err != nil {
+		t.Fatalf("POST #3 failed: %v", err)
+	}
+	defer resp3.Body.Close()
+	var parsed3 OpenAIChatResponse
+	if err := json.NewDecoder(resp3.Body).Decode(&parsed3); err != nil {
+		t.Fatalf("decode #3 failed: %v", err)
+	}
+	if len(parsed3.Choices) != 1 || parsed3.Choices[0].FinishReason != "length" {
+		t.Fatalf("expected finish_reason='length' on MAX_TOKENS, got %+v", parsed3.Choices)
+	}
+	if _, cached := GetGlobalCache().Get(truncReq); cached {
+		t.Fatalf("truncated finish_reason='length' response must NOT be stored in GetGlobalCache() (non-streaming)")
+	}
+
+	// Streaming MAX_TOKENS check
+	truncStreamReq := truncReq
+	truncStreamReq.Messages = []OpenAIChatMessage{
+		{Role: "user", Content: json.RawMessage(`"Hit MAX_TOKENS limit stream"`)} ,
+	}
+	truncStreamReq.Stream = true
+	truncStreamBody, _ := json.Marshal(truncStreamReq)
+	resp4, err := http.Post(gw.URL+"/v1/chat/completions", "application/json", strings.NewReader(string(truncStreamBody)))
+	if err != nil {
+		t.Fatalf("POST #4 (stream) failed: %v", err)
+	}
+	rawSSE, _ := io.ReadAll(resp4.Body)
+	_ = resp4.Body.Close()
+	if !strings.Contains(string(rawSSE), `"finish_reason":"length"`) {
+		t.Fatalf("expected streaming final chunk to report finish_reason='length', got:\n%s", string(rawSSE))
+	}
+	if _, cached := GetGlobalCache().Get(truncStreamReq); cached {
+		t.Fatalf("truncated finish_reason='length' response must NOT be stored in GetGlobalCache() (streaming)")
+	}
+
+	// Verify adaptive large-input prefill timeout scaling (545 KB input -> capped <= 75s)
+	hugeText := strings.Repeat("a", 545*1024)
+	hugeRaw, _ := json.Marshal(hugeText)
+	hugeReq := OpenAIChatRequest{
+		Model:    "antigravity/gemini-4-carbon-high",
+		Messages: []OpenAIChatMessage{{Role: "user", Content: hugeRaw}},
+	}
+	gotAdaptive := effectiveCCPAFirstChunkTimeout(hugeReq)
+	if gotAdaptive <= CCPAFirstChunkTimeout || gotAdaptive > 75*time.Second {
+		t.Fatalf("expected adaptive first-chunk timeout in (20s, 75s] for 545KB prompt, got %s", gotAdaptive)
+	}
+}
+
+func TestCCPA403TOSViolationBreaksCandidateLoopImmediately(t *testing.T) {
+	tmpCfg := filepath.Join(t.TempDir(), "gateway_config.json")
+	t.Setenv("GATEWAY_CONFIG_FILE", tmpCfg)
+	resetAuthCacheForTest(t)
+	ResetCCPAModelCaches()
+	GetGlobalCache().Clear()
+	t.Cleanup(func() {
+		ResetCCPAModelCaches()
+		GetGlobalCache().Clear()
+		resetAuthCacheForTest(t)
+	})
+
+	accounts := []ConnectedAccount{
+		{
+			Provider:    ProviderAntigravity,
+			Email:       "suspended-tos@gmail.com",
+			AccessToken: "ya29.suspended-tos-403",
+			ProjectID:   "proj-suspended",
+			Priority:    100,
+			ExpiresAt:   time.Now().Unix() + 3600,
+		},
+		{
+			Provider:    ProviderAntigravity,
+			Email:       "healthy-backup@gmail.com",
+			AccessToken: "ya29.healthy-backup-200",
+			ProjectID:   "proj-healthy",
+			Priority:    90,
+			ExpiresAt:   time.Now().Unix() + 3600,
+		},
+	}
+	for _, a := range accounts {
+		if _, err := UpsertConnectedAccount(a); err != nil {
+			t.Fatalf("UpsertConnectedAccount(%s) failed: %v", a.Email, err)
+		}
+	}
+	if _, err := SetRoutingStrategy(StrategyFillFirst); err != nil {
+		t.Fatalf("SetRoutingStrategy failed: %v", err)
+	}
+
+	var mu sync.Mutex
+	callsByToken := make(map[string]int)
+	var totalCCPACalls atomic.Int32
+
+	mockCCPA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		totalCCPACalls.Add(1)
+		authHdr := strings.TrimSpace(r.Header.Get("Authorization"))
+		mu.Lock()
+		callsByToken[authHdr]++
+		mu.Unlock()
+
+		if authHdr == "Bearer ya29.suspended-tos-403" {
+			w.WriteHeader(http.StatusForbidden)
+			// Note: returns TOS_VIOLATION / PERMISSION_DENIED WITHOUT "VALIDATION_REQUIRED"
+			_, _ = w.Write([]byte(`{"error":{"code":403,"status":"PERMISSION_DENIED","message":"Account suspended due to TOS_VIOLATION"}}`))
+			return
+		}
+		if authHdr != "Bearer ya29.healthy-backup-200" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Healthy account #2 succeeded immediately!\"}]}}]}}\n\ndata: [DONE]\n\n"))
+	}))
+	defer mockCCPA.Close()
+
+	upstream := NewUpstream(GatewayConfig{CCPAEndpoint: mockCCPA.URL})
+	req := OpenAIChatRequest{
+		Model: "antigravity/gemini-4-carbon-high",
+		Messages: []OpenAIChatMessage{
+			{Role: "user", Content: json.RawMessage(`"Verify immediate 403 TOS_VIOLATION failover"`)},
+		},
+	}
+	resolved := ResolveModel(req.Model, nil)
+
+	rec := httptest.NewRecorder()
+	if err := upstream.HandleChatCompletion(context.Background(), rec, req, resolved, ""); err != nil {
+		t.Fatalf("HandleChatCompletion failed: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected HTTP 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if gotAcc := rec.Header().Get("X-Omni-Gateway-Account"); gotAcc != "healthy-backup@gmail.com" {
+		t.Fatalf("expected X-Omni-Gateway-Account=healthy-backup@gmail.com, got %q", gotAcc)
+	}
+	if !strings.Contains(rec.Body.String(), "Healthy account #2 succeeded immediately!") {
+		t.Fatalf("unexpected response body: %s", rec.Body.String())
+	}
+
+	mu.Lock()
+	deadAccCalls := callsByToken["Bearer ya29.suspended-tos-403"]
+	healthyAccCalls := callsByToken["Bearer ya29.healthy-backup-200"]
+	mu.Unlock()
+
+	if deadAccCalls != 1 {
+		t.Fatalf("expected suspended 403 TOS_VIOLATION account #1 to break after 1 CCPA call, got %d calls", deadAccCalls)
+	}
+	if healthyAccCalls != 1 || totalCCPACalls.Load() != 2 {
+		t.Fatalf("expected 2 total CCPA calls (1 on 403 account #1 + 1 on healthy account #2), got total=%d healthy=%d", totalCCPACalls.Load(), healthyAccCalls)
+	}
+}

@@ -83,13 +83,25 @@ type ResolvedModel struct {
 
 // OpenAIChatRequest represents an OpenAI-compatible /v1/chat/completions request.
 type OpenAIChatRequest struct {
-	Model           string              `json:"model"`
-	Messages        []OpenAIChatMessage `json:"messages"`
-	Temperature     *float64            `json:"temperature,omitempty"`
-	MaxTokens       int                 `json:"max_tokens,omitempty"`
-	Stream          bool                `json:"stream,omitempty"`
-	ReasoningEffort string              `json:"reasoning_effort,omitempty"`
-	ThinkingConfig  *ThinkingConfig     `json:"thinking_config,omitempty"`
+	Model               string              `json:"model"`
+	Messages            []OpenAIChatMessage `json:"messages"`
+	Temperature         *float64            `json:"temperature,omitempty"`
+	MaxTokens           int                 `json:"max_tokens,omitempty"`
+	MaxCompletionTokens int                 `json:"max_completion_tokens,omitempty"`
+	Stream              bool                `json:"stream,omitempty"`
+	ReasoningEffort     string              `json:"reasoning_effort,omitempty"`
+	ThinkingConfig      *ThinkingConfig     `json:"thinking_config,omitempty"`
+}
+
+// EffectiveMaxTokens returns MaxCompletionTokens if positive, otherwise MaxTokens if positive, otherwise defaultMax.
+func (r OpenAIChatRequest) EffectiveMaxTokens(defaultMax int) int {
+	if r.MaxCompletionTokens > 0 {
+		return r.MaxCompletionTokens
+	}
+	if r.MaxTokens > 0 {
+		return r.MaxTokens
+	}
+	return defaultMax
 }
 
 // ThinkingConfig represents Antigravity / Gemini / Claude thinking configuration.

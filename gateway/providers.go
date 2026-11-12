@@ -14,10 +14,10 @@ import (
 // ResolveAlibabaEndpoint resolves the DashScope / Bailian API endpoint for Alibaba Token Plan.
 // If customBaseURL is provided, it normalizes and appends /chat/completions.
 // Otherwise, it selects the regional endpoint:
-//   - "intl-coding" or "":  https://coding-intl.dashscope.aliyuncs.com/v1/chat/completions
-//   - "intl-standard":      https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions
-//   - "cn-coding":          https://coding.dashscope.aliyuncs.com/v1/chat/completions
-//   - "cn-standard":        https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions
+// - "intl-coding" or "": https://coding-intl.dashscope.aliyuncs.com/v1/chat/completions
+// - "intl-standard": https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions
+// - "cn-coding": https://coding.dashscope.aliyuncs.com/v1/chat/completions
+// - "cn-standard": https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions
 func ResolveAlibabaEndpoint(region string, customBaseURL string) string {
 	base := strings.TrimRight(strings.TrimSpace(customBaseURL), "/")
 	if base != "" {
@@ -156,6 +156,10 @@ func (u *GatewayUpstream) handleAlibabaProvider(
 			outReq.Model = targetModel
 			outReq.ThinkingConfig = nil
 			outReq.ReasoningEffort = ""
+			if outReq.MaxTokens <= 0 && outReq.MaxCompletionTokens > 0 {
+				outReq.MaxTokens = outReq.MaxCompletionTokens
+			}
+			outReq.MaxCompletionTokens = 0
 
 			payloadBytes, err := json.Marshal(outReq)
 			if err != nil {
@@ -346,10 +350,7 @@ func (u *GatewayUpstream) handleClaudeCodeProvider(
 		})
 	}
 
-	maxTokens := req.MaxTokens
-	if maxTokens <= 0 {
-		maxTokens = 8192
-	}
+	maxTokens := req.EffectiveMaxTokens(32000)
 
 	client := u.client
 	if client == nil {

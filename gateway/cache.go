@@ -80,8 +80,8 @@ func ComputeCacheKey(req OpenAIChatRequest) string {
 	if req.Temperature != nil {
 		hasher.Write([]byte(fmt.Sprintf("t:%.2f;", *req.Temperature)))
 	}
-	if req.MaxTokens > 0 {
-		hasher.Write([]byte(fmt.Sprintf("m:%d;", req.MaxTokens)))
+	if effMax := req.EffectiveMaxTokens(0); effMax > 0 {
+		hasher.Write([]byte(fmt.Sprintf("m:%d;", effMax)))
 	}
 
 	return hex.EncodeToString(hasher.Sum(nil))

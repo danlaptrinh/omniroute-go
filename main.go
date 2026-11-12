@@ -81,14 +81,16 @@ type ChatRequest struct {
 	Model           string                  `json:"model"`
 	Messages        []ChatMessage           `json:"messages"`
 	Temperature     float64                 `json:"temperature"`
+	MaxTokens       int                     `json:"max_tokens,omitempty"`
 	Stream          bool                    `json:"stream"`
 	ReasoningEffort string                  `json:"reasoning_effort,omitempty"`
 	ThinkingConfig  *gateway.ThinkingConfig `json:"thinking_config,omitempty"`
 }
 
 type ChatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role             string `json:"role"`
+	Content          string `json:"content"`
+	ReasoningContent string `json:"reasoning_content,omitempty"`
 }
 
 type ChatChoice struct {
@@ -104,7 +106,7 @@ type ChatResponse struct {
 }
 
 var httpClient = &http.Client{
-	Timeout: 5 * time.Minute,
+	Timeout: 12 * time.Minute,
 	Transport: &http.Transport{
 		MaxIdleConns:        512,
 		MaxIdleConnsPerHost: 256,

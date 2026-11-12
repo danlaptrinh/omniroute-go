@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -231,5 +232,170 @@ func TestCarbonStuckFailsOverImmediatelyToArgon(t *testing.T) {
 				t.Fatalf("unexpected generated content: %q", string(written))
 			}
 		})
+	}
+}
+
+func TestStreamingIdleTimerAllowsLongOutputAndSends65536MaxTokens(t *testing.T) {
+	t.Setenv("OMNI_DEFAULT_MODEL", "antigravity/gemini-4-carbon-high")
+	t.Setenv("OMNI_FALLBACK_MODELS", "antigravity/gemini-4-argon-high")
+	// Primary timeout 150ms — total streaming time (~280ms) exceeds this,
+	// but the per-chunk idle timer (300ms) keeps the connection alive.
+	t.Setenv("OMNI_PRIMARY_TIMEOUT_SEC", "0.15")
+	t.Setenv("OMNI_STREAM_IDLE_TIMEOUT_SEC", "0.30")
+
+	var mu sync.Mutex
+	var calls []string
+	var capturedStream bool
+	var capturedMaxTokens int
+
+	codeChunks := []string{
+		"package streaming\n\n",
+		"// IdleTimerTest verifies streaming idle resets.\n",
+		"func StreamOK() string {\n",
+		"\treturn \"idle-timer-works\"\n}\n",
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var reqObj ChatRequest
+		_ = json.NewDecoder(r.Body).Decode(&reqObj)
+
+		mu.Lock()
+		calls = append(calls, reqObj.Model)
+		if reqObj.Stream {
+			capturedStream = true
+		}
+		capturedMaxTokens = reqObj.MaxTokens
+		mu.Unlock()
+
+		if reqObj.Model == "antigravity/gemini-4-carbon-high" {
+			// Serve SSE streaming response: 4 chunks spaced 70ms apart
+			flusher, ok := w.(http.Flusher)
+			if !ok {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Cache-Control", "no-cache")
+			w.Header().Set("Connection", "keep-alive")
+			w.WriteHeader(http.StatusOK)
+
+			for i, chunk := range codeChunks {
+				if i > 0 {
+					time.Sleep(70 * time.Millisecond)
+				}
+				sseChunk := ChatResponse{
+					Choices: []ChatChoice{
+						{
+							Delta: ChatMessage{
+								Role:    "assistant",
+								Content: chunk,
+							},
+						},
+					},
+				}
+				chunkJSON, _ := json.Marshal(sseChunk)
+				_, _ = fmt.Fprintf(w, "data: %s\n\n", chunkJSON)
+				flusher.Flush()
+			}
+
+			// Final done sentinel after a small pause
+			time.Sleep(70 * time.Millisecond)
+			_, _ = fmt.Fprintf(w, "data: [DONE]\n\n")
+			flusher.Flush()
+			return
+		}
+
+		// Argon fallback — should NOT be reached in this test
+		if reqObj.Model == "antigravity/gemini-4-argon-high" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(ChatResponse{
+				Choices: []ChatChoice{
+					{
+						Message: ChatMessage{
+							Role:    "assistant",
+							Content: "package streaming\n\nfunc ArgonFallback() string { return \"argon\" }\n",
+						},
+					},
+				},
+			})
+			return
+		}
+
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	tmpDir := t.TempDir()
+	argsBytes, _ := json.Marshal(ParallelArgs{
+		BaseDir:  tmpDir,
+		Endpoint: srv.URL + "/v1/chat/completions",
+		Tasks: []WorkerTask{
+			{FilePath: "streaming_ok.go", Prompt: "Generate streaming package with StreamOK function"},
+		},
+	})
+	paramsBytes, _ := json.Marshal(ToolCallParams{
+		Name:      "omni_parallel_workers",
+		Arguments: argsBytes,
+	})
+
+	resp := handleToolCall(RPCRequest{
+		JSONRPC: "2.0",
+		ID:      json.RawMessage(`3`),
+		Method:  "tools/call",
+		Params:  paramsBytes,
+	})
+
+	summary := extractToolResultText(t, resp)
+
+	// Verify no failover occurred — Carbon streaming should have succeeded
+	if strings.Contains(summary, "[failover ->") {
+		t.Fatalf("did not expect failover when streaming idle timer resets keep connection alive, got summary:\n%s", summary)
+	}
+	if strings.Contains(summary, "ArgonFallback") {
+		t.Fatalf("did not expect Argon content in output, got summary:\n%s", summary)
+	}
+
+	// Verify only Carbon was called (no Argon)
+	mu.Lock()
+	gotCalls := append([]string(nil), calls...)
+	gotStream := capturedStream
+	gotMaxTokens := capturedMaxTokens
+	mu.Unlock()
+
+	if len(gotCalls) != 1 {
+		t.Fatalf("expected exactly 1 call to Carbon, got %d calls: %v", len(gotCalls), gotCalls)
+	}
+	if gotCalls[0] != "antigravity/gemini-4-carbon-high" {
+		t.Fatalf("expected call to antigravity/gemini-4-carbon-high, got %q", gotCalls[0])
+	}
+
+	// Verify Stream: true was sent in the outbound request
+	if !gotStream {
+		t.Fatalf("expected outbound ChatRequest.Stream = true, got false")
+	}
+
+	// Verify MaxTokens: 65536 was sent in the outbound request
+	if gotMaxTokens != 65536 {
+		t.Fatalf("expected outbound ChatRequest.MaxTokens = 65536, got %d", gotMaxTokens)
+	}
+
+	// Verify the file was written with correct streamed content
+	written, err := os.ReadFile(filepath.Join(tmpDir, "streaming_ok.go"))
+	if err != nil {
+		t.Fatalf("expected streaming_ok.go to be written: %v", err)
+	}
+	content := string(written)
+	if !strings.Contains(content, "StreamOK") {
+		t.Fatalf("expected StreamOK function in output, got:\n%s", content)
+	}
+	if !strings.Contains(content, "idle-timer-works") {
+		t.Fatalf("expected 'idle-timer-works' string in output, got:\n%s", content)
+	}
+	if strings.Contains(content, "ArgonFallback") {
+		t.Fatalf("output should not contain ArgonFallback, got:\n%s", content)
+	}
+	// Ensure markdown fences were stripped if any
+	if strings.Contains(content, "```") {
+		t.Fatalf("output should not contain markdown fences, got:\n%s", content)
 	}
 }

@@ -1272,10 +1272,15 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 		model = "claude-code/claude-sonnet-4-6"
 	}
 
+	maxTok := antReq.MaxTokens
+	if maxTok <= 0 {
+		maxTok = 0
+	}
+
 	oaiReq := OpenAIChatRequest{
 		Model:     model,
 		Messages:  msgs,
-		MaxTokens: antReq.MaxTokens,
+		MaxTokens: maxTok,
 		Stream:    antReq.Stream,
 	}
 

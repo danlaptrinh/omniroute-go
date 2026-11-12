@@ -17,8 +17,9 @@ import (
 )
 
 const (
-	DefaultCCPAEndpoint = "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse"
-	ccpaClientShards    = 8
+	DefaultCCPAEndpoint        = "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse"
+	DefaultCCPAMaxOutputTokens = 65536
+	ccpaClientShards           = 8
 )
 
 type deadCCPAEntry struct {
@@ -48,7 +49,7 @@ var (
 	// Configurable CCPA watchdog timeouts (adjustable in unit tests).
 	CCPAFirstChunkTimeout   = 20 * time.Second
 	CCPAStreamIdleTimeout   = 25 * time.Second
-	CCPACandidateMaxTimeout = 90 * time.Second
+	CCPACandidateMaxTimeout = 10 * time.Minute
 
 	// Fast-path caches for CCPA candidate resolution scoped by endpoint to avoid sequential probing.
 	workingCCPAModelCache sync.Map // key: endpoint + "|" + resolved.CanonicalID -> value: string (winning CCPA model ID)
@@ -64,7 +65,7 @@ func init() {
 			MaxConnsPerHost:       64,
 			IdleConnTimeout:       90 * time.Second,
 			TLSHandshakeTimeout:   8 * time.Second,
-			ResponseHeaderTimeout: 20 * time.Second,
+			ResponseHeaderTimeout: 90 * time.Second,
 			ExpectContinueTimeout: 1 * time.Second,
 			ForceAttemptHTTP2:     true,
 		}
@@ -72,6 +73,22 @@ func init() {
 			Transport: tr,
 		}
 	}
+}
+
+func effectiveCCPAFirstChunkTimeout(req OpenAIChatRequest) time.Duration {
+	base := CCPAFirstChunkTimeout
+	if base >= 10*time.Second {
+		promptTokens := EstimateTokens(req.Messages)
+		if promptTokens > 16000 {
+			extra := time.Duration((promptTokens-16000)/3000) * time.Second
+			timeout := base + extra
+			if timeout > 75*time.Second && base <= 75*time.Second {
+				timeout = 75 * time.Second
+			}
+			return timeout
+		}
+	}
+	return base
 }
 
 func accountCacheScope(w http.ResponseWriter, oauthToken string) string {
@@ -660,9 +677,14 @@ func (u *GatewayUpstream) handleDirectCCPA(
 		temp = *req.Temperature
 	}
 
+	maxOut := req.EffectiveMaxTokens(DefaultCCPAMaxOutputTokens)
+	if maxOut > DefaultCCPAMaxOutputTokens {
+		maxOut = DefaultCCPAMaxOutputTokens
+	}
+
 	genCfg := ccpaGenConfig{
 		Temperature:     &temp,
-		MaxOutputTokens: req.MaxTokens,
+		MaxOutputTokens: maxOut,
 	}
 	zeroBudget := 0
 	if req.ThinkingConfig != nil {
@@ -723,18 +745,21 @@ func (u *GatewayUpstream) handleDirectCCPA(
 	ccpaCandidates := buildCCPACandidatesWithCache(endpoint, accScope, resolved, noThinking)
 
 	var (
-		resp            *http.Response
-		activeCCPAModel string
-		activeScanner   *bufio.Scanner
-		activeIdleTimer *time.Timer
-		activeCandCtx   context.Context
-		activeCancel    context.CancelFunc
-		activeTimedOut  *atomic.Bool
-		initialText     string
-		initialThoughts string
-		lastUsage       *ccpaUsageMetadata
-		lastCCPAErr     error
+		resp             *http.Response
+		activeCCPAModel  string
+		activeScanner    *bufio.Scanner
+		activeIdleTimer  *time.Timer
+		activeCandCtx    context.Context
+		activeCancel     context.CancelFunc
+		activeTimedOut   *atomic.Bool
+		initialText      string
+		initialThoughts  string
+		lastUsage        *ccpaUsageMetadata
+		lastFinishReason string
+		lastCCPAErr      error
 	)
+
+	firstChunkTimeout := effectiveCCPAFirstChunkTimeout(req)
 
 	for _, candidate := range ccpaCandidates {
 		if ctx.Err() != nil {
@@ -742,6 +767,9 @@ func (u *GatewayUpstream) handleDirectCCPA(
 		}
 
 		candInner := inner
+		if strings.Contains(candidate, "lite") && candInner.GenerationConfig.MaxOutputTokens > 32768 {
+			candInner.GenerationConfig.MaxOutputTokens = 32768
+		}
 		// Anthropic models, flash-lite/gemini-3-flash, and image models on CCPA do not accept thinkingConfig overrides
 		if (strings.HasPrefix(candidate, "claude-") ||
 			candidate == "gemini-3-flash" ||
@@ -778,7 +806,7 @@ func (u *GatewayUpstream) handleDirectCCPA(
 
 		candCtx, cancelCand := context.WithTimeout(ctx, CCPACandidateMaxTimeout)
 		var timedOut atomic.Bool
-		idleTimer := time.AfterFunc(CCPAFirstChunkTimeout, func() {
+		idleTimer := time.AfterFunc(firstChunkTimeout, func() {
 			timedOut.Store(true)
 			cancelCand()
 		})
@@ -825,7 +853,7 @@ func (u *GatewayUpstream) handleDirectCCPA(
 				markDeadCCPAModel(endpoint, candidate, 2*time.Minute)
 			}
 			lastCCPAErr = fmt.Errorf("CCPA HTTP %d (%s): %s", r.StatusCode, candidate, strings.TrimSpace(string(errBody)))
-			if r.StatusCode == http.StatusUnauthorized || (r.StatusCode == http.StatusForbidden && strings.Contains(string(errBody), "VALIDATION_REQUIRED")) {
+			if r.StatusCode == http.StatusUnauthorized || r.StatusCode == http.StatusForbidden {
 				log.Printf("[omni-gateway] CCPA candidate %q returned HTTP %d; stopping tier fallback for account recovery/failover", candidate, r.StatusCode)
 				break
 			}
@@ -833,7 +861,7 @@ func (u *GatewayUpstream) handleDirectCCPA(
 			continue
 		}
 
-		// Verify first meaningful chunk inside candidate loop while idleTimer (CCPAFirstChunkTimeout) is armed.
+		// Verify first meaningful chunk inside candidate loop while idleTimer (firstChunkTimeout) is armed.
 		scanner := bufio.NewScanner(r.Body)
 		scanner.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)
 
@@ -842,6 +870,7 @@ func (u *GatewayUpstream) handleDirectCCPA(
 			candInitialThoughts strings.Builder
 			candRawNonSSE       strings.Builder
 			candLastUsage       *ccpaUsageMetadata
+			candFinishReason    string
 			foundSSE            bool
 		)
 
@@ -860,9 +889,12 @@ func (u *GatewayUpstream) handleDirectCCPA(
 			if dataStr == "" || dataStr == "[DONE]" {
 				continue
 			}
-			textDelta, thoughtDelta, uMeta := extractCCPAPartsAndUsage(dataStr)
+			textDelta, thoughtDelta, uMeta, rawFR := extractCCPAChunk(dataStr)
 			if uMeta != nil && (uMeta.TotalTokenCount > 0 || uMeta.PromptTokenCount > 0 || uMeta.CandidatesTokenCount > 0) {
 				candLastUsage = uMeta
+			}
+			if rawFR != "" {
+				candFinishReason = rawFR
 			}
 			if textDelta == "" && thoughtDelta == "" {
 				continue
@@ -890,9 +922,12 @@ func (u *GatewayUpstream) handleDirectCCPA(
 		candErr := candCtx.Err()
 
 		if !foundSSE && candRawNonSSE.Len() > 0 {
-			tDelta, thDelta, uMeta := extractCCPAPartsAndUsage(candRawNonSSE.String())
+			tDelta, thDelta, uMeta, rawFR := extractCCPAChunk(candRawNonSSE.String())
 			if uMeta != nil && (uMeta.TotalTokenCount > 0 || uMeta.PromptTokenCount > 0 || uMeta.CandidatesTokenCount > 0) {
 				candLastUsage = uMeta
+			}
+			if rawFR != "" {
+				candFinishReason = rawFR
 			}
 			candInitialText.WriteString(tDelta)
 			candInitialThoughts.WriteString(thDelta)
@@ -937,6 +972,7 @@ func (u *GatewayUpstream) handleDirectCCPA(
 		initialText = candInitialText.String()
 		initialThoughts = candInitialThoughts.String()
 		lastUsage = candLastUsage
+		lastFinishReason = candFinishReason
 		break
 	}
 
@@ -1031,9 +1067,12 @@ func (u *GatewayUpstream) handleDirectCCPA(
 			if dataStr == "" || dataStr == "[DONE]" {
 				continue
 			}
-			textDelta, thoughtDelta, uMeta := extractCCPAPartsAndUsage(dataStr)
+			textDelta, thoughtDelta, uMeta, rawFR := extractCCPAChunk(dataStr)
 			if uMeta != nil && (uMeta.TotalTokenCount > 0 || uMeta.PromptTokenCount > 0 || uMeta.CandidatesTokenCount > 0) {
 				lastUsage = uMeta
+			}
+			if rawFR != "" {
+				lastFinishReason = rawFR
 			}
 			if textDelta == "" && thoughtDelta == "" {
 				continue
@@ -1072,7 +1111,7 @@ func (u *GatewayUpstream) handleDirectCCPA(
 		w.Header().Set("X-Omni-Gateway-Tokens", fmt.Sprintf("%d", usage.TotalTokens))
 		SetAuditResponse(ctx, streamedText.String(), usage.PromptTokens, usage.CompletionTokens)
 
-		stopReason := "stop"
+		stopReason := normalizeCCPAFinishReason(lastFinishReason)
 		finalChunk := OpenAIChatResponse{
 			ID:      respID,
 			Object:  "chat.completion.chunk",
@@ -1094,7 +1133,7 @@ func (u *GatewayUpstream) handleDirectCCPA(
 			flusher.Flush()
 		}
 
-		if streamScanErr == nil && streamedText.Len() > 0 && !IsUnsupportedClientBanner(streamedText.String()) {
+		if streamScanErr == nil && stopReason != "length" && streamedText.Len() > 0 && !IsUnsupportedClientBanner(streamedText.String()) {
 			cachedResp := OpenAIChatResponse{
 				ID:      respID,
 				Object:  "chat.completion",
@@ -1133,9 +1172,12 @@ func (u *GatewayUpstream) handleDirectCCPA(
 		if dataStr == "" || dataStr == "[DONE]" {
 			continue
 		}
-		tDelta, thDelta, uMeta := extractCCPAPartsAndUsage(dataStr)
+		tDelta, thDelta, uMeta, rawFR := extractCCPAChunk(dataStr)
 		if uMeta != nil && (uMeta.TotalTokenCount > 0 || uMeta.PromptTokenCount > 0 || uMeta.CandidatesTokenCount > 0) {
 			lastUsage = uMeta
+		}
+		if rawFR != "" {
+			lastFinishReason = rawFR
 		}
 		fullText.WriteString(tDelta)
 		fullThoughts.WriteString(thDelta)
@@ -1165,6 +1207,7 @@ func (u *GatewayUpstream) handleDirectCCPA(
 	w.Header().Set("X-Omni-Gateway-Tokens", fmt.Sprintf("%d", usage.TotalTokens))
 	SetAuditResponse(ctx, fullText.String(), usage.PromptTokens, usage.CompletionTokens)
 
+	stopReason := normalizeCCPAFinishReason(lastFinishReason)
 	outResp := OpenAIChatResponse{
 		ID:      respID,
 		Object:  "chat.completion",
@@ -1178,13 +1221,15 @@ func (u *GatewayUpstream) handleDirectCCPA(
 					Content:          fullText.String(),
 					ReasoningContent: fullThoughts.String(),
 				},
-				FinishReason: "stop",
+				FinishReason: stopReason,
 			},
 		},
 		Usage: &usage,
 	}
 
-	GetGlobalCache().Put(req, outResp)
+	if stopReason != "length" {
+		GetGlobalCache().Put(req, outResp)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	return json.NewEncoder(w).Encode(outResp)
@@ -1365,10 +1410,19 @@ func buildCCPACandidatesWithCache(endpoint, accScope string, resolved ResolvedMo
 	return deduped
 }
 
-func extractCCPAPartsAndUsage(dataStr string) (text string, thought string, usage *ccpaUsageMetadata) {
+func normalizeCCPAFinishReason(raw string) string {
+	switch strings.ToUpper(strings.TrimSpace(raw)) {
+	case "MAX_TOKENS", "MAX_OUTPUT_TOKENS", "LENGTH":
+		return "length"
+	default:
+		return "stop"
+	}
+}
+
+func extractCCPAChunk(dataStr string) (text string, thought string, usage *ccpaUsageMetadata, finishReason string) {
 	var chunk ccpaStreamChunk
 	if err := json.Unmarshal([]byte(dataStr), &chunk); err != nil {
-		return "", "", nil
+		return "", "", nil, ""
 	}
 	candidates := chunk.Candidates
 	usage = chunk.UsageMetadata
@@ -1382,6 +1436,9 @@ func extractCCPAPartsAndUsage(dataStr string) (text string, thought string, usag
 	}
 	var tBuilder, thBuilder strings.Builder
 	for _, c := range candidates {
+		if fr := strings.TrimSpace(c.FinishReason); fr != "" {
+			finishReason = fr
+		}
 		for _, p := range c.Content.Parts {
 			if p.Thought {
 				thBuilder.WriteString(p.Text)
@@ -1390,7 +1447,12 @@ func extractCCPAPartsAndUsage(dataStr string) (text string, thought string, usag
 			}
 		}
 	}
-	return tBuilder.String(), thBuilder.String(), usage
+	return tBuilder.String(), thBuilder.String(), usage, finishReason
+}
+
+func extractCCPAPartsAndUsage(dataStr string) (text string, thought string, usage *ccpaUsageMetadata) {
+	t, th, u, _ := extractCCPAChunk(dataStr)
+	return t, th, u
 }
 
 func computeCCPAUsage(req OpenAIChatRequest, textLen int, thoughtLen int, uMeta *ccpaUsageMetadata) OpenAIUsage {

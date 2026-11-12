@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -15,7 +16,10 @@ import (
 	"omni-parallel-mcp/gateway"
 )
 
-const DefaultFallbackModel = "antigravity/gemini-4-argon-high"
+const (
+	DefaultFallbackModel   = "antigravity/gemini-4-argon-high"
+	DefaultWorkerMaxTokens = 65536
+)
 
 func resolveDefaultModel(argModel string) string {
 	return firstNonEmpty(
@@ -103,21 +107,51 @@ func primaryFallbackLabel(primaryModel string) string {
 	return "none"
 }
 
-func resolveAttemptTimeout(isPrimaryWithFallback bool) time.Duration {
+func resolveWorkerMaxTokens() int {
+	if raw := strings.TrimSpace(os.Getenv("OMNI_MAX_TOKENS")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			return n
+		}
+	}
+	return DefaultWorkerMaxTokens
+}
+
+func resolveFirstChunkTimeout(isPrimaryWithFallback bool, promptChars int) time.Duration {
+	base := 45 * time.Second
 	if isPrimaryWithFallback {
 		if raw := strings.TrimSpace(os.Getenv("OMNI_PRIMARY_TIMEOUT_SEC")); raw != "" {
 			if sec, err := strconv.ParseFloat(raw, 64); err == nil && sec > 0 {
-				return time.Duration(sec * float64(time.Second))
+				base = time.Duration(sec * float64(time.Second))
 			}
 		}
-		return 45 * time.Second
+	} else {
+		if raw := strings.TrimSpace(os.Getenv("OMNI_FALLBACK_TIMEOUT_SEC")); raw != "" {
+			if sec, err := strconv.ParseFloat(raw, 64); err == nil && sec > 0 {
+				base = time.Duration(sec * float64(time.Second))
+			}
+		}
 	}
-	if raw := strings.TrimSpace(os.Getenv("OMNI_FALLBACK_TIMEOUT_SEC")); raw != "" {
+
+	if base >= 10*time.Second {
+		promptTokens := promptChars / 4
+		if promptTokens > 16000 {
+			extra := time.Duration((promptTokens-16000)/3000) * time.Second
+			if extra > 45*time.Second {
+				extra = 45 * time.Second
+			}
+			base += extra
+		}
+	}
+	return base
+}
+
+func resolveStreamIdleTimeout() time.Duration {
+	if raw := strings.TrimSpace(os.Getenv("OMNI_STREAM_IDLE_TIMEOUT_SEC")); raw != "" {
 		if sec, err := strconv.ParseFloat(raw, 64); err == nil && sec > 0 {
 			return time.Duration(sec * float64(time.Second))
 		}
 	}
-	return 110 * time.Second
+	return 30 * time.Second
 }
 
 func callOmniRouteWithFailover(endpoint, apiKey, model, sysPrompt, userPrompt string) (string, string, error) {
@@ -135,6 +169,8 @@ func callOmniRouteWithFailover(endpoint, apiKey, model, sysPrompt, userPrompt st
 	}
 	var lastErr error
 	sawBannerErr := false
+	maxOutTokens := resolveWorkerMaxTokens()
+	promptChars := len(sysPrompt) + len(userPrompt)
 
 	for idx, candidateModel := range candidates {
 		candResolved := gateway.ResolveModel(candidateModel, nil)
@@ -145,7 +181,8 @@ func callOmniRouteWithFailover(endpoint, apiKey, model, sysPrompt, userPrompt st
 				{Role: "user", Content: userPrompt},
 			},
 			Temperature:     0.1,
-			Stream:          false,
+			MaxTokens:       maxOutTokens,
+			Stream:          true,
 			ReasoningEffort: candResolved.ReasoningEffort,
 		}
 		if candResolved.IncludeThoughts || candResolved.ThinkingLevel != gateway.ThinkingLevelNone {
@@ -161,7 +198,13 @@ func callOmniRouteWithFailover(endpoint, apiKey, model, sysPrompt, userPrompt st
 		}
 
 		isPrimaryWithFallback := idx == 0 && len(candidates) > 1
-		attemptTimeout := resolveAttemptTimeout(isPrimaryWithFallback)
+		firstChunkTimeout := resolveFirstChunkTimeout(isPrimaryWithFallback, promptChars)
+		streamIdleTimeout := resolveStreamIdleTimeout()
+		maxCeiling := 10 * time.Minute
+		if firstChunkTimeout > maxCeiling {
+			maxCeiling = firstChunkTimeout + time.Minute
+		}
+
 		maxRetries := 2
 		if isPrimaryWithFallback {
 			// Single attempt on primary when backup exists: if Carbon stalls, times out,
@@ -174,57 +217,109 @@ func callOmniRouteWithFailover(endpoint, apiKey, model, sysPrompt, userPrompt st
 				time.Sleep(250 * time.Millisecond)
 			}
 
-			ctx, cancel := context.WithTimeout(context.Background(), attemptTimeout)
+			ctx, cancel := context.WithTimeout(context.Background(), maxCeiling)
+			idleTimer := time.AfterFunc(firstChunkTimeout, cancel)
+
 			httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
 			if err != nil {
+				idleTimer.Stop()
 				cancel()
 				return "", "", err
 			}
 			httpReq.Header.Set("Content-Type", "application/json")
+			httpReq.Header.Set("Accept", "text/event-stream, application/json")
 			if apiKey != "" {
 				httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 			}
 
 			resp, err := httpClient.Do(httpReq)
 			if err != nil {
+				idleTimer.Stop()
 				cancel()
 				lastErr = fmt.Errorf("request error (%s): %w", candidateModel, err)
 				continue
 			}
 
-			body, readErr := io.ReadAll(resp.Body)
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				errBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 16*1024))
+				resp.Body.Close()
+				idleTimer.Stop()
+				cancel()
+				errStr := string(errBytes)
+
+				if resp.StatusCode == http.StatusUnauthorized {
+					return "", "", fmt.Errorf("HTTP 401 unauthorized: %s", truncate(errStr, 300))
+				}
+
+				if resp.StatusCode == http.StatusBadRequest ||
+					resp.StatusCode == http.StatusForbidden ||
+					resp.StatusCode == http.StatusNotFound ||
+					resp.StatusCode == http.StatusRequestTimeout ||
+					resp.StatusCode == http.StatusServiceUnavailable {
+					lastErr = fmt.Errorf("HTTP %d (%s): %s", resp.StatusCode, candidateModel, truncate(errStr, 200))
+					break
+				}
+
+				if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
+					lastErr = fmt.Errorf("HTTP %d (%s): %s", resp.StatusCode, candidateModel, truncate(errStr, 200))
+					continue
+				}
+
+				lastErr = fmt.Errorf("HTTP %d (%s): %s", resp.StatusCode, candidateModel, truncate(errStr, 200))
+				break
+			}
+
+			scanner := bufio.NewScanner(resp.Body)
+			scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
+			var rawBuf bytes.Buffer
+
+			for scanner.Scan() {
+				rawLine := scanner.Text()
+				rawBuf.WriteString(rawLine)
+				rawBuf.WriteByte('\n')
+
+				trimmed := strings.TrimSpace(rawLine)
+				if trimmed == "" ||
+					strings.HasPrefix(trimmed, ":") ||
+					strings.HasPrefix(trimmed, "event:") ||
+					strings.HasPrefix(trimmed, "id:") ||
+					strings.HasPrefix(trimmed, "retry:") {
+					continue
+				}
+
+				if strings.HasPrefix(trimmed, "data:") {
+					dataStr := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
+					if dataStr == "[DONE]" {
+						idleTimer.Reset(streamIdleTimeout)
+						break
+					}
+					if dataStr != "" {
+						var chunk ChatResponse
+						if json.Unmarshal([]byte(dataStr), &chunk) == nil {
+							if len(chunk.Choices) > 0 &&
+								(chunk.Choices[0].Delta.Content != "" ||
+									chunk.Choices[0].Delta.ReasoningContent != "" ||
+									chunk.Choices[0].Message.Content != "") {
+								idleTimer.Reset(streamIdleTimeout)
+							}
+						}
+					}
+				} else {
+					idleTimer.Reset(streamIdleTimeout)
+				}
+			}
+
+			scanErr := scanner.Err()
+			idleTimer.Stop()
 			resp.Body.Close()
 			cancel()
 
-			if readErr != nil {
-				lastErr = fmt.Errorf("read error (%s): %w", candidateModel, readErr)
+			if scanErr != nil {
+				lastErr = fmt.Errorf("read error (%s): %w", candidateModel, scanErr)
 				continue
 			}
 
-			if resp.StatusCode == http.StatusUnauthorized {
-				return "", "", fmt.Errorf("HTTP 401 unauthorized: %s", truncate(string(body), 300))
-			}
-
-			if resp.StatusCode == http.StatusBadRequest ||
-				resp.StatusCode == http.StatusForbidden ||
-				resp.StatusCode == http.StatusNotFound ||
-				resp.StatusCode == http.StatusRequestTimeout ||
-				resp.StatusCode == http.StatusServiceUnavailable {
-				lastErr = fmt.Errorf("HTTP %d (%s): %s", resp.StatusCode, candidateModel, truncate(string(body), 200))
-				break
-			}
-
-			if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
-				lastErr = fmt.Errorf("HTTP %d (%s): %s", resp.StatusCode, candidateModel, truncate(string(body), 200))
-				continue
-			}
-
-			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-				lastErr = fmt.Errorf("HTTP %d (%s): %s", resp.StatusCode, candidateModel, truncate(string(body), 200))
-				break
-			}
-
-			content, err := parseOmniRouteResponse(body)
+			content, err := parseOmniRouteResponse(rawBuf.Bytes())
 			if err != nil {
 				lastErr = fmt.Errorf("parse error (%s): %w", candidateModel, err)
 				if strings.Contains(strings.ToLower(err.Error()), "404") || strings.Contains(strings.ToLower(err.Error()), "cooldown") {
