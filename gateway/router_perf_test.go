@@ -416,8 +416,56 @@ func TestEndToEndCCPA429AutoRecordsPerAccountModelCooldownForNextRequest(t *test
 			t.Fatalf("unpinned request %d resolved to %q, want claude-opus-4-6-thinking", i, gotMod)
 		}
 	}
+	// Also verify direct antigravity/claude-opus-4-6-thinking requests bypass opus-429@example.com
+	opusResolved := ResolveModel("antigravity/claude-opus-4-6-thinking", nil)
+	for i := 0; i < 4; i++ {
+		req := OpenAIChatRequest{
+			Model:    "antigravity/claude-opus-4-6-thinking",
+			Messages: []OpenAIChatMessage{{Role: "user", Content: json.RawMessage(fmt.Sprintf(`"direct opus req %d"`, i))}},
+		}
+		rec := httptest.NewRecorder()
+		if err := upstream.HandleChatCompletion(context.Background(), rec, req, opusResolved, ""); err != nil {
+			t.Fatalf("direct opus request %d failed: %v", i, err)
+		}
+		if gotAcc := rec.Header().Get("X-Omni-Gateway-Account"); gotAcc != "opus-fresh@example.com" {
+			t.Fatalf("direct opus request %d routed to %q, want opus-fresh@example.com", i, gotAcc)
+		}
+		if gotMod := rec.Header().Get("X-Omni-Gateway-Resolved-Model"); gotMod != "claude-opus-4-6-thinking" {
+			t.Fatalf("direct opus request %d resolved to %q, want claude-opus-4-6-thinking", i, gotMod)
+		}
+	}
 	if opus429Hits.Load() != 1 {
 		t.Fatalf("expected 0 extra 429 hops after per-account model cooldown recorded, got total=%d", opus429Hits.Load())
+	}
+
+	// Verify 7 accounts with 8s-28s long-stream AvgLatencyMs are NOT starved by 2 accounts with 1.7s Flash AvgLatencyMs
+	for i := 0; i < 9; i++ {
+		avgLat := int64(18000)
+		if i < 2 {
+			avgLat = 1787
+		}
+		_, _ = UpsertConnectedAccount(ConnectedAccount{
+			Provider:     ProviderAntigravity,
+			Email:        fmt.Sprintf("prod-lat-%d@example.com", i),
+			AccessToken:  fmt.Sprintf("ya29.prod-lat-%d", i),
+			ProjectID:    fmt.Sprintf("proj-lat-%d", i),
+			AvgLatencyMs: avgLat,
+			ExpiresAt:    time.Now().Unix() + 3600,
+		})
+	}
+	latCounts := make(map[string]int, 9)
+	for i := 0; i < 45; i++ {
+		acc, err := SelectProviderAccountForModel(context.Background(), ProviderAntigravity, "antigravity/gemini-3-flash")
+		if err != nil {
+			t.Fatalf("SelectProviderAccountForModel failed: %v", err)
+		}
+		latCounts[acc.Email]++
+	}
+	for i := 0; i < 9; i++ {
+		em := fmt.Sprintf("prod-lat-%d@example.com", i)
+		if latCounts[em] < 4 || latCounts[em] > 5 {
+			t.Fatalf("account %s (AvgLatencyMs>6000) was starved or piled up: got %d, counts=%+v", em, latCounts[em], latCounts)
+		}
 	}
 }
 

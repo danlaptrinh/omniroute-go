@@ -503,19 +503,20 @@ func ExecuteAntigravityWithReactiveRefresh(
 		}
 		lat := time.Now().UnixMilli() - startMs
 
-		if accountEmail != "" {
-			nowCheck := time.Now()
-			for _, bm := range []string{"claude-opus-4-6-thinking", "claude-sonnet-4-6", "gemini-3-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"} {
-				if isAccountDeadCCPAModel(u.cfg.CCPAEndpoint, accountEmail, bm, nowCheck) {
-					RecordAccountModelRateLimit(accountEmail, bm, 2*time.Minute)
-				}
-			}
-		}
-
 		if err == nil {
 			usedTokens := parseRecordedTokens(w.Header().Get("X-Omni-Gateway-Tokens"), req)
+			actualModel := target.CanonicalID
+			if resolvedHdr := strings.TrimSpace(w.Header().Get("X-Omni-Gateway-Resolved-Model")); resolvedHdr != "" {
+				actualModel = resolvedHdr
+			}
 			if accountEmail != "" {
-				RecordAccountModelResult(accountEmail, ProviderAntigravity, target.CanonicalID, true, lat, usedTokens, http.StatusOK)
+				RecordAccountModelResult(accountEmail, ProviderAntigravity, actualModel, true, lat, usedTokens, http.StatusOK)
+				nowCheck := time.Now()
+				for _, bm := range []string{"claude-opus-4-6-thinking", "claude-sonnet-4-6", "gemini-3-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"} {
+					if isAccountDeadCCPAModel(u.cfg.CCPAEndpoint, accountEmail, bm, nowCheck) {
+						RecordAccountModelRateLimit(accountEmail, bm, 2*time.Minute)
+					}
+				}
 			}
 			entry := GatewayLogEntry{
 				Provider:       ProviderAntigravity,

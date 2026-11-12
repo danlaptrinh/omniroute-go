@@ -1127,8 +1127,9 @@ func selectProviderAccountCore(ctx context.Context, provider ProviderID, modelHi
 	}
 
 	// 3. Filter to least in-flight accounts so concurrent Sub-Agents / requests never collide on the same account
+	minInFlight := 0
 	if len(candidates) > 1 {
-		minInFlight := GetAccountInFlight(candidates[0].Email)
+		minInFlight = GetAccountInFlight(candidates[0].Email)
 		for _, c := range candidates[1:] {
 			if inf := GetAccountInFlight(c.Email); inf < minInFlight {
 				minInFlight = inf
@@ -1145,16 +1146,17 @@ func selectProviderAccountCore(ctx context.Context, provider ProviderID, modelHi
 		}
 	}
 
-	// 4. Smart Low-Latency Filter: if multiple idle accounts exist and some are fast (<= 6000ms or fresh 0ms),
-	// automatically bypass accounts that had a heavy/slow average latency so latency stays low.
-	if len(candidates) > 1 {
+	// 4. Extreme-Outlier Latency Guard: only bypass severely stalled accounts (> 45000ms avg) when idle accounts
+	// exist (minInFlight == 0) and a majority of idle candidates are healthy, preventing normal 8s-28s long-output
+	// Opus streaming averages from starving healthy accounts or causing +1 burst pile-ups.
+	if len(candidates) > 1 && minInFlight == 0 {
 		fastCandidates := make([]ConnectedAccount, 0, len(candidates))
 		for _, c := range candidates {
-			if c.AvgLatencyMs == 0 || c.AvgLatencyMs <= 6000 {
+			if c.AvgLatencyMs == 0 || c.AvgLatencyMs <= 45000 {
 				fastCandidates = append(fastCandidates, c)
 			}
 		}
-		if len(fastCandidates) > 0 {
+		if len(fastCandidates)*2 >= len(candidates) && len(fastCandidates) > 0 {
 			candidates = fastCandidates
 		}
 	}
@@ -1344,7 +1346,7 @@ func RecordAccountModelResult(emailOrID string, provider ProviderID, modelID str
 	if strings.TrimSpace(modelID) != "" && strings.TrimSpace(targetEmail) != "" {
 		if !success && (statusCode == http.StatusTooManyRequests || statusCode == 429) {
 			RecordAccountModelRateLimit(targetEmail, modelID, 2*time.Minute)
-		} else if success {
+		} else if success && !isAccountDeadCCPAModel(DefaultCCPAEndpoint, targetEmail, normalizeRateLimitModelID(modelID), time.Now()) {
 			clearSingleAccountModelRateLimit(targetEmail, modelID)
 		}
 	}
