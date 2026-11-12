@@ -10,12 +10,34 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
 )
 
-var claudeRefreshMu sync.Mutex
+const (
+	oauthExpirySafetyMarginSec     int64 = 60
+	oauthProactiveRefreshWindowSec int64 = 300
+)
+
+type inflightRefresh struct {
+	done chan struct{}
+	acc  ConnectedAccount
+	err  error
+}
+
+var (
+	claudeRefreshMu sync.Mutex
+
+	refreshFlightMu sync.Mutex
+	refreshInFlight = make(map[string]*inflightRefresh)
+)
+
+// RefreshClaudeOAuthToken exchanges a Claude Code OAuth refresh_token for a fresh access_token.
+func RefreshClaudeOAuthToken(ctx context.Context, acc *ConnectedAccount) error {
+	return RefreshClaudeToken(ctx, acc)
+}
 
 // RefreshClaudeToken exchanges a Claude Code OAuth refresh_token for a fresh access_token.
 // Serialized via claudeRefreshMu because Anthropic refresh tokens are strictly single-use rotating.
@@ -120,16 +142,236 @@ func RefreshAccountTokenByProvider(ctx context.Context, acc *ConnectedAccount) e
 	}
 	switch prov {
 	case ProviderAntigravity:
-		return RefreshAntigravityToken(ctx, acc)
+		return RefreshOAuthToken(ctx, acc)
 	case ProviderClaudeCode:
-		return RefreshClaudeToken(ctx, acc)
+		return RefreshClaudeOAuthToken(ctx, acc)
 	default:
 		return fmt.Errorf("oauth refresh unsupported for provider %s", prov)
 	}
 }
 
-// EnsureAccountTokenFresh proactively refreshes expired/near-expiry OAuth tokens for Antigravity
-// and Claude Code accounts, falling back to an alternate candidate when refresh fails.
+func accountRefreshFlightKey(acc ConnectedAccount) string {
+	prov := acc.Provider
+	if prov == "" {
+		prov = ProviderAntigravity
+	}
+	ident := strings.ToLower(strings.TrimSpace(acc.Email))
+	if ident == "" {
+		ident = strings.ToLower(strings.TrimSpace(acc.ID))
+	}
+	if ident == "" {
+		ident = strings.TrimSpace(acc.RefreshToken)
+	}
+	return string(prov) + "|" + ident
+}
+
+func findSavedAccountMatch(prov ProviderID, acc ConnectedAccount) (ConnectedAccount, bool) {
+	if prov == "" {
+		prov = ProviderAntigravity
+	}
+	auth := LoadSavedAuthConfig()
+	for _, s := range auth.Accounts {
+		if s.Disabled {
+			continue
+		}
+		sp := s.Provider
+		if sp == "" {
+			sp = ProviderAntigravity
+		}
+		if sp != prov {
+			continue
+		}
+		if (acc.Email != "" && strings.EqualFold(s.Email, acc.Email)) || (acc.ID != "" && s.ID == acc.ID) {
+			return s, true
+		}
+	}
+	return ConnectedAccount{}, false
+}
+
+func persistAndResolveRefreshedAccount(prov ProviderID, working ConnectedAccount) ConnectedAccount {
+	if persisted, upErr := UpsertConnectedAccount(working); upErr == nil {
+		for _, s := range persisted.Accounts {
+			sp := s.Provider
+			if sp == "" {
+				sp = ProviderAntigravity
+			}
+			if sp == prov && ((working.Email != "" && strings.EqualFold(s.Email, working.Email)) || (working.ID != "" && s.ID == working.ID)) {
+				return s
+			}
+		}
+	}
+	return working
+}
+
+// refreshAccountSingleflight deduplicates concurrent OAuth token refreshes for the same account
+// so a burst of requests hitting an expired token issues only a single outbound OAuth HTTP request.
+func refreshAccountSingleflight(ctx context.Context, acc ConnectedAccount, force bool) (ConnectedAccount, error) {
+	prov := acc.Provider
+	if prov == "" {
+		prov = ProviderAntigravity
+	}
+	if strings.TrimSpace(acc.RefreshToken) == "" {
+		return acc, errors.New("missing refresh_token")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return acc, err
+	}
+
+	key := accountRefreshFlightKey(acc)
+	refreshFlightMu.Lock()
+	if existing, ok := refreshInFlight[key]; ok {
+		refreshFlightMu.Unlock()
+		select {
+		case <-existing.done:
+			return existing.acc, existing.err
+		case <-ctx.Done():
+			return acc, ctx.Err()
+		}
+	}
+	flight := &inflightRefresh{done: make(chan struct{})}
+	refreshInFlight[key] = flight
+	refreshFlightMu.Unlock()
+
+	go func(seed ConnectedAccount, targetProv ProviderID, flightKey string, fl *inflightRefresh, forceRefresh bool) {
+		defer func() {
+			refreshFlightMu.Lock()
+			delete(refreshInFlight, flightKey)
+			close(fl.done)
+			refreshFlightMu.Unlock()
+		}()
+
+		if !forceRefresh {
+			if saved, ok := findSavedAccountMatch(targetProv, seed); ok {
+				if strings.TrimSpace(saved.AccessToken) != "" && saved.ExpiresAt > time.Now().Unix()+oauthExpirySafetyMarginSec {
+					fl.acc = saved
+					fl.err = nil
+					return
+				}
+				if strings.TrimSpace(saved.RefreshToken) != "" {
+					seed = saved
+				}
+			}
+		}
+
+		working := seed
+		working.Provider = targetProv
+		refreshCtx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+
+		if err := RefreshAccountTokenByProvider(refreshCtx, &working); err != nil {
+			fl.acc = seed
+			fl.err = err
+			return
+		}
+		fl.acc = persistAndResolveRefreshedAccount(targetProv, working)
+		fl.err = nil
+	}(acc, prov, key, flight, force)
+
+	select {
+	case <-flight.done:
+		return flight.acc, flight.err
+	case <-ctx.Done():
+		return acc, ctx.Err()
+	}
+}
+
+// triggerProactiveAccountRefresh launches a deduplicated background OAuth refresh when an account's
+// current AccessToken is still valid (>60s remaining) but within 5 minutes of expiry (<=300s).
+func triggerProactiveAccountRefresh(acc ConnectedAccount) bool {
+	prov := acc.Provider
+	if prov == "" {
+		prov = ProviderAntigravity
+	}
+	if prov != ProviderAntigravity && prov != ProviderClaudeCode {
+		return false
+	}
+	if strings.TrimSpace(acc.RefreshToken) == "" {
+		return false
+	}
+
+	key := accountRefreshFlightKey(acc)
+	refreshFlightMu.Lock()
+	if _, busy := refreshInFlight[key]; busy {
+		refreshFlightMu.Unlock()
+		return false
+	}
+	flight := &inflightRefresh{done: make(chan struct{})}
+	refreshInFlight[key] = flight
+	refreshFlightMu.Unlock()
+
+	go func(seed ConnectedAccount, targetProv ProviderID, flightKey string, fl *inflightRefresh) {
+		defer func() {
+			refreshFlightMu.Lock()
+			delete(refreshInFlight, flightKey)
+			close(fl.done)
+			refreshFlightMu.Unlock()
+		}()
+
+		if saved, ok := findSavedAccountMatch(targetProv, seed); ok {
+			if strings.TrimSpace(saved.AccessToken) != "" && saved.ExpiresAt-time.Now().Unix() > oauthProactiveRefreshWindowSec {
+				fl.acc = saved
+				fl.err = nil
+				return
+			}
+			if strings.TrimSpace(saved.RefreshToken) != "" {
+				seed = saved
+			}
+		}
+
+		working := seed
+		working.Provider = targetProv
+		refreshCtx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+
+		if err := RefreshAccountTokenByProvider(refreshCtx, &working); err != nil {
+			fl.acc = seed
+			fl.err = err
+			return
+		}
+		fl.acc = persistAndResolveRefreshedAccount(targetProv, working)
+		fl.err = nil
+	}(acc, prov, key, flight)
+
+	return true
+}
+
+// WaitForPendingOAuthRefreshes waits up to timeout for any in-flight OAuth token refreshes to complete.
+func WaitForPendingOAuthRefreshes(timeout time.Duration) bool {
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		refreshFlightMu.Lock()
+		channels := make([]<-chan struct{}, 0, len(refreshInFlight))
+		for _, fl := range refreshInFlight {
+			channels = append(channels, fl.done)
+		}
+		refreshFlightMu.Unlock()
+
+		if len(channels) == 0 {
+			return true
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return false
+		}
+		timer := time.NewTimer(remaining)
+		select {
+		case <-channels[0]:
+			timer.Stop()
+		case <-timer.C:
+			return false
+		}
+	}
+}
+
+// EnsureAccountTokenFresh serves still-valid OAuth tokens in 0ms (triggering background proactive refresh
+// when within 5 minutes of expiry) and deduplicates expired refreshes via singleflight, falling back to
+// an alternate candidate when refresh fails.
 func EnsureAccountTokenFresh(ctx context.Context, selected ConnectedAccount, candidates []ConnectedAccount) ConnectedAccount {
 	prov := selected.Provider
 	if prov == "" {
@@ -138,14 +380,23 @@ func EnsureAccountTokenFresh(ctx context.Context, selected ConnectedAccount, can
 	if prov != ProviderAntigravity && prov != ProviderClaudeCode {
 		return selected
 	}
-	if selected.ExpiresAt <= 0 || selected.ExpiresAt > time.Now().Unix()+60 {
+	if selected.ExpiresAt <= 0 {
+		return selected
+	}
+
+	now := time.Now().Unix()
+	if now+oauthExpirySafetyMarginSec < selected.ExpiresAt {
+		if strings.TrimSpace(selected.AccessToken) != "" &&
+			selected.ExpiresAt-now <= oauthProactiveRefreshWindowSec &&
+			strings.TrimSpace(selected.RefreshToken) != "" {
+			triggerProactiveAccountRefresh(selected)
+		}
 		return selected
 	}
 
 	if strings.TrimSpace(selected.RefreshToken) != "" {
-		if err := RefreshAccountTokenByProvider(ctx, &selected); err == nil {
-			_, _ = UpsertConnectedAccount(selected)
-			return selected
+		if refreshed, err := refreshAccountSingleflight(ctx, selected, false); err == nil && strings.TrimSpace(refreshed.AccessToken) != "" {
+			return refreshed
 		}
 	}
 
@@ -155,9 +406,18 @@ func EnsureAccountTokenFresh(ctx context.Context, selected ConnectedAccount, can
 			sameEmail := selected.Email != "" && strings.EqualFold(alt.Email, selected.Email)
 			sameID := selected.ID != "" && alt.ID == selected.ID
 			if !sameEmail && !sameID {
-				if alt.ExpiresAt > 0 && alt.ExpiresAt <= time.Now().Unix()+60 && strings.TrimSpace(alt.RefreshToken) != "" {
-					if err := RefreshAccountTokenByProvider(ctx, &alt); err == nil {
-						_, _ = UpsertConnectedAccount(alt)
+				if alt.ExpiresAt > 0 {
+					altNow := time.Now().Unix()
+					if altNow+oauthExpirySafetyMarginSec < alt.ExpiresAt {
+						if strings.TrimSpace(alt.AccessToken) != "" &&
+							alt.ExpiresAt-altNow <= oauthProactiveRefreshWindowSec &&
+							strings.TrimSpace(alt.RefreshToken) != "" {
+							triggerProactiveAccountRefresh(alt)
+						}
+					} else if strings.TrimSpace(alt.RefreshToken) != "" {
+						if refreshedAlt, err := refreshAccountSingleflight(ctx, alt, false); err == nil && strings.TrimSpace(refreshedAlt.AccessToken) != "" {
+							alt = refreshedAlt
+						}
 					}
 				}
 				return alt
@@ -206,8 +466,8 @@ func ForceRefreshAccountToken(ctx context.Context, provider ProviderID, emailOrI
 		return nil, fmt.Errorf("account %q has no refresh_token", targetKey)
 	}
 
-	acc := *matched
-	if err := RefreshAccountTokenByProvider(ctx, &acc); err != nil {
+	acc, err := refreshAccountSingleflight(ctx, *matched, true)
+	if err != nil {
 		return nil, err
 	}
 
@@ -253,7 +513,16 @@ func HasConfiguredProviderAccount(provider ProviderID) bool {
 	if provider == "" {
 		provider = ProviderAntigravity
 	}
-	auth := LoadSavedAuthConfig()
+	configMu.Lock()
+	path := GatewayConfigFilePath()
+	var auth SavedGatewayAuth
+	if cachedAuthCfg != nil && cachedAuthPath == path && (asyncFlushPending || time.Since(cachedAuthStatAt) < 500*time.Millisecond) {
+		auth = *cachedAuthCfg
+	} else {
+		auth = loadSavedAuthConfigLocked()
+	}
+	configMu.Unlock()
+
 	for _, a := range auth.Accounts {
 		if a.Disabled {
 			continue
@@ -285,6 +554,12 @@ func ExecuteClaudeWithReactiveRefresh(
 		acc = &ConnectedAccount{Provider: ProviderClaudeCode, Email: "header-token", AccessToken: cleanAuth}
 		AcquireAccountInFlightWithRole(acc.Email, target.CanonicalID)
 		releaseInFlight = buildInFlightReleaseFn(acc.Email)
+	} else if err != nil {
+		if envTok := strings.TrimSpace(os.Getenv("CLAUDE_CODE_OAUTH_TOKEN")); envTok != "" {
+			acc = &ConnectedAccount{Provider: ProviderClaudeCode, Email: "env-token", AccessToken: envTok}
+			AcquireAccountInFlightWithRole(acc.Email, target.CanonicalID)
+			releaseInFlight = buildInFlightReleaseFn(acc.Email)
+		}
 	}
 	if acc == nil {
 		if releaseInFlight != nil {
@@ -402,7 +677,7 @@ func ExecuteAntigravityWithReactiveRefresh(
 	var forcedAcc *ConnectedAccount
 
 	maxAttempts := 0
-	for _, a := range LoadSavedAuthConfig().Accounts {
+	for _, a := range readAuthAccountsSnapshotFast() {
 		if a.Disabled {
 			continue
 		}
@@ -416,8 +691,8 @@ func ExecuteAntigravityWithReactiveRefresh(
 	}
 	if maxAttempts < 2 {
 		maxAttempts = 2
-	} else if maxAttempts > 6 {
-		maxAttempts = 6
+	} else if maxAttempts > 10 {
+		maxAttempts = 10
 	}
 
 	modelHint := strings.TrimSpace(target.CanonicalID)
@@ -471,6 +746,12 @@ func ExecuteAntigravityWithReactiveRefresh(
 					} else {
 						agyToken = strings.TrimSpace(u.cfg.AgyOAuthToken)
 						projectID = strings.TrimSpace(u.cfg.AgyProjectID)
+						if agyToken == "" {
+							agyToken = strings.TrimSpace(os.Getenv("AGY_OAUTH_TOKEN"))
+						}
+						if projectID == "" {
+							projectID = strings.TrimSpace(os.Getenv("AGY_PROJECT_ID"))
+						}
 					}
 					if projectID == "" {
 						projectID = strings.TrimSpace(u.cfg.AgyProjectID)
@@ -505,14 +786,35 @@ func ExecuteAntigravityWithReactiveRefresh(
 
 		if err == nil {
 			usedTokens := parseRecordedTokens(w.Header().Get("X-Omni-Gateway-Tokens"), req)
+			resolvedHdr := strings.TrimSpace(w.Header().Get("X-Omni-Gateway-Resolved-Model"))
+			upstreamVer := strings.TrimSpace(w.Header().Get("X-Omni-Gateway-Upstream-Model-Version"))
+
 			actualModel := target.CanonicalID
-			if resolvedHdr := strings.TrimSpace(w.Header().Get("X-Omni-Gateway-Resolved-Model")); resolvedHdr != "" {
+			if resolvedHdr != "" {
 				actualModel = resolvedHdr
 			}
+			loggedModel := actualModel
+			if loggedModel != "" && !strings.Contains(loggedModel, "/") {
+				loggedModel = "antigravity/" + loggedModel
+			}
+			if upstreamVer != "" && !strings.EqualFold(upstreamVer, resolvedHdr) && !strings.EqualFold("antigravity/"+upstreamVer, loggedModel) {
+				loggedModel = fmt.Sprintf("%s [%s]", loggedModel, upstreamVer)
+			}
+
 			if accountEmail != "" {
-				RecordAccountModelResult(accountEmail, ProviderAntigravity, actualModel, true, lat, usedTokens, http.StatusOK)
+				RecordAccountModelResult(accountEmail, ProviderAntigravity, loggedModel, true, lat, usedTokens, http.StatusOK)
 				nowCheck := time.Now()
-				for _, bm := range []string{"claude-opus-4-6-thinking", "claude-sonnet-4-6", "gemini-3-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"} {
+				for _, bm := range []string{
+					"gemini-3.8-flash-high",
+					"gemini-3.8-flash-medium",
+					"gemini-3.8-flash-low",
+					"gemini-3.8-flash-tiered",
+					"claude-opus-4-6-thinking",
+					"claude-sonnet-4-6",
+					"gemini-3-flash",
+					"gemini-3.5-flash-lite",
+					"gemini-3.1-flash-lite",
+				} {
 					if isAccountDeadCCPAModel(u.cfg.CCPAEndpoint, accountEmail, bm, nowCheck) {
 						RecordAccountModelRateLimit(accountEmail, bm, 2*time.Minute)
 					}
@@ -522,7 +824,7 @@ func ExecuteAntigravityWithReactiveRefresh(
 				Provider:       ProviderAntigravity,
 				Account:        accountEmail,
 				RequestedModel: req.Model,
-				ResolvedModel:  target.CanonicalID,
+				ResolvedModel:  loggedModel,
 				StatusCode:     http.StatusOK,
 				LatencyMs:      lat,
 				TotalTokens:    usedTokens,
@@ -547,13 +849,24 @@ func ExecuteAntigravityWithReactiveRefresh(
 			}
 		}
 
+		isFlagshipFailover := strings.Contains(errMsg, "[flagship-failover]")
 		failCode := http.StatusBadGateway
 		if strings.Contains(errMsg, "HTTP 401") {
 			failCode = http.StatusUnauthorized
 		} else if strings.Contains(errMsg, "HTTP 403") {
 			failCode = http.StatusForbidden
-		} else if strings.Contains(errMsg, "HTTP 429") {
+		} else if strings.Contains(errMsg, "HTTP 429") || isFlagshipFailover {
 			failCode = http.StatusTooManyRequests
+		}
+
+		if isFlagshipFailover && accountEmail != "" && attempt+1 < maxAttempts {
+			if modelHint != "" {
+				RecordAccountModelRateLimit(accountEmail, modelHint, 2*time.Minute)
+			}
+			lastErr = err
+			log.Printf("[omniroute-go] antigravity flagship quota exhausted on %s for %q; failing over to alternate flagship account (attempt %d/%d)",
+				accountEmail, modelHint, attempt+1, maxAttempts)
+			continue
 		}
 
 		if accountEmail != "" {
@@ -593,8 +906,8 @@ func FetchClaudeUsageWithRefresh(ctx context.Context, acc *ConnectedAccount) (*h
 	}
 
 	if strings.TrimSpace(acc.RefreshToken) != "" && acc.ExpiresAt > 0 && time.Now().Unix() >= acc.ExpiresAt-60 {
-		if err := RefreshClaudeToken(ctx, acc); err == nil {
-			_, _ = UpsertConnectedAccount(*acc)
+		if refreshed, err := refreshAccountSingleflight(ctx, *acc, false); err == nil {
+			*acc = refreshed
 		}
 	}
 
@@ -622,8 +935,8 @@ func FetchClaudeUsageWithRefresh(ctx context.Context, acc *ConnectedAccount) (*h
 
 	if resp != nil && resp.StatusCode == http.StatusUnauthorized && strings.TrimSpace(acc.RefreshToken) != "" {
 		_ = resp.Body.Close()
-		if refErr := RefreshClaudeToken(ctx, acc); refErr == nil {
-			_, _ = UpsertConnectedAccount(*acc)
+		if refreshed, refErr := refreshAccountSingleflight(ctx, *acc, true); refErr == nil {
+			*acc = refreshed
 			return doGet()
 		}
 		resp.Body = io.NopCloser(bytes.NewReader(nil))

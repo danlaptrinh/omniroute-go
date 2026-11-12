@@ -52,8 +52,8 @@ services:
       - OMNI_AGY_USER_AGENT=${OMNI_AGY_USER_AGENT:-antigravity/2.6.0 windows/amd64}
       - DATABASE_URL=postgres://${POSTGRES_USER:-omniroute}:${POSTGRES_PASSWORD:-omniroute_secret}@postgres:5432/${POSTGRES_DB:-omniroute}?sslmode=disable
       - OMNI_ROUTING_STRATEGY=round-robin
-      - GATEWAY_FALLBACK_MODELS=antigravity/gemini-4-carbon-high,antigravity/gemini-4-argon-high,claude-code/claude-opus-4-6-thinking,alibaba/qwen3-coder-plus
-      - OMNI_PG_MAX_LOGS=${OMNI_PG_MAX_LOGS:-250000}
+      - GATEWAY_FALLBACK_MODELS=antigravity/gemini-4-carbon-high,antigravity/gemini-3-flash,antigravity/gemini-3.5-flash-lite
+      - OMNI_PG_MAX_LOGS=${OMNI_PG_MAX_LOGS:-50000}
       - TZ=${TZ:-Asia/Ho_Chi_Minh}
     volumes:
       - ./data:/data

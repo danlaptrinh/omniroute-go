@@ -21,9 +21,12 @@ import (
 type auditCtxKeyType string
 
 const (
-	auditContextKey       auditCtxKeyType = "omni_audit_ctx"
-	MaxPostgresPromptLogs int             = 250000
-	pgPruneEveryInserts   uint64          = 500
+	auditContextKey        auditCtxKeyType = "omni_audit_ctx"
+	MaxPostgresPromptLogs  int             = 50000
+	pgPruneEveryInserts    uint64          = 500
+	promptLogQueueCapacity int             = 2048
+	promptLogBatchSize     int             = 32
+	promptLogFlushInterval                 = 200 * time.Millisecond
 )
 
 // AuditContext carries employee API key metadata, prompt text, and AI response text across request execution.
@@ -194,13 +197,17 @@ type EmployeeUsageSummary struct {
 }
 
 var (
-	pgMu            sync.RWMutex
-	pgDB            *sql.DB
-	pgConnected     bool
-	pgActiveDSN     string
-	pgServerVersion string
-	pgLastErr       string
-	pgInsertCounter atomic.Uint64
+	pgMu                sync.RWMutex
+	pgDB                *sql.DB
+	pgConnected         bool
+	pgActiveDSN         string
+	pgServerVersion     string
+	pgLastErr           string
+	pgInsertCounter     atomic.Uint64
+	promptLogQueue      = make(chan GatewayLogEntry, promptLogQueueCapacity)
+	promptLogFlushReqs  = make(chan chan struct{}, 16)
+	promptLogWorkerOnce sync.Once
+	promptLogDropped    atomic.Uint64
 )
 
 // ResolveEffectivePostgresDSN returns the active PostgreSQL connection string from env or saved config.
@@ -258,8 +265,8 @@ func InitPostgresDB(dsn string) error {
 	}
 
 	db.SetMaxOpenConns(16)
-	db.SetMaxIdleConns(4)
-	db.SetConnMaxLifetime(30 * time.Minute)
+	db.SetMaxIdleConns(8)
+	db.SetConnMaxLifetime(15 * time.Minute)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
@@ -305,14 +312,18 @@ func InitPostgresDB(dsn string) error {
 
 	log.Printf("[omniroute-postgres] Connected to PostgreSQL %s (%s) and verified schema", pgServerVersion, MaskPostgresDSN(dsn))
 
+	ensurePromptLogWorker()
+
 	// Bidirectional sync of API keys and Vector DB memories on startup
 	syncAPIKeysBidirectional(db)
 	InitVectorDBSchema(db)
 	return nil
 }
 
-// ClosePostgres gracefully closes the active PostgreSQL connection pool and resets connection flags.
+// ClosePostgres flushes pending prompt logs, gracefully closes the active PostgreSQL connection pool, and resets connection flags.
 func ClosePostgres() error {
+	_ = FlushPromptLogs(2 * time.Second)
+
 	pgMu.Lock()
 	db := pgDB
 	pgDB = nil
@@ -582,7 +593,211 @@ func DeleteAPIKeyFromPostgresAsync(id string) {
 	}()
 }
 
-// InsertPromptLogAsync saves a GatewayLogEntry to PostgreSQL and performs periodic retention pruning.
+// DeleteAccountFromPostgres permanently deletes a connected account matching ID or Email from PostgreSQL when connected.
+func DeleteAccountFromPostgres(ident string) error {
+	ident = strings.TrimSpace(ident)
+	if ident == "" {
+		return nil
+	}
+	pgMu.RLock()
+	connected := pgConnected
+	db := pgDB
+	pgMu.RUnlock()
+	if !connected || db == nil {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err := db.ExecContext(
+		ctx,
+		`DELETE FROM omni_accounts WHERE LOWER(id) = LOWER($1) OR LOWER(email) = LOWER($1)`,
+		ident,
+	)
+	if err != nil && strings.Contains(strings.ToLower(err.Error()), "does not exist") {
+		return nil
+	}
+	return err
+}
+
+func ensurePromptLogWorker() {
+	promptLogWorkerOnce.Do(func() {
+		go runPromptLogBatchWorker()
+	})
+}
+
+func sanitizePromptLogEntry(e GatewayLogEntry, seq int) GatewayLogEntry {
+	if strings.TrimSpace(e.ID) == "" {
+		e.ID = fmt.Sprintf("log-%d-%d", time.Now().UnixNano(), seq)
+	}
+	e.EmployeeName = TruncateUTF8(e.EmployeeName, 256)
+	e.Account = TruncateUTF8(e.Account, 256)
+	e.RequestedModel = TruncateUTF8(e.RequestedModel, 256)
+	e.ResolvedModel = TruncateUTF8(e.ResolvedModel, 256)
+	e.PromptText = TruncateUTF8(e.PromptText, 16000)
+	e.ResponseText = TruncateUTF8(e.ResponseText, 16000)
+	e.ErrorMessage = TruncateUTF8(e.ErrorMessage, 4000)
+	e.ErrorDetail = TruncateUTF8(e.ErrorDetail, 4000)
+	return e
+}
+
+func buildBatchInsertPromptLogsSQL(entries []GatewayLogEntry) (string, []any) {
+	if len(entries) == 0 {
+		return "", nil
+	}
+	const colsPerRow = 20
+	var sb strings.Builder
+	sb.Grow(280 + len(entries)*96)
+	sb.WriteString(`INSERT INTO omni_prompt_logs (
+	id, timestamp_str, api_key_id, employee_name, masked_key,
+	provider, account, requested_model, resolved_model,
+	prompt_text, response_text, prompt_tokens, completion_tokens, total_tokens, tokens_saved,
+	latency_ms, status_code, is_error, error_message, error_detail
+) VALUES `)
+
+	args := make([]any, 0, len(entries)*colsPerRow)
+	for i, raw := range entries {
+		e := sanitizePromptLogEntry(raw, i)
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		base := i*colsPerRow + 1
+		sb.WriteByte('(')
+		for col := 0; col < colsPerRow; col++ {
+			if col > 0 {
+				sb.WriteByte(',')
+			}
+			sb.WriteByte('$')
+			sb.WriteString(strconv.Itoa(base + col))
+		}
+		sb.WriteByte(')')
+
+		args = append(args,
+			e.ID, e.Timestamp, e.APIKeyID, e.EmployeeName, e.MaskedKey,
+			string(e.Provider), e.Account, e.RequestedModel, e.ResolvedModel,
+			e.PromptText, e.ResponseText, e.PromptTokens, e.CompletionTokens, e.TotalTokens, e.TokensSaved,
+			e.LatencyMs, e.StatusCode, e.IsError, e.ErrorMessage, e.ErrorDetail,
+		)
+	}
+	sb.WriteString(` ON CONFLICT (id) DO NOTHING`)
+	return sb.String(), args
+}
+
+func writePromptLogBatch(entries []GatewayLogEntry) {
+	if len(entries) == 0 {
+		return
+	}
+	pgMu.RLock()
+	connected := pgConnected
+	db := pgDB
+	pgMu.RUnlock()
+	if !connected || db == nil {
+		return
+	}
+
+	query, args := buildBatchInsertPromptLogsSQL(entries)
+	if query == "" {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+
+	var execErr error
+	tx, txErr := db.BeginTx(ctx, nil)
+	if txErr == nil && tx != nil {
+		if _, err := tx.ExecContext(ctx, query, args...); err != nil {
+			_ = tx.Rollback()
+			execErr = err
+		} else if commitErr := tx.Commit(); commitErr != nil {
+			execErr = commitErr
+		}
+	} else {
+		_, execErr = db.ExecContext(ctx, query, args...)
+	}
+
+	if execErr != nil {
+		log.Printf("[omniroute-postgres] batch insert prompt logs (%d rows) warning: %v", len(entries), execErr)
+		return
+	}
+
+	added := uint64(len(entries))
+	next := pgInsertCounter.Add(added)
+	prev := next - added
+	if prev/pgPruneEveryInserts < next/pgPruneEveryInserts {
+		pruneCtx, pruneCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_, pruneErr := db.ExecContext(
+			pruneCtx,
+			`DELETE FROM omni_prompt_logs WHERE id IN (SELECT id FROM omni_prompt_logs ORDER BY created_at DESC OFFSET $1)`,
+			effectiveMaxPostgresLogs(),
+		)
+		pruneCancel()
+		if pruneErr != nil {
+			log.Printf("[omniroute-postgres] auto-retention prune warning: %v", pruneErr)
+		}
+	}
+}
+
+func runPromptLogBatchWorker() {
+	ticker := time.NewTicker(promptLogFlushInterval)
+	defer ticker.Stop()
+
+	batch := make([]GatewayLogEntry, 0, promptLogBatchSize)
+
+	flushNow := func() {
+		if len(batch) == 0 {
+			return
+		}
+		writePromptLogBatch(batch)
+		clear(batch)
+		batch = batch[:0]
+	}
+
+	drainAndFlushAll := func() {
+		for {
+			select {
+			case e := <-promptLogQueue:
+				batch = append(batch, e)
+				if len(batch) >= promptLogBatchSize {
+					flushNow()
+				}
+			default:
+				flushNow()
+				return
+			}
+		}
+	}
+
+	for {
+		select {
+		case e := <-promptLogQueue:
+			batch = append(batch, e)
+			for len(batch) < promptLogBatchSize {
+				select {
+				case next := <-promptLogQueue:
+					batch = append(batch, next)
+				default:
+					goto checkReady
+				}
+			}
+		checkReady:
+			if len(batch) >= promptLogBatchSize {
+				flushNow()
+			}
+
+		case <-ticker.C:
+			flushNow()
+
+		case doneCh := <-promptLogFlushReqs:
+			drainAndFlushAll()
+			close(doneCh)
+		}
+	}
+}
+
+// InsertPromptLogAsync enqueues a GatewayLogEntry onto the bounded batch queue without blocking
+// or spawning per-request goroutines, dropping non-blockingly only if the 2048-entry buffer is full.
 func InsertPromptLogAsync(entry GatewayLogEntry) {
 	pgMu.RLock()
 	connected := pgConnected
@@ -591,52 +806,50 @@ func InsertPromptLogAsync(entry GatewayLogEntry) {
 	if !connected || db == nil {
 		return
 	}
-	go func(e GatewayLogEntry) {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
+	ensurePromptLogWorker()
+	select {
+	case promptLogQueue <- entry:
+	default:
+		promptLogDropped.Add(1)
+	}
+}
 
-		e.EmployeeName = TruncateUTF8(e.EmployeeName, 256)
-		e.Account = TruncateUTF8(e.Account, 256)
-		e.RequestedModel = TruncateUTF8(e.RequestedModel, 256)
-		e.ResolvedModel = TruncateUTF8(e.ResolvedModel, 256)
-		e.PromptText = TruncateUTF8(e.PromptText, 16000)
-		e.ResponseText = TruncateUTF8(e.ResponseText, 16000)
-		e.ErrorMessage = TruncateUTF8(e.ErrorMessage, 4000)
-		e.ErrorDetail = TruncateUTF8(e.ErrorDetail, 4000)
-
-		_, err := db.ExecContext(ctx, `
-			INSERT INTO omni_prompt_logs (
-				id, timestamp_str, api_key_id, employee_name, masked_key,
-				provider, account, requested_model, resolved_model,
-				prompt_text, response_text, prompt_tokens, completion_tokens, total_tokens, tokens_saved,
-				latency_ms, status_code, is_error, error_message, error_detail
-			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
-			ON CONFLICT (id) DO NOTHING
-		`,
-			e.ID, e.Timestamp, e.APIKeyID, e.EmployeeName, e.MaskedKey,
-			string(e.Provider), e.Account, e.RequestedModel, e.ResolvedModel,
-			e.PromptText, e.ResponseText, e.PromptTokens, e.CompletionTokens, e.TotalTokens, e.TokensSaved,
-			e.LatencyMs, e.StatusCode, e.IsError, e.ErrorMessage, e.ErrorDetail,
-		)
-		if err != nil {
-			log.Printf("[omniroute-postgres] insert prompt log warning: %v", err)
-			return
-		}
-
-		// Auto-retention pruning every 500 inserts to prevent unbounded disk growth on VPS
-		if pgInsertCounter.Add(1)%pgPruneEveryInserts == 0 {
-			pruneCtx, pruneCancel := context.WithTimeout(context.Background(), 10*time.Second)
-			_, pruneErr := db.ExecContext(
-				pruneCtx,
-				`DELETE FROM omni_prompt_logs WHERE id IN (SELECT id FROM omni_prompt_logs ORDER BY created_at DESC OFFSET $1)`,
-				effectiveMaxPostgresLogs(),
-			)
-			pruneCancel()
-			if pruneErr != nil {
-				log.Printf("[omniroute-postgres] auto-retention prune warning: %v", pruneErr)
+// FlushPromptLogs drains and commits all buffered prompt log entries to PostgreSQL within timeout.
+func FlushPromptLogs(timeout time.Duration) error {
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	pgMu.RLock()
+	connected := pgConnected
+	db := pgDB
+	pgMu.RUnlock()
+	if !connected || db == nil {
+		for {
+			select {
+			case <-promptLogQueue:
+			default:
+				return nil
 			}
 		}
-	}(entry)
+	}
+
+	ensurePromptLogWorker()
+	doneCh := make(chan struct{})
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	select {
+	case promptLogFlushReqs <- doneCh:
+	case <-timer.C:
+		return fmt.Errorf("timed out enqueuing prompt log flush after %s", timeout)
+	}
+
+	select {
+	case <-doneCh:
+		return nil
+	case <-timer.C:
+		return fmt.Errorf("timed out waiting for prompt log flush after %s", timeout)
+	}
 }
 
 // QueryPromptLogs queries prompt audit logs from PostgreSQL when connected, or falls back to in-memory ring buffer.

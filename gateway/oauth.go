@@ -429,22 +429,62 @@ func UpsertConnectedAccount(acc ConnectedAccount) (SavedGatewayAuth, error) {
 	return cfg, err
 }
 
-// RemoveConnectedAccount removes an account matching ID or Email.
+// RemoveConnectedAccount removes an account matching ID or Email from local config and PostgreSQL.
 func RemoveConnectedAccount(identifier string) (SavedGatewayAuth, error) {
+	ident := strings.TrimSpace(identifier)
+	var extraIdentifiers []string
+
 	configMu.Lock()
-	defer configMu.Unlock()
 	cfg := loadSavedAuthConfigLocked()
 
 	var filtered []ConnectedAccount
+	removedDefaultToken := false
 	for _, acc := range cfg.Accounts {
-		if acc.ID == identifier || strings.EqualFold(acc.Email, identifier) {
+		if acc.ID == ident || strings.EqualFold(acc.ID, ident) || strings.EqualFold(acc.Email, ident) {
+			if acc.ID != "" && !strings.EqualFold(acc.ID, ident) {
+				extraIdentifiers = append(extraIdentifiers, acc.ID)
+			}
+			if acc.Email != "" && !strings.EqualFold(acc.Email, ident) {
+				extraIdentifiers = append(extraIdentifiers, acc.Email)
+			}
+			if acc.AccessToken != "" && cfg.AgyOAuthToken == acc.AccessToken {
+				removedDefaultToken = true
+			}
 			continue
 		}
 		filtered = append(filtered, acc)
 	}
 	cfg.Accounts = filtered
+
+	hasRemainingAgy := false
+	var replacementToken, replacementProject string
+	for _, rem := range filtered {
+		prov := rem.Provider
+		if prov == "" {
+			prov = ProviderAntigravity
+		}
+		if prov == ProviderAntigravity && strings.TrimSpace(rem.AccessToken) != "" {
+			hasRemainingAgy = true
+			if !rem.Disabled && replacementToken == "" {
+				replacementToken = rem.AccessToken
+				replacementProject = rem.ProjectID
+			}
+		}
+	}
+	if removedDefaultToken || !hasRemainingAgy {
+		cfg.AgyOAuthToken = replacementToken
+		cfg.AgyProjectID = replacementProject
+	}
 	cfg.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 	err := saveAuthConfigLocked(cfg)
+	configMu.Unlock()
+
+	if ident != "" {
+		_ = DeleteAccountFromPostgres(ident)
+		for _, extra := range extraIdentifiers {
+			_ = DeleteAccountFromPostgres(extra)
+		}
+	}
 	return cfg, err
 }
 
@@ -798,6 +838,11 @@ func ExchangeClaudeInput(ctx context.Context, rawInput string, verifier string, 
 	return acc, nil
 }
 
+// RefreshOAuthToken exchanges an Antigravity Google OAuth refresh_token for a fresh access_token.
+func RefreshOAuthToken(ctx context.Context, acc *ConnectedAccount) error {
+	return RefreshAntigravityToken(ctx, acc)
+}
+
 func RefreshAntigravityToken(ctx context.Context, acc *ConnectedAccount) error {
 	form := url.Values{}
 	form.Set("client_id", AgyOAuthClientID)
@@ -883,6 +928,15 @@ func normalizeRateLimitModelID(model string) string {
 	if m == "" {
 		return ""
 	}
+	if idx := strings.Index(m, "➔"); idx >= 0 {
+		m = strings.TrimSpace(m[idx+len("➔"):])
+	}
+	if idx := strings.Index(m, "["); idx > 0 {
+		m = strings.TrimSpace(m[:idx])
+	}
+	if idx := strings.Index(m, "("); idx > 0 {
+		m = strings.TrimSpace(m[:idx])
+	}
 	if aliased, ok := defaultBuiltinAliases[m]; ok {
 		m = strings.ToLower(strings.TrimSpace(aliased))
 	}
@@ -903,23 +957,49 @@ func rateLimitProbeKeysForHint(modelHint string) []string {
 	keys := []string{m}
 	addUnique := func(extra string) {
 		if extra != "" && extra != m {
+			for _, existing := range keys {
+				if existing == extra {
+					return
+				}
+			}
 			keys = append(keys, extra)
 		}
 	}
 	switch {
 	case m == "gemini-4-carbon-high" || m == "gemini-4-carbon" ||
-		m == "gemini-4-argon-high" || m == "gemini-4-argon" ||
-		strings.HasPrefix(m, "gemini-3.1-pro") ||
+		strings.HasPrefix(m, "gemini-3.1-pro"):
+		addUnique("gemini-3.8-flash-high")
+		addUnique("claude-opus-4-6-thinking")
+	case m == "gemini-4-argon-high" || m == "gemini-4-argon" ||
 		strings.HasPrefix(m, "claude-opus"):
 		addUnique("claude-opus-4-6-thinking")
-	case m == "gemini-4-carbon-medium" || m == "gemini-4-argon-medium" ||
+	case m == "gemini-4-carbon-medium":
+		addUnique("gemini-3.8-flash-medium")
+		addUnique("claude-sonnet-4-6")
+	case m == "gemini-4-argon-medium" ||
 		strings.HasPrefix(m, "claude-sonnet"):
 		addUnique("claude-sonnet-4-6")
-	case m == "gemini-4-carbon-low" || m == "gemini-4-argon-low" ||
-		strings.HasPrefix(m, "gemini-3.8-flash"):
+	case m == "gemini-4-carbon-low" || m == "gemini-4-argon-low":
+		addUnique("gemini-3.8-flash-low")
+		addUnique("gemini-3-flash")
+	case m == "gemini-3.8-flash-high" || m == "gemini-3.8-flash":
+		addUnique("gemini-3.8-flash-high")
+		addUnique("gemini-3-flash")
+	case m == "gemini-3.8-flash-medium":
+		addUnique("gemini-3.8-flash-medium")
+		addUnique("gemini-3-flash")
+	case strings.HasPrefix(m, "gemini-3.8-flash"):
+		addUnique("gemini-3.8-flash-low")
 		addUnique("gemini-3-flash")
 	}
 	return keys
+}
+
+func isClaudePrimaryModelID(normModel string) bool {
+	return strings.HasPrefix(normModel, "claude-") ||
+		normModel == "gemini-4-argon-high" ||
+		normModel == "gemini-4-argon" ||
+		normModel == "gemini-4-argon-medium"
 }
 
 // RecordAccountModelRateLimit marks a specific model (or CCPA backend model tier) as rate-limited (HTTP 429)
@@ -946,6 +1026,7 @@ func IsAccountModelRateLimited(email, model string) bool {
 	if normEmail == "" {
 		return false
 	}
+	normModel := normalizeRateLimitModelID(model)
 	probes := rateLimitProbeKeysForHint(model)
 	if len(probes) == 0 {
 		return false
@@ -977,6 +1058,10 @@ func IsAccountModelRateLimited(email, model string) bool {
 		accountModelRLMu.Unlock()
 	}
 	if limited {
+		return true
+	}
+
+	if isClaudePrimaryModelID(normModel) && isAccountClaudeQuotaExhaustedFast(normEmail) {
 		return true
 	}
 
@@ -1014,6 +1099,135 @@ func clearSingleAccountModelRateLimit(email, model string) {
 	accountModelRLMu.Lock()
 	delete(accountModelRateLimits, normEmail+"|"+normModel)
 	accountModelRLMu.Unlock()
+}
+
+// setAccountLiveRole updates the live active role displayed on the Dashboard ("ĐANG XỬ LÝ" pill)
+// for an account that currently has at least one in-flight request.
+func setAccountLiveRole(email string, role string) {
+	cleanEmail := strings.TrimSpace(email)
+	cleanRole := strings.TrimSpace(role)
+	if cleanEmail == "" || cleanRole == "" {
+		return
+	}
+	if GetAccountInFlight(cleanEmail) <= 0 {
+		return
+	}
+	AcquireAccountInFlightWithRole(cleanEmail, cleanRole)
+	ReleaseAccountInFlight(cleanEmail)
+}
+
+func readAuthAccountsSnapshotFast() []ConnectedAccount {
+	configMu.Lock()
+	path := GatewayConfigFilePath()
+	var cfg SavedGatewayAuth
+	if cachedAuthCfg != nil && cachedAuthPath == path && (asyncFlushPending || time.Since(cachedAuthStatAt) < 500*time.Millisecond) {
+		cfg = *cachedAuthCfg
+	} else {
+		cfg = loadSavedAuthConfigLocked()
+	}
+	var out []ConnectedAccount
+	if len(cfg.Accounts) > 0 {
+		out = make([]ConnectedAccount, len(cfg.Accounts))
+		copy(out, cfg.Accounts)
+	}
+	configMu.Unlock()
+	return out
+}
+
+func lookupConnectedAntigravityAccountFast(emailOrID string) (ConnectedAccount, bool) {
+	target := strings.TrimSpace(emailOrID)
+	if target == "" || target == "anon" {
+		return ConnectedAccount{}, false
+	}
+	configMu.Lock()
+	path := GatewayConfigFilePath()
+	var cfg SavedGatewayAuth
+	if cachedAuthCfg != nil && cachedAuthPath == path && (asyncFlushPending || time.Since(cachedAuthStatAt) < 500*time.Millisecond) {
+		cfg = *cachedAuthCfg
+	} else {
+		cfg = loadSavedAuthConfigLocked()
+	}
+	var matched ConnectedAccount
+	found := false
+	for _, a := range cfg.Accounts {
+		if a.Disabled {
+			continue
+		}
+		p := a.Provider
+		if p == "" {
+			p = ProviderAntigravity
+		}
+		if p != ProviderAntigravity {
+			continue
+		}
+		if strings.EqualFold(a.Email, target) || strings.EqualFold(a.ID, target) {
+			matched = a
+			found = true
+			break
+		}
+	}
+	configMu.Unlock()
+	return matched, found
+}
+
+func isAccountClaudeQuotaExhaustedFast(emailOrID string) bool {
+	acc, ok := lookupConnectedAntigravityAccountFast(emailOrID)
+	if !ok || acc.WeeklyClaudePercent == nil {
+		return false
+	}
+	return *acc.WeeklyClaudePercent >= 100
+}
+
+func hasAlternateFlagshipAccount(endpoint, currentEmail, modelHint string, flagshipCandidates []string) bool {
+	if len(flagshipCandidates) == 0 {
+		return false
+	}
+	if endpoint == "" {
+		endpoint = DefaultCCPAEndpoint
+	}
+	accounts := readAuthAccountsSnapshotFast()
+	if len(accounts) <= 1 {
+		return false
+	}
+	nowUnix := time.Now().Unix()
+	nowTime := time.Now()
+	normCurrent := strings.ToLower(strings.TrimSpace(currentEmail))
+
+	for _, a := range accounts {
+		if a.Disabled {
+			continue
+		}
+		p := a.Provider
+		if p == "" {
+			p = ProviderAntigravity
+		}
+		if p != ProviderAntigravity {
+			continue
+		}
+		otherEmail := strings.ToLower(strings.TrimSpace(a.Email))
+		if otherEmail == "" || otherEmail == normCurrent || strings.EqualFold(a.ID, normCurrent) {
+			continue
+		}
+		if a.CooldownUntil > nowUnix {
+			continue
+		}
+		if modelHint != "" && IsAccountModelRateLimited(otherEmail, modelHint) {
+			continue
+		}
+		for _, cand := range flagshipCandidates {
+			cand = strings.TrimSpace(cand)
+			if cand == "" {
+				continue
+			}
+			if strings.HasPrefix(cand, "claude-") && a.WeeklyClaudePercent != nil && *a.WeeklyClaudePercent >= 100 {
+				continue
+			}
+			if !isDeadCCPAModel(endpoint, cand, nowTime) && !isAccountDeadCCPAModel(endpoint, otherEmail, cand, nowTime) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func buildInFlightReleaseFn(email string) func() {
@@ -1395,15 +1609,47 @@ func GetValidAccountTokenForModel(ctx context.Context, modelHint string) (string
 	}
 	if !HasConfiguredProviderAccount(ProviderAntigravity) {
 		saved := LoadSavedAuthConfig()
-		if strings.TrimSpace(saved.AgyOAuthToken) != "" {
+		if tok := strings.TrimSpace(saved.AgyOAuthToken); tok != "" {
 			email := "legacy-default"
 			if len(saved.Accounts) > 0 && saved.Accounts[0].Email != "" {
 				email = saved.Accounts[0].Email
 			}
-			return saved.AgyOAuthToken, saved.AgyProjectID, email, nil
+			return tok, saved.AgyProjectID, email, nil
+		}
+		if envTok := strings.TrimSpace(os.Getenv("AGY_OAUTH_TOKEN")); envTok != "" {
+			return envTok, strings.TrimSpace(os.Getenv("AGY_PROJECT_ID")), "env-default", nil
 		}
 	}
 	return "", "", "", fmt.Errorf("no valid Antigravity account or token configured")
+}
+
+func hasSavedAntigravityTokenFast() bool {
+	configMu.Lock()
+	path := GatewayConfigFilePath()
+	var cfg SavedGatewayAuth
+	if cachedAuthCfg != nil && cachedAuthPath == path && (asyncFlushPending || time.Since(cachedAuthStatAt) < 500*time.Millisecond) {
+		cfg = *cachedAuthCfg
+	} else {
+		cfg = loadSavedAuthConfigLocked()
+	}
+	configMu.Unlock()
+
+	if strings.TrimSpace(cfg.AgyOAuthToken) != "" {
+		return true
+	}
+	for _, a := range cfg.Accounts {
+		if a.Disabled {
+			continue
+		}
+		p := a.Provider
+		if p == "" {
+			p = ProviderAntigravity
+		}
+		if p == ProviderAntigravity {
+			return true
+		}
+	}
+	return false
 }
 
 // defaultBuiltinAliases maps popular industry model names to optimal OmniRoute targets.

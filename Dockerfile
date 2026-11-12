@@ -8,7 +8,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /omni-gateway ./cmd/omni-gateway
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -buildvcs=false -trimpath -ldflags="-s -w" -o /omni-gateway ./cmd/omni-gateway
 
 # Stage 2: Minimal hardened Alpine runtime
 FROM alpine:3.20
@@ -30,4 +30,4 @@ EXPOSE 8787 20128
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
   CMD wget -qO- http://127.0.0.1:8787/health || exit 1
 
-ENTRYPOINT ["/bin/sh", "-c", "chown -R omni:omni /data 2>/dev/null || true; exec su-exec omni /usr/local/bin/omni-gateway \"$@\"", "--"]
+ENTRYPOINT ["/bin/sh", "-c", "if ! su-exec omni test -w /data || { [ -e /data/gateway_config.json ] && ! su-exec omni test -w /data/gateway_config.json; }; then chown -R omni:omni /data 2>/dev/null || true; fi; exec su-exec omni /usr/local/bin/omni-gateway \"$@\"", "--"]
