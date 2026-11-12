@@ -2395,7 +2395,7 @@ func buildCCPACandidatesWithCache(endpoint, accScope string, resolved ResolvedMo
 
 	if isDefaultProdEndpoint && isConnected {
 		appendClaude := func(models ...string) {
-			if claudeExhausted {
+			if claudeExhausted || isAccountClaudeQuotaExhaustedFast(scope) {
 				return
 			}
 			for _, cm := range models {
@@ -2433,19 +2433,23 @@ func buildCCPACandidatesWithCache(endpoint, accScope string, resolved ResolvedMo
 					)
 				}
 			case ThinkingLevelMedium:
-				raw = append(raw, "gemini-4-carbon-medium")
-				appendClaude("claude-sonnet-4-6", "claude-opus-4-6-thinking")
 				raw = append(raw,
+					"gemini-4-carbon-medium",
 					"gemini-3.8-flash-medium",
 					"gemini-3.8-flash-high",
+				)
+				appendClaude("claude-sonnet-4-6", "claude-opus-4-6-thinking")
+				raw = append(raw,
 					"gemini-3.8-flash-tiered",
 					"gemini-3-flash",
 				)
 			default:
-				raw = append(raw, "gemini-4-carbon-high")
+				raw = append(raw,
+					"gemini-4-carbon-high",
+					"gemini-3.8-flash-high",
+				)
 				appendClaude("claude-opus-4-6-thinking", "claude-sonnet-4-6")
 				raw = append(raw,
-					"gemini-3.8-flash-high",
 					"gemini-3.8-flash-tiered",
 					"gemini-3-flash",
 				)

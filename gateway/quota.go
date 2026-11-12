@@ -194,6 +194,34 @@ func syncAccountTierIfChanged(acc *ConnectedAccount, tier string) {
 	configMu.Unlock()
 }
 
+func syncAccountClaudePercentIfChanged(acc *ConnectedAccount, claudePct int) {
+	if acc == nil {
+		return
+	}
+	configMu.Lock()
+	cfg := loadSavedAuthConfigLocked()
+	changed := false
+	for i, existing := range cfg.Accounts {
+		existingProv := existing.Provider
+		if existingProv == "" {
+			existingProv = ProviderAntigravity
+		}
+		if (acc.ID != "" && existing.ID == acc.ID) ||
+			(existingProv == ProviderAntigravity && acc.Email != "" && strings.EqualFold(existing.Email, acc.Email)) {
+			if cfg.Accounts[i].WeeklyClaudePercent == nil || *cfg.Accounts[i].WeeklyClaudePercent != claudePct {
+				cfg.Accounts[i].WeeklyClaudePercent = &claudePct
+				changed = true
+			}
+			break
+		}
+	}
+	if changed {
+		cfg.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+		_ = saveAuthConfigLocked(cfg)
+	}
+	configMu.Unlock()
+}
+
 // MaskEmail masks email addresses for display e.g. "phongsaigon11@gmail.com" -> "pho***@gmail.com".
 func MaskEmail(email string) string {
 	parts := strings.Split(email, "@")
@@ -1379,11 +1407,23 @@ func inspectAntigravityAccount(ctx context.Context, acc *ConnectedAccount, detai
 						if b.BucketID == "3p-weekly" || b.Window == "weekly" {
 							claudeWeeklyPercent = pct
 							claudeWeeklyReset = formatResetDuration(b.ResetTime, "⏱️ Đặt lại sau 5d")
+							if (pct <= 0 || b.IsExhausted) && strings.TrimSpace(b.ResetTime) != "" {
+								if rAt, err := time.Parse(time.RFC3339, strings.TrimSpace(b.ResetTime)); err == nil && rAt.After(time.Now()) {
+									RecordAccountModelRateLimitUntil(acc.Email, "claude-opus-4-6-thinking", rAt)
+									RecordAccountModelRateLimitUntil(acc.Email, "claude-sonnet-4-6", rAt)
+								}
+							}
 						} else if b.BucketID == "3p-5h" || b.Window == "5h" {
 							claude5hPercent = pct
 							hasClaude5hFromSummary = true
 							if strings.TrimSpace(b.ResetTime) != "" {
 								claude5hReset = formatResetDuration(b.ResetTime, "⏱️ Đặt lại sau 2h 55m")
+								if pct <= 0 || b.IsExhausted {
+									if rAt, err := time.Parse(time.RFC3339, strings.TrimSpace(b.ResetTime)); err == nil && rAt.After(time.Now()) {
+										RecordAccountModelRateLimitUntil(acc.Email, "claude-opus-4-6-thinking", rAt)
+										RecordAccountModelRateLimitUntil(acc.Email, "claude-sonnet-4-6", rAt)
+									}
+								}
 							}
 						}
 					}
@@ -1391,6 +1431,19 @@ func inspectAntigravityAccount(ctx context.Context, acc *ConnectedAccount, detai
 			}
 		}
 	}
+
+	if claudeWeeklyPercent <= 0 || (hasClaude5hFromSummary && claude5hPercent <= 0) {
+		RecordAccountModelRateLimit(acc.Email, "claude-opus-4-6-thinking", 6*24*time.Hour)
+		RecordAccountModelRateLimit(acc.Email, "claude-sonnet-4-6", 6*24*time.Hour)
+		used100 := 100
+		acc.WeeklyClaudePercent = &used100
+	} else {
+		remPct := claudeWeeklyPercent
+		acc.WeeklyClaudePercent = &remPct
+		ClearAccountModelRateLimit(acc.Email, "claude-opus-4-6-thinking")
+		ClearAccountModelRateLimit(acc.Email, "claude-sonnet-4-6")
+	}
+	syncAccountClaudePercentIfChanged(acc, *acc.WeeklyClaudePercent)
 
 	// 3. Call fetchAvailableModels & retrieveUserQuota for live per-model buckets and supported model IDs
 	var liveState agyLiveQuotaState

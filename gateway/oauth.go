@@ -1663,11 +1663,15 @@ func lookupConnectedAntigravityAccountFast(emailOrID string) (ConnectedAccount, 
 }
 
 func isAccountClaudeQuotaExhaustedFast(emailOrID string) bool {
-	acc, ok := lookupConnectedAntigravityAccountFast(emailOrID)
+	norm := strings.ToLower(strings.TrimSpace(emailOrID))
+	if norm == "" {
+		return false
+	}
+	acc, ok := lookupConnectedAntigravityAccountFast(norm)
 	if !ok || acc.WeeklyClaudePercent == nil {
 		return false
 	}
-	return *acc.WeeklyClaudePercent >= 100
+	return *acc.WeeklyClaudePercent >= 100 || *acc.WeeklyClaudePercent <= 0
 }
 
 func hasAlternateFlagshipAccount(endpoint, currentEmail, modelHint string, flagshipCandidates []string) bool {

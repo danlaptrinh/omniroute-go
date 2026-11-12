@@ -636,8 +636,8 @@ func TestCCPAModelVersionHeaderLiveActiveRoleHonestLogsAndMultiAccountFlagshipFa
 			}
 		}
 		carbonFresh := buildCCPACandidatesWithCache(DefaultCCPAEndpoint, "claude-fresh@gmail.com", ResolveModel("antigravity/gemini-4-carbon-high", nil), false)
-		if len(carbonFresh) < 3 || carbonFresh[0] != "gemini-4-carbon-high" || carbonFresh[1] != "claude-opus-4-6-thinking" || carbonFresh[2] != "claude-sonnet-4-6" {
-			t.Fatalf("expected connected Carbon High (fresh Claude) = [gemini-4-carbon-high, claude-opus-4-6-thinking, claude-sonnet-4-6, ...], got %v", carbonFresh)
+		if len(carbonFresh) < 4 || carbonFresh[0] != "gemini-4-carbon-high" || carbonFresh[1] != "gemini-3.8-flash-high" || carbonFresh[2] != "claude-opus-4-6-thinking" || carbonFresh[3] != "claude-sonnet-4-6" {
+			t.Fatalf("expected connected Carbon High (fresh Claude) = [gemini-4-carbon-high, gemini-3.8-flash-high, claude-opus-4-6-thinking, claude-sonnet-4-6, ...], got %v", carbonFresh)
 		}
 
 		// Gemini 3.1 Pro High maps primary to claude-opus-4-6-thinking on fresh Claude account, or gemini-3.8-flash-high when Claude is exhausted

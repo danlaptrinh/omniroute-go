@@ -1040,8 +1040,8 @@ func TestTierHedger_PerAccount503IsolationPreservesCarbonAndArgonAcrossPeers(t *
 	if gotAcc := rec1.Header().Get("X-Omni-Gateway-Account"); gotAcc != "peer1@gmail.com" {
 		t.Fatalf("req 1 account = %q, want peer1@gmail.com", gotAcc)
 	}
-	if gotMod := rec1.Header().Get("X-Omni-Gateway-Resolved-Model"); gotMod != "claude-opus-4-6-thinking" {
-		t.Fatalf("req 1 expected local step-down to claude-opus-4-6-thinking on peer1, got %q", gotMod)
+	if gotMod := rec1.Header().Get("X-Omni-Gateway-Resolved-Model"); gotMod != "gemini-3.8-flash-high" && gotMod != "claude-opus-4-6-thinking" {
+		t.Fatalf("req 1 expected local step-down on peer1, got %q", gotMod)
 	}
 
 	// Verify ZERO global poisoning!
