@@ -3773,21 +3773,111 @@ docker compose up -d --build</pre>
           const provBadge = a.provider === 'antigravity' ? '<span class="badge badge-antigravity">Google Antigravity</span>'
             : (a.provider === 'claude-code' ? '<span class="badge badge-purple">Claude Code</span>' : '<span class="badge badge-green">Alibaba Token Plan</span>');
           const tierBadge = a.tier ? formatAccountTierBadge(a.tier) : '';
+          const proxyBadge = a.proxy_url
+            ? '<span class="badge" style="background:rgba(56,189,248,0.16);color:#38bdf8;border:1px solid rgba(56,189,248,0.42);font-family:monospace;font-size:11px;">🌐 Proxy: ' + htmlEscape(a.proxy_url) + '</span>'
+            : '<span class="badge" style="background:rgba(148,163,184,0.12);color:#94a3b8;border:1px solid rgba(148,163,184,0.28);font-size:10.5px;">🔗 Direct TLS (Isolated)</span>';
+          const safeId = htmlEscape(a.id || '');
+          const safeEmail = htmlEscape(a.email || a.id || '');
+          const safeProxy = htmlEscape(a.proxy_url || '');
           html += '<div style="display:flex;justify-content:space-between;align-items:center;padding:10px 14px;background:var(--card-inner);border:1px solid var(--border);border-radius:8px;flex-wrap:wrap;gap:10px;">' +
             '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">' +
               provBadge +
               tierBadge +
               '<strong style="color:#38bdf8;font-family:monospace;font-size:13px;">' + htmlEscape(a.email || a.label || a.id) + '</strong>' +
+              proxyBadge +
               (a.project_id ? '<code style="font-size:11px;color:#94a3b8;background:#0b0f17;padding:2px 6px;border-radius:4px;">Project: ' + htmlEscape(a.project_id) + '</code>' : '') +
               '<span style="font-size:11.5px;color:#34d399;">🟢 ' + (a.requests_ok || a.success_count || 0) + ' req (' + Number(a.total_tokens || 0).toLocaleString() + ' tokens)</span>' +
             '</div>' +
-            '<button style="padding:4px 10px;font-size:11.5px;color:#f87171;" onclick="deleteConnectedAccount(\'' + htmlEscape(a.id) + '\', \'' + htmlEscape(a.email || a.id) + '\')">🗑️ Xoá tài khoản</button>' +
+            '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">' +
+              '<button style="padding:4px 10px;font-size:11.5px;color:#38bdf8;border-color:rgba(56,189,248,0.4);" data-acc-id="' + safeId + '" data-acc-email="' + safeEmail + '" data-acc-proxy="' + safeProxy + '" onclick="openAccountProxyModal(this.dataset.accId, this.dataset.accEmail, this.dataset.accProxy)">🌐 Proxy</button>' +
+              '<button style="padding:4px 10px;font-size:11.5px;color:#f87171;" onclick="deleteConnectedAccount(\'' + safeId + '\', \'' + safeEmail + '\')">🗑️ Xoá tài khoản</button>' +
+            '</div>' +
           '</div>';
         }
         html += '</div>';
         box.innerHTML = html;
       } catch (err) {
         box.innerHTML = '<div style="color:#f87171;">Lỗi tải danh sách: ' + err.message + '</div>';
+      }
+    }
+
+    function ensureAccountProxyModal() {
+      let modal = document.getElementById('accountProxyModal');
+      if (modal) return modal;
+      modal = document.createElement('div');
+      modal.id = 'accountProxyModal';
+      modal.setAttribute('role', 'dialog');
+      modal.setAttribute('aria-modal', 'true');
+      modal.style.cssText = 'display:none;position:fixed;inset:0;z-index:9999;background:rgba(2,6,23,0.78);align-items:center;justify-content:center;padding:16px;';
+      modal.innerHTML =
+        '<div style="width:100%;max-width:520px;background:#0f172a;border:1px solid rgba(56,189,248,0.45);border-radius:12px;padding:18px 20px;box-shadow:0 20px 50px rgba(0,0,0,0.6);">' +
+          '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">' +
+            '<strong style="color:#f8fafc;font-size:15px;">🌐 Cấu hình Proxy riêng theo Tài khoản</strong>' +
+            '<button style="padding:2px 8px;font-size:12px;color:#94a3b8;" onclick="closeAccountProxyModal()">✕</button>' +
+          '</div>' +
+          '<div id="accountProxyModalTarget" style="font-family:monospace;font-size:12.5px;color:#38bdf8;margin-bottom:10px;"></div>' +
+          '<div style="font-size:12px;color:#94a3b8;margin-bottom:10px;line-height:1.5;">Hỗ trợ <code style="color:#e2e8f0;">http://</code>, <code style="color:#e2e8f0;">https://</code>, <code style="color:#e2e8f0;">socks5://</code>, <code style="color:#e2e8f0;">socks5h://</code> (định dạng <code style="color:#34d399;">socks5://user:pass@ip:port</code>). Để trống để dùng kết nối Direct TLS độc lập của VPS.</div>' +
+          '<input id="accountProxyInput" type="text" placeholder="Ví dụ: socks5h://user:pass@198.51.100.10:1080" style="width:100%;box-sizing:border-box;padding:9px 11px;border-radius:8px;border:1px solid #334155;background:#020617;color:#f8fafc;font-family:monospace;font-size:12.5px;margin-bottom:10px;" />' +
+          '<div id="accountProxyMsg" style="font-size:12px;min-height:18px;margin-bottom:10px;"></div>' +
+          '<div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;">' +
+            '<button style="padding:6px 12px;font-size:12px;color:#fbbf24;border-color:rgba(251,191,36,0.4);" onclick="document.getElementById(\'accountProxyInput\').value=\'\';saveAccountProxyModal();">🔗 Xoá Proxy (Direct)</button>' +
+            '<div style="display:flex;gap:8px;">' +
+              '<button style="padding:6px 12px;font-size:12px;color:#94a3b8;" onclick="closeAccountProxyModal()">Huỷ</button>' +
+              '<button id="accountProxySaveBtn" style="padding:6px 14px;font-size:12px;background:#0284c7;color:#fff;border-color:#38bdf8;font-weight:700;" onclick="saveAccountProxyModal()">💾 Lưu Proxy</button>' +
+            '</div>' +
+          '</div>' +
+        '</div>';
+      document.body.appendChild(modal);
+      return modal;
+    }
+
+    function openAccountProxyModal(id, email, currentProxy) {
+      const modal = ensureAccountProxyModal();
+      modal.dataset.accId = id || '';
+      modal.dataset.accEmail = email || '';
+      document.getElementById('accountProxyModalTarget').textContent = 'Tài khoản: ' + (email || id);
+      const inp = document.getElementById('accountProxyInput');
+      inp.value = (currentProxy && currentProxy.indexOf(':***@') === -1) ? currentProxy : '';
+      inp.placeholder = currentProxy ? ('Đang dùng: ' + currentProxy + ' (nhập mới để đổi)') : 'Ví dụ: socks5h://user:pass@198.51.100.10:1080';
+      document.getElementById('accountProxyMsg').innerHTML = '';
+      modal.style.display = 'flex';
+      setTimeout(() => inp.focus(), 20);
+    }
+
+    function closeAccountProxyModal() {
+      const modal = document.getElementById('accountProxyModal');
+      if (modal) modal.style.display = 'none';
+    }
+
+    async function saveAccountProxyModal() {
+      const modal = document.getElementById('accountProxyModal');
+      if (!modal) return;
+      const id = modal.dataset.accId || '';
+      const email = modal.dataset.accEmail || '';
+      const proxyUrl = (document.getElementById('accountProxyInput').value || '').trim();
+      const msg = document.getElementById('accountProxyMsg');
+      const btn = document.getElementById('accountProxySaveBtn');
+      msg.innerHTML = '<span style="color:#38bdf8;">⏳ Đang lưu cấu hình Proxy...</span>';
+      if (btn) btn.disabled = true;
+      try {
+        const r = await fetch('/v1/providers/account-proxy', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({id: id, email: email, proxy_url: proxyUrl})
+        });
+        const d = await r.json();
+        if (!r.ok) {
+          const errText = (d && d.error && d.error.message) ? d.error.message : ('HTTP ' + r.status);
+          msg.innerHTML = '<span style="color:#f87171;">❌ ' + htmlEscape(errText) + '</span>';
+          return;
+        }
+        msg.innerHTML = '<span style="color:#34d399;">✔ Đã cập nhật Proxy thành công!</span>';
+        loadProvidersAndAccounts();
+        setTimeout(() => closeAccountProxyModal(), 350);
+      } catch (err) {
+        msg.innerHTML = '<span style="color:#f87171;">❌ Lỗi kết nối: ' + htmlEscape(err.message) + '</span>';
+      } finally {
+        if (btn) btn.disabled = false;
       }
     }
 

@@ -73,7 +73,9 @@ func (u *streamCacheMockUpstream) HandleChatCompletion(
 }
 
 type nonCachingAnthropicUpstream struct {
-	calls atomic.Int64
+	calls     atomic.Int64
+	errorCode int
+	errorBody string
 }
 
 func (u *nonCachingAnthropicUpstream) HandleChatCompletion(
@@ -84,6 +86,41 @@ func (u *nonCachingAnthropicUpstream) HandleChatCompletion(
 	incomingAuth string,
 ) error {
 	u.calls.Add(1)
+	if u.errorCode >= 400 {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Retry-After", "3")
+		w.WriteHeader(u.errorCode)
+		_, _ = io.WriteString(w, u.errorBody)
+		return nil
+	}
+
+	if req.Stream {
+		w.Header().Set("X-Omni-Gateway-Tokens", "23")
+		w.Header().Set("X-Omni-Gateway-Account", "ultra-1@gmail.com")
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+
+		// Intentionally split SSE chunks across partial writes to verify real-time line framing.
+		chunks := []string{
+			": keepalive\n\n",
+			"data: {\"id\":\"chatcmpl-claude-stream\",\"object\":\"chat.completion.chunk\",\"model\":\"" + req.Model + "\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"reasoning_content\":\"Step 1. \"}}]}\n\n",
+			"data: {\"id\":\"chatcmpl-claude-stream\",\"object\":\"chat.completion.chunk\",\"model\":\"" + req.Model + "\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"Step 2.\"}}]}\n",
+			"\ndata: {\"id\":\"chatcmpl-claude-stream\",\"object\":\"chat.completion.chunk\",\"model\":\"" + req.Model + "\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Native Anthropic \"}}]}\n\n",
+			"data: {\"id\":\"chatcmpl-claude-stream\",\"object\":\"chat.completion.chunk\",\"model\":\"" + req.Model + "\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"SSE on MISS!\"}}]}\n\n",
+			"data: {\"id\":\"chatcmpl-claude-stream\",\"object\":\"chat.completion.chunk\",\"model\":\"" + req.Model + "\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":14,\"completion_tokens\":9,\"total_tokens\":23}}\n\n",
+			"data: [DONE]\n\n",
+		}
+		for _, part := range chunks {
+			if _, err := io.WriteString(w, part); err != nil {
+				return err
+			}
+			if fl, ok := w.(http.Flusher); ok {
+				fl.Flush()
+			}
+		}
+		return nil
+	}
+
 	resp := OpenAIChatResponse{
 		ID:      "chatcmpl-claude-provider",
 		Object:  "chat.completion",
@@ -116,7 +153,10 @@ func TestStreamCache_ComputeKeyDeterminismAndToolsBypass(t *testing.T) {
 	tmpCfg := filepath.Join(t.TempDir(), "gateway_config.json")
 	t.Setenv("GATEWAY_CONFIG_FILE", tmpCfg)
 	GetGlobalCache().Clear()
-	defer GetGlobalCache().Clear()
+	defer func() {
+		FlushPendingConfigSave()
+		GetGlobalCache().Clear()
+	}()
 
 	zeroTemp := 0.0
 	lowTemp := 0.25
@@ -208,6 +248,7 @@ func TestStreamCache_ChatCompletionsCrossHitSymmetryAndIncludeUsage(t *testing.T
 	GetGlobalCache().Clear()
 	ClearLogs()
 	defer func() {
+		FlushPendingConfigSave()
 		GetGlobalCache().Clear()
 		ClearLogs()
 	}()
@@ -338,7 +379,10 @@ func TestStreamCache_AnthropicMessagesNonStreamAndSSEHit(t *testing.T) {
 	tmpCfg := filepath.Join(t.TempDir(), "gateway_config.json")
 	t.Setenv("GATEWAY_CONFIG_FILE", tmpCfg)
 	GetGlobalCache().Clear()
-	defer GetGlobalCache().Clear()
+	defer func() {
+		FlushPendingConfigSave()
+		GetGlobalCache().Clear()
+	}()
 
 	apiKey, err := CreateAPIKey("anthropic-cache-emp", false, true, true, false)
 	if err != nil {
@@ -350,7 +394,7 @@ func TestStreamCache_AnthropicMessagesNonStreamAndSSEHit(t *testing.T) {
 	srv := NewServer(GatewayConfig{}, NewResolver(), up)
 	handler := srv.Handler()
 
-	// 1. Initial non-stream /v1/messages MISS (with system blocks array)
+	// 1. Initial non-stream /v1/messages MISS (with system blocks array) MUST return native Anthropic JSON!
 	missBody := `{"model":"claude-code/claude-sonnet-4-6","max_tokens":256,"system":[{"type":"text","text":"Be concise."}],"messages":[{"role":"user","content":"verify anthropic cache"}],"stream":false}`
 	req1 := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(missBody))
 	req1.Header.Set("x-api-key", apiKey.Key)
@@ -359,6 +403,36 @@ func TestStreamCache_AnthropicMessagesNonStreamAndSSEHit(t *testing.T) {
 	handler.ServeHTTP(rec1, req1)
 	if rec1.Code != http.StatusOK || rec1.Header().Get("X-Omni-Gateway-Cache") != "MISS" {
 		t.Fatalf("expected initial /v1/messages MISS, got code=%d cache=%q", rec1.Code, rec1.Header().Get("X-Omni-Gateway-Cache"))
+	}
+	if strings.Contains(rec1.Body.String(), `"object":"chat.completion"`) || strings.Contains(rec1.Body.String(), `"choices"`) {
+		t.Fatalf("/v1/messages non-stream MISS leaked raw OpenAI JSON instead of Anthropic JSON:\n%s", rec1.Body.String())
+	}
+	var missAnthJSON struct {
+		ID         string `json:"id"`
+		Type       string `json:"type"`
+		Role       string `json:"role"`
+		StopReason string `json:"stop_reason"`
+		Content    []struct {
+			Type     string `json:"type"`
+			Text     string `json:"text"`
+			Thinking string `json:"thinking"`
+		} `json:"content"`
+		Usage struct {
+			InputTokens  int `json:"input_tokens"`
+			OutputTokens int `json:"output_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(rec1.Body.Bytes(), &missAnthJSON); err != nil {
+		t.Fatalf("invalid Anthropic JSON response on non-stream MISS: %v\nbody=%s", err, rec1.Body.String())
+	}
+	if !strings.HasPrefix(missAnthJSON.ID, "msg_") || missAnthJSON.Type != "message" || missAnthJSON.Role != "assistant" || missAnthJSON.StopReason != "end_turn" {
+		t.Fatalf("unexpected Anthropic JSON envelope on MISS: %+v", missAnthJSON)
+	}
+	if len(missAnthJSON.Content) != 2 || missAnthJSON.Content[0].Type != "thinking" || missAnthJSON.Content[0].Thinking != "Thinking block verified." || missAnthJSON.Content[1].Text != "Anthropic wire format verified!" {
+		t.Fatalf("unexpected Anthropic content blocks on MISS: %+v", missAnthJSON.Content)
+	}
+	if missAnthJSON.Usage.InputTokens != 14 || missAnthJSON.Usage.OutputTokens != 9 {
+		t.Fatalf("unexpected Anthropic usage on MISS: %+v", missAnthJSON.Usage)
 	}
 
 	// 2. Non-stream /v1/messages HIT (matching system string equivalent!)
@@ -440,6 +514,166 @@ func TestStreamCache_AnthropicMessagesNonStreamAndSSEHit(t *testing.T) {
 	}
 	if up.calls.Load() != 1 {
 		t.Fatalf("expected upstream called exactly once across MISS + JSON HIT + SSE HIT, got %d", up.calls.Load())
+	}
+}
+
+func TestStreamCache_AnthropicMessagesStreamingMissAdapterErrorPassthroughAndProxyAPI(t *testing.T) {
+	tmpCfg := filepath.Join(t.TempDir(), "gateway_config.json")
+	t.Setenv("GATEWAY_CONFIG_FILE", tmpCfg)
+	GetGlobalCache().Clear()
+	defer func() {
+		FlushPendingConfigSave()
+		GetGlobalCache().Clear()
+	}()
+
+	adminKey, err := CreateAPIKey("anthropic-stream-miss-admin", true, true, true, false)
+	if err != nil {
+		t.Fatalf("CreateAPIKey failed: %v", err)
+	}
+
+	up := &nonCachingAnthropicUpstream{}
+	srv := NewServer(GatewayConfig{}, NewResolver(), up)
+	handler := srv.Handler()
+
+	// 1. /v1/messages stream:true MISS -> real-time Anthropic SSE adapter
+	streamMissBody := `{"model":"claude-code/claude-sonnet-4-6","max_tokens":256,"temperature":0,"messages":[{"role":"user","content":"stream miss anthropic sse"}],"stream":true}`
+	r1 := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(streamMissBody))
+	r1.Header.Set("x-api-key", adminKey.Key)
+	r1.Header.Set("Content-Type", "application/json")
+	w1 := httptest.NewRecorder()
+	handler.ServeHTTP(w1, r1)
+
+	if w1.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on /v1/messages stream:true MISS, got %d: %s", w1.Code, w1.Body.String())
+	}
+	if w1.Header().Get("X-Omni-Gateway-Cache") != "MISS" {
+		t.Fatalf("expected X-Omni-Gateway-Cache=MISS, got %q", w1.Header().Get("X-Omni-Gateway-Cache"))
+	}
+	if w1.Header().Get("X-Accel-Buffering") != "no" {
+		t.Fatalf("expected X-Accel-Buffering=no on /v1/messages stream:true MISS, got %q", w1.Header().Get("X-Accel-Buffering"))
+	}
+	if !strings.HasPrefix(w1.Header().Get("Content-Type"), "text/event-stream") {
+		t.Fatalf("expected Content-Type text/event-stream, got %q", w1.Header().Get("Content-Type"))
+	}
+
+	missSSE := w1.Body.String()
+	if strings.Contains(missSSE, "chat.completion.chunk") || strings.Contains(missSSE, "[DONE]") {
+		t.Fatalf("/v1/messages stream:true MISS leaked raw OpenAI SSE wire bytes:\n%s", missSSE)
+	}
+	for _, mustHave := range []string{
+		"event: message_start\n",
+		"event: content_block_start\n",
+		`"type":"thinking_delta"`,
+		`"thinking":"Step 1. "`,
+		`"thinking":"Step 2."`,
+		`"type":"text_delta"`,
+		`"text":"Native Anthropic "`,
+		`"text":"SSE on MISS!"`,
+		"event: content_block_stop\n",
+		"event: message_delta\n",
+		`"stop_reason":"end_turn"`,
+		`"output_tokens":9`,
+		"event: message_stop\n",
+	} {
+		if !strings.Contains(missSSE, mustHave) {
+			t.Fatalf("/v1/messages stream:true MISS missing %q in:\n%s", mustHave, missSSE)
+		}
+	}
+
+	// 2. Subsequent stream:true HIT and stream:false HIT must hit GetGlobalCache() with 0 extra upstream calls!
+	r2 := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(streamMissBody))
+	r2.Header.Set("x-api-key", adminKey.Key)
+	r2.Header.Set("Content-Type", "application/json")
+	w2 := httptest.NewRecorder()
+	handler.ServeHTTP(w2, r2)
+	if w2.Code != http.StatusOK || w2.Header().Get("X-Omni-Gateway-Cache") != "HIT" {
+		t.Fatalf("expected stream:true HIT after stream:true MISS, got code=%d cache=%q", w2.Code, w2.Header().Get("X-Omni-Gateway-Cache"))
+	}
+	if !strings.Contains(w2.Body.String(), `"text":"Native Anthropic SSE on MISS!"`) || !strings.Contains(w2.Body.String(), "event: message_stop\n") {
+		t.Fatalf("unexpected stream:true HIT SSE body:\n%s", w2.Body.String())
+	}
+
+	nonStreamHitBody := `{"model":"claude-code/claude-sonnet-4-6","max_tokens":256,"temperature":0,"messages":[{"role":"user","content":"stream miss anthropic sse"}],"stream":false}`
+	r3 := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(nonStreamHitBody))
+	r3.Header.Set("x-api-key", adminKey.Key)
+	r3.Header.Set("Content-Type", "application/json")
+	w3 := httptest.NewRecorder()
+	handler.ServeHTTP(w3, r3)
+	if w3.Code != http.StatusOK || w3.Header().Get("X-Omni-Gateway-Cache") != "HIT" {
+		t.Fatalf("expected stream:false HIT after stream:true MISS, got code=%d cache=%q", w3.Code, w3.Header().Get("X-Omni-Gateway-Cache"))
+	}
+	if !strings.Contains(w3.Body.String(), `"type":"message"`) || !strings.Contains(w3.Body.String(), `"Native Anthropic SSE on MISS!"`) {
+		t.Fatalf("unexpected stream:false HIT JSON body:\n%s", w3.Body.String())
+	}
+	if up.calls.Load() != 1 {
+		t.Fatalf("expected upstream calls == 1 across stream MISS -> stream HIT -> JSON HIT, got %d", up.calls.Load())
+	}
+
+	// 3. Non-200 error passthrough on BOTH stream:true and stream:false
+	up.errorCode = http.StatusTooManyRequests
+	up.errorBody = `{"error":{"message":"upstream rate limit","type":"rate_limit_error"}}`
+	for _, streamFlag := range []string{"true", "false"} {
+		errPayload := `{"model":"claude-code/claude-sonnet-4-6","max_tokens":128,"temperature":0,"messages":[{"role":"user","content":"unseen prompt ` + streamFlag + `"}],"stream":` + streamFlag + `}`
+		re := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(errPayload))
+		re.Header.Set("x-api-key", adminKey.Key)
+		re.Header.Set("Content-Type", "application/json")
+		we := httptest.NewRecorder()
+		handler.ServeHTTP(we, re)
+		if we.Code != http.StatusTooManyRequests {
+			t.Fatalf("expected 429 passthrough for stream=%s, got %d", streamFlag, we.Code)
+		}
+		if we.Header().Get("Retry-After") != "3" {
+			t.Fatalf("expected Retry-After header preserved for stream=%s, got %q", streamFlag, we.Header().Get("Retry-After"))
+		}
+		if we.Body.String() != up.errorBody {
+			t.Fatalf("expected exact error body passthrough for stream=%s, got %q", streamFlag, we.Body.String())
+		}
+	}
+
+	// 4. Per-account Proxy API (/v1/providers/account-proxy + masked /v1/providers + UI modal)
+	if _, err := UpsertConnectedAccount(ConnectedAccount{
+		ID:          "acc-ultra-1",
+		Provider:    ProviderAntigravity,
+		Email:       "ultra-proxy@gmail.com",
+		AccessToken: "ya29.ultra",
+	}); err != nil {
+		t.Fatalf("UpsertConnectedAccount failed: %v", err)
+	}
+
+	// Reject unsupported scheme
+	badProxyReq := httptest.NewRequest(http.MethodPost, "/v1/providers/account-proxy", strings.NewReader(`{"email":"ultra-proxy@gmail.com","proxy_url":"ftp://1.2.3.4:21"}`))
+	badProxyReq.Header.Set("Authorization", "Bearer "+adminKey.Key)
+	badProxyRec := httptest.NewRecorder()
+	handler.ServeHTTP(badProxyRec, badProxyReq)
+	if badProxyRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 on unsupported proxy scheme, got %d", badProxyRec.Code)
+	}
+
+	// Save valid SOCKS5H proxy with credentials and verify masked password in response + GET /v1/providers
+	setProxyReq := httptest.NewRequest(http.MethodPost, "/v1/providers/account-proxy", strings.NewReader(`{"email":"ultra-proxy@gmail.com","proxy_url":"socks5h://omniuser:supersecret@198.51.100.25:1080"}`))
+	setProxyReq.Header.Set("Authorization", "Bearer "+adminKey.Key)
+	setProxyRec := httptest.NewRecorder()
+	handler.ServeHTTP(setProxyRec, setProxyReq)
+	if setProxyRec.Code != http.StatusOK {
+		t.Fatalf("POST /v1/providers/account-proxy failed (%d): %s", setProxyRec.Code, setProxyRec.Body.String())
+	}
+	if !strings.Contains(setProxyRec.Body.String(), `"socks5h://omniuser:***@198.51.100.25:1080"`) || strings.Contains(setProxyRec.Body.String(), "supersecret") {
+		t.Fatalf("expected masked proxy credentials in response, got %s", setProxyRec.Body.String())
+	}
+
+	provReq := httptest.NewRequest(http.MethodGet, "/v1/providers", nil)
+	provReq.Header.Set("Authorization", "Bearer "+adminKey.Key)
+	provRec := httptest.NewRecorder()
+	handler.ServeHTTP(provRec, provReq)
+	if provRec.Code != http.StatusOK || !strings.Contains(provRec.Body.String(), `"socks5h://omniuser:***@198.51.100.25:1080"`) {
+		t.Fatalf("expected GET /v1/providers to expose masked proxy_url, got %s", provRec.Body.String())
+	}
+
+	uiReq := httptest.NewRequest(http.MethodGet, "/ui", nil)
+	uiRec := httptest.NewRecorder()
+	handler.ServeHTTP(uiRec, uiReq)
+	if !strings.Contains(uiRec.Body.String(), "/v1/providers/account-proxy") || !strings.Contains(uiRec.Body.String(), "openAccountProxyModal") {
+		t.Fatalf("expected /ui HTML to include per-account proxy modal & /v1/providers/account-proxy")
 	}
 }
 
