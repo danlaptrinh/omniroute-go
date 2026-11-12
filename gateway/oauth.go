@@ -82,6 +82,7 @@ var (
 type ConnectedAccount struct {
 	ID                  string     `json:"id,omitempty"`
 	Provider            ProviderID `json:"provider,omitempty"` // defaults to ProviderAntigravity if empty
+	Tier                string     `json:"tier,omitempty"`     // "Ultra", "Pro", or "Lite"
 	Label               string     `json:"label,omitempty"`
 	Email               string     `json:"email"`
 	AccessToken         string     `json:"access_token"`
@@ -397,6 +398,9 @@ func UpsertConnectedAccount(acc ConnectedAccount) (SavedGatewayAuth, error) {
 			}
 			if acc.ProjectID == "" && existing.ProjectID != "" {
 				acc.ProjectID = existing.ProjectID
+			}
+			if acc.Tier == "" && existing.Tier != "" {
+				acc.Tier = existing.Tier
 			}
 			if acc.QuotaUsedPercent == nil && existing.QuotaUsedPercent != nil {
 				acc.QuotaUsedPercent = existing.QuotaUsedPercent
@@ -923,6 +927,128 @@ func nextProviderRRSeq(provider ProviderID) uint64 {
 	}
 }
 
+func stripKnownModelPrefixes(raw string) string {
+	m := strings.ToLower(strings.TrimSpace(raw))
+	for m != "" {
+		trimmed := false
+		for _, pfx := range []string{"antigravity/", "agy/", "google/", "models/", "claude-code/", "alibaba/"} {
+			if strings.HasPrefix(m, pfx) {
+				m = strings.TrimSpace(strings.TrimPrefix(m, pfx))
+				trimmed = true
+				break
+			}
+		}
+		if !trimmed {
+			break
+		}
+	}
+	return m
+}
+
+// IsDeepReasoningGeminiModel reports whether modelID represents a deep-reasoning Gemini or Carbon/Argon
+// flagship tier where Google routes Ultra accounts to fast gemini-3.8-flash rather than gemini-3.8-flash-n.
+func IsDeepReasoningGeminiModel(modelID string) bool {
+	raw := strings.ToLower(strings.TrimSpace(modelID))
+	if raw == "" {
+		return false
+	}
+	m := stripKnownModelPrefixes(raw)
+	if m == "" || strings.HasSuffix(m, "-low") || strings.HasSuffix(m, ":low") {
+		return false
+	}
+	switch m {
+	case "gemini-4-carbon-high", "gemini-4-carbon", "gemini-4-carbon:high", "carbon", "carbon-high",
+		"gemini-4-carbon-medium", "gemini-4-carbon:medium", "carbon-medium",
+		"gemini-4-argon-high", "gemini-4-argon", "gemini-4-argon:high",
+		"gemini-4-argon-medium", "gemini-4-argon:medium",
+		"gemini-3.8-flash-high", "gemini-3.8-flash", "gemini-3.8-flash-tiered", "gemini-3.8-flash:high",
+		"gemini-3.8-flash-medium", "gemini-3.8-flash:medium":
+		return true
+	}
+	if strings.HasPrefix(m, "gemini-3.1-pro") || strings.HasPrefix(m, "gemini-2.5-pro") {
+		return true
+	}
+	return false
+}
+
+// IsFastSpeedGeminiModel reports whether modelID targets low-latency flash / flash-lite / *-low / auto/fast pools
+// where Pro accounts deliver ~0.8s latency while preserving Ultra concurrency slots for deep reasoning.
+func IsFastSpeedGeminiModel(modelID string) bool {
+	raw := strings.ToLower(strings.TrimSpace(modelID))
+	if raw == "" {
+		return false
+	}
+	if raw == "auto/fast" || raw == "auto/max-speed" {
+		return true
+	}
+	m := stripKnownModelPrefixes(raw)
+	if m == "" {
+		return false
+	}
+	if m == "auto/fast" || m == "auto/max-speed" ||
+		strings.HasSuffix(m, "-low") || strings.HasSuffix(m, ":low") || m == "carbon-low" {
+		return true
+	}
+	if strings.HasPrefix(m, "gemini-3-flash") ||
+		strings.HasPrefix(m, "gemini-3.5-flash-lite") ||
+		strings.HasPrefix(m, "gemini-3.1-flash-lite") ||
+		strings.HasPrefix(m, "gemini-2.5-flash") {
+		return true
+	}
+	return false
+}
+
+func isGeminiPrimaryDeepReasoningModel(modelID string) bool {
+	if !IsDeepReasoningGeminiModel(modelID) {
+		return false
+	}
+	m := stripKnownModelPrefixes(modelID)
+	return !strings.HasPrefix(m, "gemini-4-argon") && !strings.HasPrefix(m, "claude-")
+}
+
+// IsPinnedAccount reports whether ctx carries an explicit account pin via PinAccountContextKey.
+func IsPinnedAccount(ctx context.Context) bool {
+	return strings.TrimSpace(PinnedAccountFromContext(ctx)) != ""
+}
+
+// ReleaseAccountConcurrency decrements the active in-flight request counter for email.
+func ReleaseAccountConcurrency(email string) {
+	ReleaseAccountInFlight(email)
+}
+
+type hedgeSelectContextKey string
+
+const (
+	excludeAccountCtxKey hedgeSelectContextKey = "omni_exclude_account"
+	hedgePickCtxKey      hedgeSelectContextKey = "omni_hedge_pick"
+)
+
+func withHedgeAlternateAccountContext(ctx context.Context, excludeEmail string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx = context.WithValue(ctx, excludeAccountCtxKey, strings.ToLower(strings.TrimSpace(excludeEmail)))
+	return context.WithValue(ctx, hedgePickCtxKey, true)
+}
+
+func excludedAccountFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	if v, ok := ctx.Value(excludeAccountCtxKey).(string); ok {
+		return strings.ToLower(strings.TrimSpace(v))
+	}
+	return ""
+}
+
+func isHedgePickFromContext(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	v, ok := ctx.Value(hedgePickCtxKey).(bool)
+	return ok && v
+}
+
 func normalizeRateLimitModelID(model string) string {
 	m := strings.ToLower(strings.TrimSpace(model))
 	if m == "" {
@@ -940,11 +1066,15 @@ func normalizeRateLimitModelID(model string) string {
 	if aliased, ok := defaultBuiltinAliases[m]; ok {
 		m = strings.ToLower(strings.TrimSpace(aliased))
 	}
-	for _, pfx := range []string{"antigravity/", "claude-code/", "alibaba/"} {
-		if strings.HasPrefix(m, pfx) {
-			m = strings.TrimSpace(strings.TrimPrefix(m, pfx))
-			break
-		}
+	m = stripKnownModelPrefixes(m)
+	if aliased, ok := defaultBuiltinAliases[m]; ok {
+		m = stripKnownModelPrefixes(aliased)
+	}
+	switch m {
+	case "model_placeholder_m26":
+		return "claude-opus-4-6-thinking"
+	case "model_placeholder_m35":
+		return "claude-sonnet-4-6"
 	}
 	return m
 }
@@ -973,6 +1103,7 @@ func rateLimitProbeKeysForHint(modelHint string) []string {
 	case m == "gemini-4-argon-high" || m == "gemini-4-argon" ||
 		strings.HasPrefix(m, "claude-opus"):
 		addUnique("claude-opus-4-6-thinking")
+		addUnique("claude-opus-4-6")
 	case m == "gemini-4-carbon-medium":
 		addUnique("gemini-3.8-flash-medium")
 		addUnique("claude-sonnet-4-6")
@@ -1002,21 +1133,89 @@ func isClaudePrimaryModelID(normModel string) bool {
 		normModel == "gemini-4-argon-medium"
 }
 
+func mirroredRateLimitModelKeys(normModel string) []string {
+	switch normModel {
+	case "claude-opus-4-6-thinking":
+		return []string{"claude-opus-4-6-thinking", "claude-opus-4-6"}
+	case "claude-opus-4-6":
+		return []string{"claude-opus-4-6", "claude-opus-4-6-thinking"}
+	default:
+		return []string{normModel}
+	}
+}
+
 // RecordAccountModelRateLimit marks a specific model (or CCPA backend model tier) as rate-limited (HTTP 429)
 // on a single account for ttl without globally disabling the account for unrelated model families.
 func RecordAccountModelRateLimit(email, model string, ttl time.Duration) {
-	normEmail := strings.ToLower(strings.TrimSpace(email))
-	normModel := normalizeRateLimitModelID(model)
-	if normEmail == "" || normModel == "" {
-		return
-	}
 	if ttl <= 0 {
 		ttl = 2 * time.Minute
 	}
-	exp := time.Now().Add(ttl)
+	RecordAccountModelRateLimitUntil(email, model, time.Now().Add(ttl))
+}
+
+// RecordAccountModelRateLimitUntil marks a specific model as rate-limited on email until an explicit reset timestamp.
+func RecordAccountModelRateLimitUntil(email, modelID string, until time.Time) {
+	normEmail := strings.ToLower(strings.TrimSpace(email))
+	normModel := normalizeRateLimitModelID(modelID)
+	if normEmail == "" || normModel == "" || !until.After(time.Now()) {
+		return
+	}
+	keys := mirroredRateLimitModelKeys(normModel)
 	accountModelRLMu.Lock()
-	accountModelRateLimits[normEmail+"|"+normModel] = exp
+	for _, k := range keys {
+		accountModelRateLimits[normEmail+"|"+k] = until
+	}
 	accountModelRLMu.Unlock()
+}
+
+// ClearAccountModelRateLimit clears any active per-account rate-limit marker for modelID on email.
+func ClearAccountModelRateLimit(email, modelID string) {
+	normEmail := strings.ToLower(strings.TrimSpace(email))
+	normModel := normalizeRateLimitModelID(modelID)
+	if normEmail == "" || normModel == "" {
+		return
+	}
+	keys := mirroredRateLimitModelKeys(normModel)
+	accountModelRLMu.Lock()
+	for _, k := range keys {
+		delete(accountModelRateLimits, normEmail+"|"+k)
+	}
+	accountModelRLMu.Unlock()
+}
+
+func isDirectGeminiTierRateLimited(email, modelHint string) bool {
+	normEmail := strings.ToLower(strings.TrimSpace(email))
+	normModel := normalizeRateLimitModelID(modelHint)
+	if normEmail == "" || normModel == "" {
+		return false
+	}
+	probes := []string{normModel}
+	if strings.HasSuffix(normModel, "-medium") {
+		if normModel != "gemini-3.8-flash-medium" {
+			probes = append(probes, "gemini-3.8-flash-medium")
+		}
+	} else if normModel != "gemini-3.8-flash-high" {
+		probes = append(probes, "gemini-3.8-flash-high")
+	}
+	now := time.Now()
+	accountModelRLMu.RLock()
+	limited := false
+	for _, p := range probes {
+		if exp, ok := accountModelRateLimits[normEmail+"|"+p]; ok && now.Before(exp) {
+			limited = true
+			break
+		}
+	}
+	accountModelRLMu.RUnlock()
+	if limited {
+		return true
+	}
+	for _, p := range probes {
+		if isAccountDeadCCPAModel(DefaultCCPAEndpoint, normEmail, p, now) {
+			return true
+		}
+	}
+	return false
 }
 
 // IsAccountModelRateLimited reports whether email is currently in per-account HTTP 429 cooldown
@@ -1322,21 +1521,110 @@ func selectProviderAccountCore(ctx context.Context, provider ProviderID, modelHi
 		}
 	}
 
+	if excludedEmail := excludedAccountFromContext(ctx); excludedEmail != "" {
+		filtered := make([]ConnectedAccount, 0, len(active))
+		for _, c := range active {
+			if !strings.EqualFold(strings.TrimSpace(c.Email), excludedEmail) &&
+				!strings.EqualFold(strings.TrimSpace(c.ID), excludedEmail) {
+				filtered = append(filtered, c)
+			}
+		}
+		if len(filtered) == 0 {
+			return nil, func() {}, fmt.Errorf("no healthy alternate account available excluding %s", excludedEmail)
+		}
+		baseCandidates = filtered
+	}
+
 	accountSelectMu.Lock()
 	candidates := make([]ConnectedAccount, len(baseCandidates))
 	copy(candidates, baseCandidates)
+
+	hasAnyTier := false
+	if provider == ProviderAntigravity {
+		for _, c := range candidates {
+			if strings.TrimSpace(c.Tier) != "" {
+				hasAnyTier = true
+				break
+			}
+		}
+	}
 
 	// 2. Model-Quota Aware Filter: for Antigravity, deprioritize accounts where modelHint
 	// (or underlying Claude Opus / Sonnet tier for Carbon/Argon High/Medium) is in per-account 429 cooldown.
 	if provider == ProviderAntigravity && len(candidates) > 1 && strings.TrimSpace(modelHint) != "" {
 		modelFresh := make([]ConnectedAccount, 0, len(candidates))
+		useDirectGeminiFilter := hasAnyTier && isGeminiPrimaryDeepReasoningModel(modelHint)
 		for _, c := range candidates {
-			if !IsAccountModelRateLimited(c.Email, modelHint) {
+			limited := false
+			if useDirectGeminiFilter {
+				limited = isDirectGeminiTierRateLimited(c.Email, modelHint)
+			} else {
+				limited = IsAccountModelRateLimited(c.Email, modelHint)
+			}
+			if !limited {
 				modelFresh = append(modelFresh, c)
 			}
 		}
 		if len(modelFresh) > 0 {
 			candidates = modelFresh
+		} else if isHedgePickFromContext(ctx) {
+			accountSelectMu.Unlock()
+			return nil, func() {}, fmt.Errorf("no rate-limit-free alternate account for %s", modelHint)
+		}
+	}
+
+	// 2.5 Tier-Aware Scheduler (Ultra vs Pro): preserve 100% legacy behavior when no candidate has Tier set.
+	if provider == ProviderAntigravity && hasAnyTier && len(candidates) > 1 {
+		ultraCands := make([]ConnectedAccount, 0, len(candidates))
+		nonUltraCands := make([]ConnectedAccount, 0, len(candidates))
+		minOverallInFlight := -1
+		minUltraInFlight := -1
+		minProInFlight := -1
+
+		for _, c := range candidates {
+			inf := GetAccountInFlight(c.Email)
+			if minOverallInFlight < 0 || inf < minOverallInFlight {
+				minOverallInFlight = inf
+			}
+			if strings.EqualFold(strings.TrimSpace(c.Tier), "Ultra") {
+				ultraCands = append(ultraCands, c)
+				if minUltraInFlight < 0 || inf < minUltraInFlight {
+					minUltraInFlight = inf
+				}
+			} else {
+				nonUltraCands = append(nonUltraCands, c)
+				if minProInFlight < 0 || inf < minProInFlight {
+					minProInFlight = inf
+				}
+			}
+		}
+
+		if isHedgePickFromContext(ctx) {
+			if len(ultraCands) > 0 {
+				ultraLowLoad := make([]ConnectedAccount, 0, len(ultraCands))
+				for _, c := range ultraCands {
+					if GetAccountInFlight(c.Email) <= 2 {
+						ultraLowLoad = append(ultraLowLoad, c)
+					}
+				}
+				if len(ultraLowLoad) > 0 {
+					candidates = ultraLowLoad
+				} else if minUltraInFlight < 4 {
+					candidates = ultraCands
+				}
+			}
+		} else if len(ultraCands) > 0 && len(nonUltraCands) > 0 {
+			if IsDeepReasoningGeminiModel(modelHint) {
+				if minUltraInFlight <= minOverallInFlight+2 && minUltraInFlight < 4 {
+					candidates = ultraCands
+				} else if minProInFlight <= minUltraInFlight {
+					candidates = nonUltraCands
+				}
+			} else if IsFastSpeedGeminiModel(modelHint) {
+				if minProInFlight <= minOverallInFlight+1 {
+					candidates = nonUltraCands
+				}
+			}
 		}
 	}
 

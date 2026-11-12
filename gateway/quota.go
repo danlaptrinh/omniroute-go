@@ -86,6 +86,8 @@ var (
 	// validationIsolatedAccounts tracks accounts isolated specifically for VALIDATION_REQUIRED
 	// so permanent 24h TOS_VIOLATION bans are never cleared when loadCodeAssist returns 200 OK.
 	validationIsolatedAccounts sync.Map
+
+	quotaWarmupOnce sync.Once
 )
 
 // RememberAccountTier caches the verified live tier for an account email and/or ID.
@@ -153,10 +155,43 @@ func LookupCachedAccountTier(acc ConnectedAccount, cached *QuotaSummary) string 
 			}
 		}
 	}
+	if persisted := strings.TrimSpace(acc.Tier); persisted != "" {
+		return persisted
+	}
 	if fromLabel := inferTierFromLabel(acc.Label); fromLabel != "" {
 		return fromLabel
 	}
 	return "Pro"
+}
+
+func syncAccountTierIfChanged(acc *ConnectedAccount, tier string) {
+	cleanTier := strings.TrimSpace(tier)
+	if acc == nil || cleanTier == "" {
+		return
+	}
+	acc.Tier = cleanTier
+	configMu.Lock()
+	cfg := loadSavedAuthConfigLocked()
+	changed := false
+	for i, existing := range cfg.Accounts {
+		existingProv := existing.Provider
+		if existingProv == "" {
+			existingProv = ProviderAntigravity
+		}
+		if (acc.ID != "" && existing.ID == acc.ID) ||
+			(existingProv == ProviderAntigravity && acc.Email != "" && strings.EqualFold(existing.Email, acc.Email)) {
+			if cfg.Accounts[i].Tier != cleanTier {
+				cfg.Accounts[i].Tier = cleanTier
+				changed = true
+			}
+			break
+		}
+	}
+	if changed {
+		cfg.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+		_ = saveAuthConfigLocked(cfg)
+	}
+	configMu.Unlock()
 }
 
 // MaskEmail masks email addresses for display e.g. "phongsaigon11@gmail.com" -> "pho***@gmail.com".
@@ -324,7 +359,7 @@ func triggerBackgroundQuotaRefresh() {
 	}
 	go func() {
 		defer atomic.StoreInt32(&quotaRefreshing, 0)
-		bgCtx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+		bgCtx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 		defer cancel()
 		summary := inspectAllQuotasLocked(bgCtx)
 		quotaCacheMu.Lock()
@@ -332,6 +367,22 @@ func triggerBackgroundQuotaRefresh() {
 		lastQuotaCheck = time.Now()
 		quotaCacheMu.Unlock()
 	}()
+}
+
+// WarmupAccountQuotasAndTiersAsync starts a singleton background loop that immediately refreshes all
+// connected Antigravity accounts concurrently on startup and repeats every 60s so Tier and
+// accountModelRateLimits stay warm even with zero UI tabs open.
+func WarmupAccountQuotasAndTiersAsync() {
+	quotaWarmupOnce.Do(func() {
+		go func() {
+			triggerBackgroundQuotaRefresh()
+			ticker := time.NewTicker(60 * time.Second)
+			defer ticker.Stop()
+			for range ticker.C {
+				triggerBackgroundQuotaRefresh()
+			}
+		}()
+	})
 }
 
 // buildInstantQuotaSummary builds an immediate <1ms quota summary from saved config without waiting for external HTTP calls.
@@ -970,8 +1021,16 @@ type ccpaQuotaSummaryResponse struct {
 	} `json:"groups"`
 }
 
+type ccpaRetrieveModelQuotaEntry struct {
+	RemainingFraction *float64                     `json:"remainingFraction"`
+	ResetTime         string                       `json:"resetTime"`
+	IsExhausted       bool                         `json:"isExhausted"`
+	QuotaInfo         *ccpaAvailableModelQuotaInfo `json:"quotaInfo"`
+}
+
 type ccpaRetrieveQuotaResponse struct {
-	Buckets []ccpaInternalBucket `json:"buckets"`
+	Buckets []ccpaInternalBucket                   `json:"buckets"`
+	Models  map[string]ccpaRetrieveModelQuotaEntry `json:"models"`
 }
 
 type ccpaAvailableModelQuotaInfo struct {
@@ -1225,6 +1284,7 @@ func inspectAntigravityAccount(ctx context.Context, acc *ConnectedAccount, detai
 	}
 	detail.Tier = tierName
 	RememberAccountTier(acc.Email, acc.ID, tierName)
+	syncAccountTierIfChanged(acc, tierName)
 
 	if (acc.ProjectID == "" || acc.ProjectID == "aicode-consumers") && codeAssistBody.CloudaicompanionProject != "" {
 		acc.ProjectID = codeAssistBody.CloudaicompanionProject
@@ -1339,6 +1399,42 @@ func inspectAntigravityAccount(ctx context.Context, acc *ConnectedAccount, detai
 			discoveredSet[norm] = struct{}{}
 		}
 	}
+	quotaSyncNow := time.Now()
+	syncModelQuotaRateLimit := func(rawModelID string, remainingFrac *float64, isExhausted bool, resetTimeStr string) {
+		if strings.TrimSpace(acc.Email) == "" {
+			return
+		}
+		cleanID := strings.ToLower(strings.TrimSpace(rawModelID))
+		cleanID = strings.TrimPrefix(cleanID, "models/")
+		cleanID = strings.TrimPrefix(cleanID, "antigravity/")
+		if cleanID == "" ||
+			strings.HasPrefix(cleanID, "chat_") ||
+			strings.HasPrefix(cleanID, "tab_") ||
+			strings.HasPrefix(cleanID, "text-embedding") ||
+			strings.HasPrefix(cleanID, "3p-") ||
+			strings.HasPrefix(cleanID, "group-") {
+			return
+		}
+		normID := normalizeRateLimitModelID(cleanID)
+		if normID == "" || strings.HasPrefix(normID, "model_placeholder_") {
+			return
+		}
+		trimmedReset := strings.TrimSpace(resetTimeStr)
+		// Proto3 omits remainingFraction when 0: nil or <= 0 accompanied by future resetTime means exhausted.
+		if (isExhausted || remainingFrac == nil || *remainingFrac <= 0) && trimmedReset != "" {
+			resetAt, err := time.Parse(time.RFC3339, trimmedReset)
+			if err != nil {
+				resetAt, err = time.Parse(time.RFC3339Nano, trimmedReset)
+			}
+			if err == nil && resetAt.After(quotaSyncNow) {
+				RecordAccountModelRateLimitUntil(acc.Email, normID, resetAt)
+			}
+			return
+		}
+		if !isExhausted && remainingFrac != nil && *remainingFrac > 0.01 {
+			ClearAccountModelRateLimit(acc.Email, normID)
+		}
+	}
 
 	if fetchModelsURL := resolveCCPAFetchAvailableModelsEndpoint(); fetchModelsURL != "" {
 		reqModels, errMod := http.NewRequestWithContext(ctx, "POST", fetchModelsURL, bytes.NewReader(summaryRaw))
@@ -1369,6 +1465,7 @@ func inspectAntigravityAccount(ctx context.Context, acc *ConnectedAccount, detai
 								addDiscoveredModel(entry.Model)
 							}
 							if entry.QuotaInfo != nil {
+								syncModelQuotaRateLimit(id, entry.QuotaInfo.RemainingFraction, entry.QuotaInfo.IsExhausted, entry.QuotaInfo.ResetTime)
 								if pct, okPct := parseCCPARemainingPercent(entry.QuotaInfo.RemainingFraction, entry.QuotaInfo.IsExhausted, entry.QuotaInfo.ResetTime); okPct {
 									rst := formatResetDuration(entry.QuotaInfo.ResetTime, defaultResetText)
 									applyCCPAModelBucketToState(id, pct, rst, &liveState)
@@ -1385,6 +1482,7 @@ func inspectAntigravityAccount(ctx context.Context, acc *ConnectedAccount, detai
 								}
 								addDiscoveredModel(id)
 								if entry.QuotaInfo != nil {
+									syncModelQuotaRateLimit(id, entry.QuotaInfo.RemainingFraction, entry.QuotaInfo.IsExhausted, entry.QuotaInfo.ResetTime)
 									if pct, okPct := parseCCPARemainingPercent(entry.QuotaInfo.RemainingFraction, entry.QuotaInfo.IsExhausted, entry.QuotaInfo.ResetTime); okPct {
 										rst := formatResetDuration(entry.QuotaInfo.ResetTime, defaultResetText)
 										applyCCPAModelBucketToState(id, pct, rst, &liveState)
@@ -1410,7 +1508,7 @@ func inspectAntigravityAccount(ctx context.Context, acc *ConnectedAccount, detai
 			defer respQuota.Body.Close()
 			var qResp ccpaRetrieveQuotaResponse
 			if errDec := json.NewDecoder(respQuota.Body).Decode(&qResp); errDec == nil {
-				// Authoritative per-bucket response overrides initial fetchAvailableModels values per bucket family
+				// Authoritative per-bucket / per-model response overrides initial fetchAvailableModels values
 				var quotaBucketsState agyLiveQuotaState
 				for _, b := range qResp.Buckets {
 					id := b.ModelID
@@ -1418,12 +1516,43 @@ func inspectAntigravityAccount(ctx context.Context, acc *ConnectedAccount, detai
 						id = b.BucketID
 					}
 					addDiscoveredModel(id)
+					syncModelQuotaRateLimit(id, b.RemainingFraction, b.IsExhausted, b.ResetTime)
 					pct, okPct := parseCCPARemainingPercent(b.RemainingFraction, b.IsExhausted, b.ResetTime)
 					if !okPct {
 						continue
 					}
 					rst := formatResetDuration(b.ResetTime, defaultResetText)
 					applyCCPAModelBucketToState(id, pct, rst, &quotaBucketsState)
+				}
+				if len(qResp.Models) > 0 {
+					mKeys := make([]string, 0, len(qResp.Models))
+					for mk := range qResp.Models {
+						mKeys = append(mKeys, mk)
+					}
+					sort.Strings(mKeys)
+					for _, modelID := range mKeys {
+						info := qResp.Models[modelID]
+						frac := info.RemainingFraction
+						exhausted := info.IsExhausted
+						rstRaw := info.ResetTime
+						if info.QuotaInfo != nil {
+							if frac == nil {
+								frac = info.QuotaInfo.RemainingFraction
+							}
+							if !exhausted {
+								exhausted = info.QuotaInfo.IsExhausted
+							}
+							if rstRaw == "" {
+								rstRaw = info.QuotaInfo.ResetTime
+							}
+						}
+						addDiscoveredModel(modelID)
+						syncModelQuotaRateLimit(modelID, frac, exhausted, rstRaw)
+						if pct, okPct := parseCCPARemainingPercent(frac, exhausted, rstRaw); okPct {
+							rst := formatResetDuration(rstRaw, defaultResetText)
+							applyCCPAModelBucketToState(modelID, pct, rst, &quotaBucketsState)
+						}
+					}
 				}
 				if quotaBucketsState.geminiPro.hasLive {
 					liveState.geminiPro = quotaBucketsState.geminiPro

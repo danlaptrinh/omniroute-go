@@ -770,17 +770,37 @@ func ExecuteAntigravityWithReactiveRefresh(
 			return fmt.Errorf("no Antigravity OAuth token configured")
 		}
 
+		var primaryRelOnce sync.Once
+		rawPrimaryRel := releaseInFlight
+		releasePrimaryOnce := func() {
+			primaryRelOnce.Do(func() {
+				if rawPrimaryRel != nil {
+					rawPrimaryRel()
+				}
+			})
+		}
+
 		if accountEmail != "" {
 			w.Header().Set("X-Omni-Gateway-Account", accountEmail)
-			if releaseInFlight == nil {
+			if rawPrimaryRel == nil {
 				AcquireAccountInFlightWithRole(accountEmail, target.CanonicalID)
-				releaseInFlight = buildInFlightReleaseFn(accountEmail)
+				rawPrimaryRel = buildInFlightReleaseFn(accountEmail)
 			}
 		}
 		w.Header().Set("X-Omni-Gateway-Provider", "antigravity")
-		err := u.handleDirectCCPA(ctx, w, req, target, agyToken, projectID)
-		if releaseInFlight != nil {
-			releaseInFlight()
+		lease := &ccpaPrimaryLease{
+			accountEmail:    accountEmail,
+			modelHint:       modelHint,
+			releaseInFlight: releasePrimaryOnce,
+		}
+		ccpaCtx := withCCPAPrimaryLease(ctx, lease)
+		err := u.handleDirectCCPA(ccpaCtx, w, req, target, agyToken, projectID)
+		releasePrimaryOnce()
+		if lease.winnerRelease != nil {
+			lease.winnerRelease()
+		}
+		if lease.hedgedWon && lease.winnerEmail != "" {
+			accountEmail = lease.winnerEmail
 		}
 		lat := time.Now().UnixMilli() - startMs
 

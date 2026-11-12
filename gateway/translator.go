@@ -58,6 +58,8 @@ var (
 	CCPAFirstChunkTimeout   = 20 * time.Second
 	CCPAStreamIdleTimeout   = 25 * time.Second
 	CCPACandidateMaxTimeout = 10 * time.Minute
+	CCPAHedgeDelayPro       = 4500 * time.Millisecond
+	CCPAHedgeDelayUltra     = 7000 * time.Millisecond
 
 	// Fast-path caches for CCPA candidate resolution scoped by endpoint to avoid sequential probing.
 	workingCCPAModelCache sync.Map // key: endpoint + "|" + resolved.CanonicalID -> value: string (winning CCPA model ID)
@@ -423,13 +425,88 @@ func NewUpstream(cfg GatewayConfig) *GatewayUpstream {
 	if cfg.CCPAEndpoint == "" {
 		cfg.CCPAEndpoint = DefaultCCPAEndpoint
 	}
-	if explicitDefault && strings.TrimSpace(os.Getenv("OMNI_SKIP_CCPA_WARMUP")) == "" && !isRunningUnderGoTest() {
-		WarmupCCPAConnectionsAsync()
+	if explicitDefault && !isRunningUnderGoTest() {
+		if strings.TrimSpace(os.Getenv("OMNI_SKIP_CCPA_WARMUP")) == "" {
+			WarmupCCPAConnectionsAsync()
+		}
+		WarmupAccountQuotasAndTiersAsync()
 	}
 	return &GatewayUpstream{
 		cfg:    cfg,
 		client: SharedHTTPClient,
 	}
+}
+
+type translatorCtxKey string
+
+const (
+	cacheKeyReqCtxKey      translatorCtxKey = "omni_pre_compression_cache_req"
+	ccpaPrimaryLeaseCtxKey translatorCtxKey = "omni_ccpa_primary_lease"
+)
+
+type ccpaPrimaryLease struct {
+	accountEmail    string
+	modelHint       string
+	releaseInFlight func()
+	winnerEmail     string
+	winnerRelease   func()
+	hedgedWon       bool
+}
+
+func withCCPAPrimaryLease(ctx context.Context, lease *ccpaPrimaryLease) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, ccpaPrimaryLeaseCtxKey, lease)
+}
+
+func ccpaPrimaryLeaseFromContext(ctx context.Context) *ccpaPrimaryLease {
+	if ctx == nil {
+		return nil
+	}
+	l, _ := ctx.Value(ccpaPrimaryLeaseCtxKey).(*ccpaPrimaryLease)
+	return l
+}
+
+func cloneRequestForCacheKey(req OpenAIChatRequest) OpenAIChatRequest {
+	cloned := req
+	if req.Temperature != nil {
+		t := *req.Temperature
+		cloned.Temperature = &t
+	}
+	if req.ThinkingConfig != nil {
+		tc := *req.ThinkingConfig
+		cloned.ThinkingConfig = &tc
+	}
+	if len(req.Messages) > 0 {
+		origMsgs := make([]OpenAIChatMessage, len(req.Messages))
+		copy(origMsgs, req.Messages)
+		for i := range origMsgs {
+			if len(origMsgs[i].Content) > 0 {
+				rawCopy := make(json.RawMessage, len(origMsgs[i].Content))
+				copy(rawCopy, origMsgs[i].Content)
+				origMsgs[i].Content = rawCopy
+			}
+		}
+		cloned.Messages = origMsgs
+	}
+	return cloned
+}
+
+func withCacheKeyRequest(ctx context.Context, cacheReq *OpenAIChatRequest) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, cacheKeyReqCtxKey, cacheReq)
+}
+
+func cacheKeyRequestFromContext(ctx context.Context, fallback OpenAIChatRequest) OpenAIChatRequest {
+	if ctx != nil {
+		if orig, ok := ctx.Value(cacheKeyReqCtxKey).(*OpenAIChatRequest); ok && orig != nil {
+			return *orig
+		}
+	}
+	return fallback
 }
 
 // HandleChatCompletion routes and translates an OpenAIChatRequest across the 3 OmniRoute-Go providers:
@@ -447,6 +524,10 @@ func (u *GatewayUpstream) HandleChatCompletion(
 	if strings.HasPrefix(strings.ToLower(cleanAuth), "bearer ") {
 		cleanAuth = strings.TrimSpace(cleanAuth[7:])
 	}
+
+	// Snapshot exact pre-compression / pre-RAG request so ResponseCache.Put hashes the identical
+	// request bytes that Server.handleChatCompletions passed to ResponseCache.Get.
+	cacheKeyReq := cloneRequestForCacheKey(req)
 
 	// Inject global Custom System Prompt if enabled in EndpointConfig
 	req = ApplyCustomSystemPrompt(req)
@@ -520,6 +601,8 @@ func (u *GatewayUpstream) HandleChatCompletion(
 	var lastErr error
 	var firstUpstreamErr error
 
+	targetCtx := withCacheKeyRequest(ctx, &cacheKeyReq)
+
 	hedgedEnabled, hedgeDelayMs := GetHedgedConfig()
 	if hedgedEnabled && len(targets) > 1 && !req.Stream {
 		hedgedTargets := targets
@@ -533,7 +616,7 @@ func (u *GatewayUpstream) HandleChatCompletion(
 			hedgedTargets = filtered
 		}
 		if len(hedgedTargets) > 1 {
-			if err := u.handleHedgedCompletion(ctx, w, req, hedgedTargets, cleanAuth, hedgeDelayMs); err == nil {
+			if err := u.handleHedgedCompletion(targetCtx, w, req, hedgedTargets, cleanAuth, hedgeDelayMs); err == nil {
 				return nil
 			}
 		}
@@ -546,7 +629,7 @@ func (u *GatewayUpstream) HandleChatCompletion(
 		if idx > 0 && standaloneMode && !u.isProviderConfigured(target.Provider, cleanAuth) {
 			continue
 		}
-		if err := u.tryTarget(ctx, w, req, target, cleanAuth); err == nil {
+		if err := u.tryTarget(targetCtx, w, req, target, cleanAuth); err == nil {
 			return nil
 		} else {
 			if ctx.Err() != nil {
@@ -564,7 +647,7 @@ func (u *GatewayUpstream) HandleChatCompletion(
 	}
 
 	if strings.TrimSpace(u.cfg.OmniRouteBaseURL) != "" {
-		return u.handleOmniRouteWithFallback(ctx, w, req, resolved, cleanAuth)
+		return u.handleOmniRouteWithFallback(targetCtx, w, req, resolved, cleanAuth)
 	}
 
 	if firstUpstreamErr != nil {
@@ -1065,310 +1148,277 @@ func (u *GatewayUpstream) handleDirectCCPA(
 		endpoint = DefaultCCPAEndpoint
 	}
 	accScope := accountCacheScope(w, oauthToken)
-	releaseScopeInFlight := acquireCCPAScopeInFlight(accScope, oauthToken)
-	defer releaseScopeInFlight()
 	noThinking := req.ThinkingConfig != nil && !req.ThinkingConfig.IncludeThoughts && req.ThinkingConfig.ThinkingBudget == 0 && req.ThinkingConfig.ThinkingLevel == ThinkingLevelNone
-	ccpaCandidates := buildCCPACandidatesWithCache(endpoint, accScope, resolved, noThinking)
-	_, isConnectedScope := lookupConnectedAntigravityAccountFast(accScope)
-	flagshipTier := primaryFlagshipTierForModel(endpoint, isConnectedScope, resolved)
 	isDefaultProdEndpoint := strings.EqualFold(strings.TrimSpace(endpoint), DefaultCCPAEndpoint)
-
-	var (
-		resp               *http.Response
-		activeCCPAModel    string
-		activeModelVersion string
-		activeScanner      *bufio.Scanner
-		activeIdleTimer    *time.Timer
-		activeCandCtx      context.Context
-		activeCancel       context.CancelFunc
-		activeTimedOut     *atomic.Bool
-		initialText        string
-		initialThoughts    string
-		lastUsage          *ccpaUsageMetadata
-		lastFinishReason   string
-		lastCCPAErr        error
-	)
-
 	firstChunkTimeout := effectiveCCPAFirstChunkTimeout(req)
 
-	for _, candidate := range ccpaCandidates {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
+	hedgeModelID := strings.TrimSpace(resolved.CanonicalID)
+	if hedgeModelID == "" {
+		hedgeModelID = strings.TrimSpace(resolved.RequestedID)
+	}
+	if hedgeModelID == "" {
+		hedgeModelID = strings.TrimSpace(req.Model)
+	}
 
-		// Multi-Account Flagship Protection: before downgrading to a lower model tier on the current account,
-		// check if another healthy Antigravity account still has flagship quota available.
-		if PinnedAccountFromContext(ctx) == "" &&
-			len(flagshipTier) > 0 &&
-			!stringSliceContains(flagshipTier, candidate) &&
-			hasAlternateFlagshipAccount(endpoint, accScope, resolved.CanonicalID, flagshipTier) {
-			if strings.Contains(accScope, "@") {
-				RecordAccountModelRateLimit(accScope, resolved.CanonicalID, 2*time.Minute)
-			}
-			if lastCCPAErr != nil {
-				lastCCPAErr = fmt.Errorf("[flagship-failover] %w", lastCCPAErr)
-			} else {
-				lastCCPAErr = fmt.Errorf("[flagship-failover] CCPA HTTP 429: flagship tier %v rate-limited on %s", flagshipTier, accScope)
-			}
-			break
-		}
+	lease := ccpaPrimaryLeaseFromContext(ctx)
+	primaryEmail := ""
+	if lease != nil && strings.Contains(lease.accountEmail, "@") {
+		primaryEmail = strings.TrimSpace(lease.accountEmail)
+	} else if strings.Contains(accScope, "@") {
+		primaryEmail = strings.TrimSpace(accScope)
+	}
 
-		candInner := inner
-		if strings.Contains(candidate, "lite") && candInner.GenerationConfig.MaxOutputTokens > 32768 {
-			candInner.GenerationConfig.MaxOutputTokens = 32768
-		}
-		// Anthropic models, flash-lite/gemini-3-flash, and image models do not accept thinkingConfig.
-		// Pre-tiered gemini-3.8-flash-high/medium/low reject thinkingLevel/thinkingBudget overrides,
-		// MUST keep includeThoughts:true (so CCPA streams thought chunks early instead of buffering 15-21s),
-		// and need >=4096 maxOutputTokens headroom so internal thoughts never starve short max_tokens callers!
-		if (strings.HasPrefix(candidate, "claude-") ||
-			candidate == "gemini-3-flash" ||
-			candidate == "gemini-3.5-flash-lite" ||
-			candidate == "gemini-3.1-flash-lite" ||
-			strings.Contains(candidate, "image")) && candInner.GenerationConfig.ThinkingConfig != nil {
-			candInner.GenerationConfig.ThinkingConfig = nil
-		} else if candidate == "gemini-3.8-flash-high" || candidate == "gemini-3.8-flash-medium" || candidate == "gemini-3.8-flash-low" {
-			if !noThinking {
-				candInner.GenerationConfig.ThinkingConfig = &ccpaThinkingConfig{IncludeThoughts: true}
-			} else {
-				candInner.GenerationConfig.ThinkingConfig = nil
-			}
-			if candInner.GenerationConfig.MaxOutputTokens < 4096 {
-				candInner.GenerationConfig.MaxOutputTokens += 4096
-			}
-		} else if candidate == "gemini-3.8-flash-tiered" && candInner.GenerationConfig.ThinkingConfig != nil {
-			origTC := *candInner.GenerationConfig.ThinkingConfig
-			cappedBudget := 1024
-			if resolved.ThinkingLevel == ThinkingLevelLow || (origTC.ThinkingBudget != nil && *origTC.ThinkingBudget == 0) {
-				cappedBudget = 0
-			} else if origTC.ThinkingBudget != nil && *origTC.ThinkingBudget > 0 && *origTC.ThinkingBudget < cappedBudget {
-				cappedBudget = *origTC.ThinkingBudget
-			}
-			candInner.GenerationConfig.ThinkingConfig = &ccpaThinkingConfig{
-				IncludeThoughts: origTC.IncludeThoughts,
-				ThinkingLevel:   "",
-				ThinkingBudget:  &cappedBudget,
-			}
-			if cappedBudget > 0 && candInner.GenerationConfig.MaxOutputTokens < 2048 {
-				candInner.GenerationConfig.MaxOutputTokens += 2048
-			}
-		}
+	var opened *ccpaOpenedAttempt
+	shouldHedgeTTFT := isDefaultProdEndpoint &&
+		!IsPinnedAccount(ctx) &&
+		IsDeepReasoningGeminiModel(hedgeModelID) &&
+		primaryEmail != ""
 
-		payload := ccpaRequestPayload{
-			Model:   candidate,
-			Project: projectID,
-			Request: candInner,
-		}
-
-		bodyBytes, err := json.Marshal(payload)
+	if !shouldHedgeTTFT {
+		var err error
+		opened, err = u.openCCPAStreamWithFirstChunk(ctx, nil, endpoint, accScope, oauthToken, projectID, req, resolved, inner, noThinking, firstChunkTimeout)
 		if err != nil {
-			lastCCPAErr = err
-			continue
-		}
-
-		candCtx, cancelCand := context.WithTimeout(ctx, CCPACandidateMaxTimeout)
-		var timedOut atomic.Bool
-		idleTimer := time.AfterFunc(firstChunkTimeout, func() {
-			timedOut.Store(true)
-			cancelCand()
-		})
-
-		httpReq, err := http.NewRequestWithContext(candCtx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
-		if err != nil {
-			idleTimer.Stop()
-			cancelCand()
-			lastCCPAErr = err
-			continue
-		}
-		httpReq.Header.Set("Content-Type", "application/json")
-		httpReq.Header.Set("Accept", "text/event-stream")
-		httpReq.Header.Set("User-Agent", GetAgyUserAgent())
-		httpReq.Header.Set("Authorization", "Bearer "+oauthToken)
-
-		r, err := u.ccpaHTTPClientForScope(accScope, oauthToken).Do(httpReq)
-		if err != nil {
-			idleTimer.Stop()
-			candErr := candCtx.Err()
-			cancelCand()
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			if timedOut.Load() || candErr != nil {
-				if isDefaultProdEndpoint && strings.Contains(accScope, "@") {
-					markAccountDeadCCPAModel(endpoint, accScope, candidate, 30*time.Second)
-				} else {
-					markDeadCCPAModel(endpoint, candidate, 2*time.Minute)
-				}
-			}
-			lastCCPAErr = err
-			log.Printf("[omni-gateway] CCPA candidate %q transport error: %v; trying next CCPA tier model", candidate, err)
-			continue
+			return err
 		}
-
-		if r.StatusCode < 200 || r.StatusCode >= 300 {
-			idleTimer.Stop()
-			errBody, _ := io.ReadAll(io.LimitReader(r.Body, 4096))
-			_ = r.Body.Close()
-			cancelCand()
-			switch r.StatusCode {
-			case http.StatusNotFound:
-				markDeadCCPAModel(endpoint, candidate, 6*time.Hour)
-			case http.StatusTooManyRequests:
-				markAccountDeadCCPAModel(endpoint, accScope, candidate, 2*time.Minute)
-				if isDefaultProdEndpoint && strings.HasPrefix(candidate, "claude-") {
-					markAccountDeadCCPAModel(endpoint, accScope, "claude-opus-4-6-thinking", 2*time.Minute)
-					markAccountDeadCCPAModel(endpoint, accScope, "claude-sonnet-4-6", 2*time.Minute)
-				}
-			case http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
-				markDeadCCPAModel(endpoint, candidate, 2*time.Minute)
-			}
-			lastCCPAErr = fmt.Errorf("CCPA HTTP %d (%s): %s", r.StatusCode, candidate, strings.TrimSpace(string(errBody)))
-			if r.StatusCode == http.StatusUnauthorized || r.StatusCode == http.StatusForbidden {
-				log.Printf("[omni-gateway] CCPA candidate %q returned HTTP %d; stopping tier fallback for account recovery/failover", candidate, r.StatusCode)
-				break
-			}
-			log.Printf("[omni-gateway] CCPA candidate %q returned HTTP %d; trying next CCPA tier model", candidate, r.StatusCode)
-			continue
-		}
-
-		// Verify first meaningful chunk inside candidate loop while idleTimer (firstChunkTimeout) is armed.
-		scanner := bufio.NewScanner(r.Body)
-		scanner.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)
-
-		var (
-			candInitialText     strings.Builder
-			candInitialThoughts strings.Builder
-			candRawNonSSE       strings.Builder
-			candLastUsage       *ccpaUsageMetadata
-			candFinishReason    string
-			candModelVersion    string
-			foundSSE            bool
-		)
-
-		for scanner.Scan() {
-			rawLine := scanner.Text()
-			line := strings.TrimSpace(rawLine)
-			if !strings.HasPrefix(line, "data:") {
-				if line != "" && !strings.HasPrefix(line, ":") && !strings.HasPrefix(line, "event:") && !strings.HasPrefix(line, "id:") && !strings.HasPrefix(line, "retry:") {
-					candRawNonSSE.WriteString(rawLine)
-					candRawNonSSE.WriteByte('\n')
-				}
-				continue
-			}
-			foundSSE = true
-			dataStr := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-			if dataStr == "" || dataStr == "[DONE]" {
-				continue
-			}
-			textDelta, thoughtDelta, uMeta, rawFR, mVer := extractCCPAChunkWithVersion(dataStr)
-			if mVer != "" {
-				candModelVersion = mVer
-			}
-			if uMeta != nil && (uMeta.TotalTokenCount > 0 || uMeta.PromptTokenCount > 0 || uMeta.CandidatesTokenCount > 0) {
-				candLastUsage = uMeta
-			}
-			if rawFR != "" {
-				candFinishReason = rawFR
-			}
-			if textDelta == "" && thoughtDelta == "" {
-				continue
-			}
-			idleTimer.Reset(CCPAStreamIdleTimeout)
-			candInitialText.WriteString(textDelta)
-			candInitialThoughts.WriteString(thoughtDelta)
-
-			probe := candInitialText.String()
-			if IsUnsupportedClientBanner(probe) {
-				idleTimer.Stop()
-				_ = r.Body.Close()
-				cancelCand()
-				return fmt.Errorf("CCPA client version rejected by upstream (update OMNI_AGY_USER_AGENT): %s", TruncateUTF8(probe, 200))
-			}
-			lowerProbe := strings.ToLower(strings.TrimSpace(probe))
-			if candInitialThoughts.Len() == 0 && lowerProbe != "" && len(lowerProbe) < 60 &&
-				strings.HasPrefix("this version of antigravity is no longer supported", lowerProbe) {
-				continue
-			}
-			break
-		}
-
-		scanErr := scanner.Err()
-		candErr := candCtx.Err()
-
-		if !foundSSE && candRawNonSSE.Len() > 0 {
-			tDelta, thDelta, uMeta, rawFR, mVer := extractCCPAChunkWithVersion(candRawNonSSE.String())
-			if mVer != "" {
-				candModelVersion = mVer
-			}
-			if uMeta != nil && (uMeta.TotalTokenCount > 0 || uMeta.PromptTokenCount > 0 || uMeta.CandidatesTokenCount > 0) {
-				candLastUsage = uMeta
-			}
-			if rawFR != "" {
-				candFinishReason = rawFR
-			}
-			candInitialText.WriteString(tDelta)
-			candInitialThoughts.WriteString(thDelta)
-		}
-
-		if IsUnsupportedClientBanner(candInitialText.String()) || IsUnsupportedClientBanner(candRawNonSSE.String()) {
-			idleTimer.Stop()
-			_ = r.Body.Close()
-			cancelCand()
-			banner := candInitialText.String()
-			if strings.TrimSpace(banner) == "" {
-				banner = candRawNonSSE.String()
-			}
-			return fmt.Errorf("CCPA client version rejected by upstream (update OMNI_AGY_USER_AGENT): %s", TruncateUTF8(banner, 200))
-		}
-
-		if scanErr != nil || (candInitialText.Len() == 0 && candInitialThoughts.Len() == 0 && (timedOut.Load() || candErr != nil)) {
-			idleTimer.Stop()
-			_ = r.Body.Close()
-			cancelCand()
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			if isDefaultProdEndpoint && strings.Contains(accScope, "@") {
-				markAccountDeadCCPAModel(endpoint, accScope, candidate, 30*time.Second)
+		defer opened.closeAndRelease()
+	} else {
+		primaryTier := "Pro"
+		if acc, ok := lookupConnectedAntigravityAccountFast(primaryEmail); ok {
+			if t := strings.TrimSpace(acc.Tier); t != "" {
+				primaryTier = t
 			} else {
-				markDeadCCPAModel(endpoint, candidate, 2*time.Minute)
+				primaryTier = LookupCachedAccountTier(acc, nil)
 			}
-			if candErr != nil {
-				lastCCPAErr = fmt.Errorf("CCPA candidate %q timed out waiting for first token: %v", candidate, candErr)
-			} else {
-				lastCCPAErr = fmt.Errorf("CCPA candidate %q stream error before first token: %v", candidate, scanErr)
-			}
-			log.Printf("[omni-gateway] %v; trying next CCPA tier model", lastCCPAErr)
-			continue
+		}
+		hedgeDelay := CCPAHedgeDelayPro
+		if strings.EqualFold(strings.TrimSpace(primaryTier), "Ultra") {
+			hedgeDelay = CCPAHedgeDelayUltra
 		}
 
-		idleTimer.Reset(CCPAStreamIdleTimeout)
-		resp = r
-		activeCCPAModel = candidate
-		activeModelVersion = candModelVersion
-		activeScanner = scanner
-		activeIdleTimer = idleTimer
-		activeCandCtx = candCtx
-		activeCancel = cancelCand
-		activeTimedOut = &timedOut
-		initialText = candInitialText.String()
-		initialThoughts = candInitialThoughts.String()
-		lastUsage = candLastUsage
-		lastFinishReason = candFinishReason
-		break
-	}
+		primCtx, cancelPrim := context.WithCancel(ctx)
+		primCtrl := &ccpaRacerControl{cancel: cancelPrim}
+		primCh := make(chan ccpaRaceResult, 1)
+		go func() {
+			att, err := u.openCCPAStreamWithFirstChunk(primCtx, primCtrl, endpoint, accScope, oauthToken, projectID, req, resolved, inner, noThinking, firstChunkTimeout)
+			primCh <- ccpaRaceResult{opened: att, err: err}
+		}()
 
-	if resp == nil {
-		if ctx.Err() != nil {
+		hedgeTimer := time.NewTimer(hedgeDelay)
+		defer hedgeTimer.Stop()
+
+		select {
+		case res1 := <-primCh:
+			if res1.err != nil || res1.opened == nil {
+				primCtrl.abortNow()
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				return res1.err
+			}
+			opened = res1.opened
+			defer func() {
+				primCtrl.abortNow()
+				opened.closeAndRelease()
+			}()
+
+		case <-ctx.Done():
+			primCtrl.abortNow()
+			go func() {
+				if r1 := <-primCh; r1.opened != nil {
+					r1.opened.closeAndRelease()
+				}
+			}()
 			return ctx.Err()
-		}
-		return lastCCPAErr
-	}
-	defer activeIdleTimer.Stop()
-	defer activeCancel()
-	defer resp.Body.Close()
 
-	if !noThinking && resolved.CanonicalID != "" {
+		case <-hedgeTimer.C:
+			hedgePickCtx := withHedgeAlternateAccountContext(ctx, primaryEmail)
+			secAcc, rawSecRelease, secPickErr := AcquireProviderAccountForModel(
+				hedgePickCtx,
+				ProviderAntigravity,
+				hedgeModelID,
+				resolved.CanonicalID,
+			)
+			if secPickErr != nil || secAcc == nil || strings.TrimSpace(secAcc.AccessToken) == "" || strings.EqualFold(secAcc.Email, primaryEmail) {
+				if rawSecRelease != nil {
+					rawSecRelease()
+				}
+				select {
+				case res1 := <-primCh:
+					if res1.err != nil || res1.opened == nil {
+						primCtrl.abortNow()
+						if ctx.Err() != nil {
+							return ctx.Err()
+						}
+						return res1.err
+					}
+					opened = res1.opened
+					defer func() {
+						primCtrl.abortNow()
+						opened.closeAndRelease()
+					}()
+				case <-ctx.Done():
+					primCtrl.abortNow()
+					go func() {
+						if r1 := <-primCh; r1.opened != nil {
+							r1.opened.closeAndRelease()
+						}
+					}()
+					return ctx.Err()
+				}
+			} else {
+				var secRelOnce sync.Once
+				secEmail := strings.TrimSpace(secAcc.Email)
+				releaseSecOnce := func() {
+					secRelOnce.Do(func() {
+						if rawSecRelease != nil {
+							rawSecRelease()
+						} else if secEmail != "" {
+							ReleaseAccountConcurrency(secEmail)
+						}
+					})
+				}
+
+				secToken := strings.TrimSpace(secAcc.AccessToken)
+				secProj := strings.TrimSpace(secAcc.ProjectID)
+				if secProj == "" {
+					secProj = strings.TrimSpace(u.cfg.AgyProjectID)
+				}
+				secCtx, cancelSec := context.WithCancel(ctx)
+				secCtrl := &ccpaRacerControl{cancel: cancelSec}
+				secCh := make(chan ccpaRaceResult, 1)
+				go func() {
+					att, err := u.openCCPAStreamWithFirstChunk(secCtx, secCtrl, endpoint, secEmail, secToken, secProj, req, resolved, inner, noThinking, firstChunkTimeout)
+					secCh <- ccpaRaceResult{opened: att, err: err}
+				}()
+
+				primWait := primCh
+				secWait := secCh
+				var lastRaceErr error
+
+				for primWait != nil || secWait != nil {
+					select {
+					case <-ctx.Done():
+						primCtrl.abortNow()
+						secCtrl.abortNow()
+						releaseSecOnce()
+						if primWait != nil {
+							go func(ch <-chan ccpaRaceResult) {
+								if r1 := <-ch; r1.opened != nil {
+									r1.opened.closeAndRelease()
+								}
+							}(primWait)
+						}
+						if secWait != nil {
+							go func(ch <-chan ccpaRaceResult) {
+								if r2 := <-ch; r2.opened != nil {
+									r2.opened.closeAndRelease()
+								}
+							}(secWait)
+						}
+						return ctx.Err()
+
+					case r1 := <-primWait:
+						primWait = nil
+						if r1.err == nil && r1.opened != nil {
+							// Primary won: cancel, close body, and release concurrency on secondary loser BEFORE touching w.
+							secCtrl.abortNow()
+							releaseSecOnce()
+							if secWait != nil {
+								go func(ch <-chan ccpaRaceResult) {
+									if r2 := <-ch; r2.opened != nil {
+										r2.opened.closeAndRelease()
+									}
+								}(secWait)
+								secWait = nil
+							}
+							opened = r1.opened
+							defer func() {
+								primCtrl.abortNow()
+								opened.closeAndRelease()
+							}()
+							break
+						}
+						primCtrl.abortNow()
+						if secWait != nil && lease != nil && lease.releaseInFlight != nil {
+							lease.releaseInFlight()
+						}
+						if r1.err != nil {
+							lastRaceErr = r1.err
+						}
+
+					case r2 := <-secWait:
+						secWait = nil
+						if r2.err == nil && r2.opened != nil {
+							// Secondary hedge won: cancel, close body, and release concurrency on primary loser BEFORE touching w.
+							primCtrl.abortNow()
+							if lease != nil {
+								if lease.releaseInFlight != nil {
+									lease.releaseInFlight()
+								}
+								lease.winnerEmail = secEmail
+								lease.winnerRelease = releaseSecOnce
+								lease.hedgedWon = true
+							} else {
+								if primaryEmail != "" && GetAccountInFlight(primaryEmail) > 0 {
+									ReleaseAccountConcurrency(primaryEmail)
+								}
+								defer releaseSecOnce()
+							}
+							if primWait != nil {
+								go func(ch <-chan ccpaRaceResult) {
+									if r1 := <-ch; r1.opened != nil {
+										r1.opened.closeAndRelease()
+									}
+								}(primWait)
+								primWait = nil
+							}
+							accScope = secEmail
+							w.Header().Set("X-Omni-Gateway-Account", secEmail)
+							w.Header().Set("X-Omni-Gateway-Hedged-Racing", "WIN")
+							opened = r2.opened
+							defer func() {
+								secCtrl.abortNow()
+								opened.closeAndRelease()
+							}()
+							break
+						}
+						secCtrl.abortNow()
+						releaseSecOnce()
+						if lastRaceErr == nil && r2.err != nil {
+							lastRaceErr = r2.err
+						}
+					}
+					if opened != nil {
+						break
+					}
+				}
+
+				if opened == nil {
+					if ctx.Err() != nil {
+						return ctx.Err()
+					}
+					return lastRaceErr
+				}
+			}
+		}
+	}
+
+	activeCCPAModel := opened.activeCCPAModel
+	activeModelVersion := opened.activeModelVersion
+	activeScanner := opened.activeScanner
+	activeIdleTimer := opened.activeIdleTimer
+	activeCandCtx := opened.activeCandCtx
+	activeTimedOut := opened.activeTimedOut
+	initialText := opened.initialText
+	initialThoughts := opened.initialThoughts
+	lastUsage := opened.lastUsage
+	lastFinishReason := opened.lastFinishReason
+	cacheReq := cacheKeyRequestFromContext(ctx, req)
+
+	if !noThinking && resolved.ThinkingLevel != ThinkingLevelLow && resolved.CanonicalID != "" {
 		workingCCPAModelCache.Store(endpoint+"|acc:"+normalizeAccScope(accScope)+"|"+resolved.CanonicalID, activeCCPAModel)
 	}
 
@@ -1534,7 +1584,8 @@ func (u *GatewayUpstream) handleDirectCCPA(
 			flusher.Flush()
 		}
 
-		if streamScanErr == nil && stopReason != "length" && streamedText.Len() > 0 && !IsUnsupportedClientBanner(streamedText.String()) {
+		cleanStreamFinish := lastFinishReason == "" || stopReason == "stop" || stopReason == "end_turn"
+		if streamScanErr == nil && ctx.Err() == nil && cleanStreamFinish && streamedText.Len() > 0 && !IsUnsupportedClientBanner(streamedText.String()) {
 			cachedResp := OpenAIChatResponse{
 				ID:      respID,
 				Object:  "chat.completion",
@@ -1553,7 +1604,7 @@ func (u *GatewayUpstream) handleDirectCCPA(
 				},
 				Usage: &usage,
 			}
-			GetGlobalCache().Put(req, cachedResp)
+			GetGlobalCache().Put(cacheReq, cachedResp)
 		}
 		return nil
 	}
@@ -1634,12 +1685,414 @@ func (u *GatewayUpstream) handleDirectCCPA(
 		Usage: &usage,
 	}
 
-	if stopReason != "length" {
-		GetGlobalCache().Put(req, outResp)
+	if stopReason != "length" && fullText.Len() > 0 {
+		GetGlobalCache().Put(cacheReq, outResp)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	return json.NewEncoder(w).Encode(outResp)
+}
+
+type ccpaRacerControl struct {
+	cancel context.CancelFunc
+	mu     sync.Mutex
+	body   io.ReadCloser
+	closed bool
+}
+
+func (rc *ccpaRacerControl) trackBody(b io.ReadCloser) bool {
+	if rc == nil {
+		return true
+	}
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	if rc.closed {
+		if b != nil {
+			_ = b.Close()
+		}
+		return false
+	}
+	rc.body = b
+	return true
+}
+
+func (rc *ccpaRacerControl) clearTrackedBody() {
+	if rc == nil {
+		return
+	}
+	rc.mu.Lock()
+	rc.body = nil
+	rc.mu.Unlock()
+}
+
+func (rc *ccpaRacerControl) abortNow() {
+	if rc == nil {
+		return
+	}
+	if rc.cancel != nil {
+		rc.cancel()
+	}
+	rc.mu.Lock()
+	rc.closed = true
+	b := rc.body
+	rc.body = nil
+	rc.mu.Unlock()
+	if b != nil {
+		_ = b.Close()
+	}
+}
+
+type ccpaOpenedAttempt struct {
+	resp               *http.Response
+	activeCCPAModel    string
+	activeModelVersion string
+	activeScanner      *bufio.Scanner
+	activeIdleTimer    *time.Timer
+	activeCandCtx      context.Context
+	activeCancel       context.CancelFunc
+	activeTimedOut     *atomic.Bool
+	initialText        string
+	initialThoughts    string
+	lastUsage          *ccpaUsageMetadata
+	lastFinishReason   string
+	releaseScope       func()
+	closeOnce          sync.Once
+}
+
+func (a *ccpaOpenedAttempt) closeAndRelease() {
+	if a == nil {
+		return
+	}
+	a.closeOnce.Do(func() {
+		if a.activeIdleTimer != nil {
+			a.activeIdleTimer.Stop()
+		}
+		if a.activeCancel != nil {
+			a.activeCancel()
+		}
+		if a.resp != nil && a.resp.Body != nil {
+			_ = a.resp.Body.Close()
+		}
+		if a.releaseScope != nil {
+			a.releaseScope()
+		}
+	})
+}
+
+type ccpaRaceResult struct {
+	opened *ccpaOpenedAttempt
+	err    error
+}
+
+func (u *GatewayUpstream) openCCPAStreamWithFirstChunk(
+	attemptCtx context.Context,
+	ctrl *ccpaRacerControl,
+	endpoint string,
+	accScope string,
+	oauthToken string,
+	projectID string,
+	req OpenAIChatRequest,
+	resolved ResolvedModel,
+	inner ccpaInnerReq,
+	noThinking bool,
+	firstChunkTimeout time.Duration,
+) (*ccpaOpenedAttempt, error) {
+	releaseScopeInFlight := acquireCCPAScopeInFlight(accScope, oauthToken)
+	ccpaCandidates := buildCCPACandidatesWithCache(endpoint, accScope, resolved, noThinking)
+	_, isConnectedScope := lookupConnectedAntigravityAccountFast(accScope)
+	flagshipTier := primaryFlagshipTierForModel(endpoint, isConnectedScope, resolved)
+	isDefaultProdEndpoint := strings.EqualFold(strings.TrimSpace(endpoint), DefaultCCPAEndpoint)
+
+	var lastCCPAErr error
+
+	for _, candidate := range ccpaCandidates {
+		if attemptCtx.Err() != nil {
+			releaseScopeInFlight()
+			return nil, attemptCtx.Err()
+		}
+
+		// Multi-Account Flagship Protection: before downgrading to a lower model tier on the current account,
+		// check if another healthy Antigravity account still has flagship quota available.
+		if PinnedAccountFromContext(attemptCtx) == "" &&
+			len(flagshipTier) > 0 &&
+			!stringSliceContains(flagshipTier, candidate) &&
+			hasAlternateFlagshipAccount(endpoint, accScope, resolved.CanonicalID, flagshipTier) {
+			if strings.Contains(accScope, "@") {
+				RecordAccountModelRateLimit(accScope, resolved.CanonicalID, 2*time.Minute)
+			}
+			if lastCCPAErr != nil {
+				lastCCPAErr = fmt.Errorf("[flagship-failover] %w", lastCCPAErr)
+			} else {
+				lastCCPAErr = fmt.Errorf("[flagship-failover] CCPA HTTP 429: flagship tier %v rate-limited on %s", flagshipTier, accScope)
+			}
+			break
+		}
+
+		candInner := inner
+		if strings.Contains(candidate, "lite") && candInner.GenerationConfig.MaxOutputTokens > 32768 {
+			candInner.GenerationConfig.MaxOutputTokens = 32768
+		}
+		if (strings.HasPrefix(candidate, "claude-") ||
+			candidate == "gemini-3-flash" ||
+			candidate == "gemini-3.5-flash-lite" ||
+			candidate == "gemini-3.1-flash-lite" ||
+			strings.Contains(candidate, "image")) && candInner.GenerationConfig.ThinkingConfig != nil {
+			candInner.GenerationConfig.ThinkingConfig = nil
+		} else if candidate == "gemini-3.8-flash-high" || candidate == "gemini-3.8-flash-medium" || candidate == "gemini-3.8-flash-low" {
+			if !noThinking {
+				candInner.GenerationConfig.ThinkingConfig = &ccpaThinkingConfig{IncludeThoughts: true}
+			} else {
+				candInner.GenerationConfig.ThinkingConfig = nil
+			}
+			if candInner.GenerationConfig.MaxOutputTokens < 4096 {
+				candInner.GenerationConfig.MaxOutputTokens += 4096
+			}
+		} else if candidate == "gemini-3.8-flash-tiered" && candInner.GenerationConfig.ThinkingConfig != nil {
+			origTC := *candInner.GenerationConfig.ThinkingConfig
+			cappedBudget := 1024
+			if resolved.ThinkingLevel == ThinkingLevelLow || (origTC.ThinkingBudget != nil && *origTC.ThinkingBudget == 0) {
+				cappedBudget = 0
+			} else if origTC.ThinkingBudget != nil && *origTC.ThinkingBudget > 0 && *origTC.ThinkingBudget < cappedBudget {
+				cappedBudget = *origTC.ThinkingBudget
+			}
+			candInner.GenerationConfig.ThinkingConfig = &ccpaThinkingConfig{
+				IncludeThoughts: origTC.IncludeThoughts,
+				ThinkingLevel:   "",
+				ThinkingBudget:  &cappedBudget,
+			}
+			if cappedBudget > 0 && candInner.GenerationConfig.MaxOutputTokens < 2048 {
+				candInner.GenerationConfig.MaxOutputTokens += 2048
+			}
+		}
+
+		payload := ccpaRequestPayload{
+			Model:   candidate,
+			Project: projectID,
+			Request: candInner,
+		}
+
+		bodyBytes, err := json.Marshal(payload)
+		if err != nil {
+			lastCCPAErr = err
+			continue
+		}
+
+		candCtx, cancelCand := context.WithTimeout(attemptCtx, CCPACandidateMaxTimeout)
+		var timedOut atomic.Bool
+		idleTimer := time.AfterFunc(firstChunkTimeout, func() {
+			timedOut.Store(true)
+			cancelCand()
+		})
+
+		httpReq, err := http.NewRequestWithContext(candCtx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
+		if err != nil {
+			idleTimer.Stop()
+			cancelCand()
+			lastCCPAErr = err
+			continue
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("Accept", "text/event-stream")
+		httpReq.Header.Set("User-Agent", GetAgyUserAgent())
+		httpReq.Header.Set("Authorization", "Bearer "+oauthToken)
+
+		r, err := u.ccpaHTTPClientForScope(accScope, oauthToken).Do(httpReq)
+		if err != nil {
+			idleTimer.Stop()
+			candErr := candCtx.Err()
+			cancelCand()
+			if attemptCtx.Err() != nil {
+				releaseScopeInFlight()
+				return nil, attemptCtx.Err()
+			}
+			if timedOut.Load() || candErr != nil {
+				if isDefaultProdEndpoint && strings.Contains(accScope, "@") {
+					markAccountDeadCCPAModel(endpoint, accScope, candidate, 30*time.Second)
+				} else {
+					markDeadCCPAModel(endpoint, candidate, 2*time.Minute)
+				}
+			}
+			lastCCPAErr = err
+			log.Printf("[omni-gateway] CCPA candidate %q transport error: %v; trying next CCPA tier model", candidate, err)
+			continue
+		}
+
+		if !ctrl.trackBody(r.Body) {
+			idleTimer.Stop()
+			cancelCand()
+			releaseScopeInFlight()
+			if attemptCtx.Err() != nil {
+				return nil, attemptCtx.Err()
+			}
+			return nil, context.Canceled
+		}
+
+		if r.StatusCode < 200 || r.StatusCode >= 300 {
+			idleTimer.Stop()
+			errBody, _ := io.ReadAll(io.LimitReader(r.Body, 4096))
+			ctrl.clearTrackedBody()
+			_ = r.Body.Close()
+			cancelCand()
+			switch r.StatusCode {
+			case http.StatusNotFound:
+				markDeadCCPAModel(endpoint, candidate, 6*time.Hour)
+			case http.StatusTooManyRequests:
+				markAccountDeadCCPAModel(endpoint, accScope, candidate, 2*time.Minute)
+				if isDefaultProdEndpoint && strings.HasPrefix(candidate, "claude-") {
+					markAccountDeadCCPAModel(endpoint, accScope, "claude-opus-4-6-thinking", 2*time.Minute)
+					markAccountDeadCCPAModel(endpoint, accScope, "claude-sonnet-4-6", 2*time.Minute)
+				}
+			case http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+				markDeadCCPAModel(endpoint, candidate, 2*time.Minute)
+			}
+			lastCCPAErr = fmt.Errorf("CCPA HTTP %d (%s): %s", r.StatusCode, candidate, strings.TrimSpace(string(errBody)))
+			if r.StatusCode == http.StatusUnauthorized || r.StatusCode == http.StatusForbidden {
+				log.Printf("[omni-gateway] CCPA candidate %q returned HTTP %d; stopping tier fallback for account recovery/failover", candidate, r.StatusCode)
+				break
+			}
+			log.Printf("[omni-gateway] CCPA candidate %q returned HTTP %d; trying next CCPA tier model", candidate, r.StatusCode)
+			continue
+		}
+
+		scanner := bufio.NewScanner(r.Body)
+		scanner.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)
+
+		var (
+			candInitialText     strings.Builder
+			candInitialThoughts strings.Builder
+			candRawNonSSE       strings.Builder
+			candLastUsage       *ccpaUsageMetadata
+			candFinishReason    string
+			candModelVersion    string
+			foundSSE            bool
+		)
+
+		for scanner.Scan() {
+			rawLine := scanner.Text()
+			line := strings.TrimSpace(rawLine)
+			if !strings.HasPrefix(line, "data:") {
+				if line != "" && !strings.HasPrefix(line, ":") && !strings.HasPrefix(line, "event:") && !strings.HasPrefix(line, "id:") && !strings.HasPrefix(line, "retry:") {
+					candRawNonSSE.WriteString(rawLine)
+					candRawNonSSE.WriteByte('\n')
+				}
+				continue
+			}
+			foundSSE = true
+			dataStr := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+			if dataStr == "" || dataStr == "[DONE]" {
+				continue
+			}
+			textDelta, thoughtDelta, uMeta, rawFR, mVer := extractCCPAChunkWithVersion(dataStr)
+			if mVer != "" {
+				candModelVersion = mVer
+			}
+			if uMeta != nil && (uMeta.TotalTokenCount > 0 || uMeta.PromptTokenCount > 0 || uMeta.CandidatesTokenCount > 0) {
+				candLastUsage = uMeta
+			}
+			if rawFR != "" {
+				candFinishReason = rawFR
+			}
+			if textDelta == "" && thoughtDelta == "" {
+				continue
+			}
+			idleTimer.Reset(CCPAStreamIdleTimeout)
+			candInitialText.WriteString(textDelta)
+			candInitialThoughts.WriteString(thoughtDelta)
+
+			probe := candInitialText.String()
+			if IsUnsupportedClientBanner(probe) {
+				idleTimer.Stop()
+				ctrl.clearTrackedBody()
+				_ = r.Body.Close()
+				cancelCand()
+				releaseScopeInFlight()
+				return nil, fmt.Errorf("CCPA client version rejected by upstream (update OMNI_AGY_USER_AGENT): %s", TruncateUTF8(probe, 200))
+			}
+			lowerProbe := strings.ToLower(strings.TrimSpace(probe))
+			if candInitialThoughts.Len() == 0 && lowerProbe != "" && len(lowerProbe) < 60 &&
+				strings.HasPrefix("this version of antigravity is no longer supported", lowerProbe) {
+				continue
+			}
+			break
+		}
+
+		scanErr := scanner.Err()
+		candErr := candCtx.Err()
+
+		if !foundSSE && candRawNonSSE.Len() > 0 {
+			tDelta, thDelta, uMeta, rawFR, mVer := extractCCPAChunkWithVersion(candRawNonSSE.String())
+			if mVer != "" {
+				candModelVersion = mVer
+			}
+			if uMeta != nil && (uMeta.TotalTokenCount > 0 || uMeta.PromptTokenCount > 0 || uMeta.CandidatesTokenCount > 0) {
+				candLastUsage = uMeta
+			}
+			if rawFR != "" {
+				candFinishReason = rawFR
+			}
+			candInitialText.WriteString(tDelta)
+			candInitialThoughts.WriteString(thDelta)
+		}
+
+		if IsUnsupportedClientBanner(candInitialText.String()) || IsUnsupportedClientBanner(candRawNonSSE.String()) {
+			idleTimer.Stop()
+			ctrl.clearTrackedBody()
+			_ = r.Body.Close()
+			cancelCand()
+			releaseScopeInFlight()
+			banner := candInitialText.String()
+			if strings.TrimSpace(banner) == "" {
+				banner = candRawNonSSE.String()
+			}
+			return nil, fmt.Errorf("CCPA client version rejected by upstream (update OMNI_AGY_USER_AGENT): %s", TruncateUTF8(banner, 200))
+		}
+
+		if scanErr != nil || (candInitialText.Len() == 0 && candInitialThoughts.Len() == 0 && (timedOut.Load() || candErr != nil)) {
+			idleTimer.Stop()
+			ctrl.clearTrackedBody()
+			_ = r.Body.Close()
+			cancelCand()
+			if attemptCtx.Err() != nil {
+				releaseScopeInFlight()
+				return nil, attemptCtx.Err()
+			}
+			if isDefaultProdEndpoint && strings.Contains(accScope, "@") {
+				markAccountDeadCCPAModel(endpoint, accScope, candidate, 30*time.Second)
+			} else {
+				markDeadCCPAModel(endpoint, candidate, 2*time.Minute)
+			}
+			if candErr != nil {
+				lastCCPAErr = fmt.Errorf("CCPA candidate %q timed out waiting for first token: %v", candidate, candErr)
+			} else {
+				lastCCPAErr = fmt.Errorf("CCPA candidate %q stream error before first token: %v", candidate, scanErr)
+			}
+			log.Printf("[omni-gateway] %v; trying next CCPA tier model", lastCCPAErr)
+			continue
+		}
+
+		idleTimer.Reset(CCPAStreamIdleTimeout)
+		return &ccpaOpenedAttempt{
+			resp:               r,
+			activeCCPAModel:    candidate,
+			activeModelVersion: candModelVersion,
+			activeScanner:      scanner,
+			activeIdleTimer:    idleTimer,
+			activeCandCtx:      candCtx,
+			activeCancel:       cancelCand,
+			activeTimedOut:     &timedOut,
+			initialText:        candInitialText.String(),
+			initialThoughts:    candInitialThoughts.String(),
+			lastUsage:          candLastUsage,
+			lastFinishReason:   candFinishReason,
+			releaseScope:       releaseScopeInFlight,
+		}, nil
+	}
+
+	releaseScopeInFlight()
+	if attemptCtx.Err() != nil {
+		return nil, attemptCtx.Err()
+	}
+	return nil, lastCCPAErr
 }
 
 func (u *GatewayUpstream) rotateStripedComboTargets(resolved ResolvedModel, targets []ResolvedModel) []ResolvedModel {
@@ -1762,21 +2215,27 @@ func buildCCPACandidatesWithCache(endpoint, accScope string, resolved ResolvedMo
 	if endpoint == "" {
 		endpoint = DefaultCCPAEndpoint
 	}
-	if resolved.ComboMode == ComboModeStriped && strings.TrimSpace(resolved.CCPAModelID) != "" && !isVirtualCCPAIDEAlias(resolved.CCPAModelID) {
-		return []string{strings.TrimSpace(resolved.CCPAModelID)}
-	}
 	isDefaultProdEndpoint := strings.EqualFold(strings.TrimSpace(endpoint), DefaultCCPAEndpoint)
 	scope := normalizeAccScope(accScope)
+	if resolved.ComboMode == ComboModeStriped && strings.TrimSpace(resolved.CCPAModelID) != "" && !isVirtualCCPAIDEAlias(resolved.CCPAModelID) {
+		cand := strings.TrimSpace(resolved.CCPAModelID)
+		if !(isDefaultProdEndpoint && strings.Contains(scope, "@") && IsAccountModelRateLimited(scope, cand)) {
+			return []string{cand}
+		}
+	}
 	_, isConnected := lookupConnectedAntigravityAccountFast(scope)
 	claudeExhausted := isAccountClaudeQuotaExhaustedFast(scope)
 
 	var raw []string
 	var cachedWinner string
-	if !noThinking && resolved.CanonicalID != "" {
+	if !noThinking && !(isDefaultProdEndpoint && resolved.ThinkingLevel == ThinkingLevelLow) && resolved.CanonicalID != "" {
 		if cached, ok := workingCCPAModelCache.Load(endpoint + "|acc:" + scope + "|" + resolved.CanonicalID); ok {
 			if s, ok := cached.(string); ok && s != "" {
-				if !(claudeExhausted && strings.HasPrefix(strings.ToLower(strings.TrimSpace(s)), "claude-")) {
-					cachedWinner = strings.TrimSpace(s)
+				sTrim := strings.TrimSpace(s)
+				sLower := strings.ToLower(sTrim)
+				rateMasked := isDefaultProdEndpoint && strings.Contains(scope, "@") && IsAccountModelRateLimited(scope, sTrim)
+				if !rateMasked && !(claudeExhausted && strings.HasPrefix(sLower, "claude-")) {
+					cachedWinner = sTrim
 					raw = append(raw, cachedWinner)
 				}
 			}
@@ -1785,8 +2244,14 @@ func buildCCPACandidatesWithCache(endpoint, accScope string, resolved ResolvedMo
 
 	if isDefaultProdEndpoint && isConnected {
 		appendClaude := func(models ...string) {
-			if !claudeExhausted {
-				raw = append(raw, models...)
+			if claudeExhausted {
+				return
+			}
+			for _, cm := range models {
+				if strings.Contains(scope, "@") && IsAccountModelRateLimited(scope, cm) {
+					continue
+				}
+				raw = append(raw, cm)
 			}
 		}
 		canonLower := strings.ToLower(strings.TrimSpace(resolved.CanonicalID))
@@ -1797,8 +2262,8 @@ func buildCCPACandidatesWithCache(endpoint, accScope string, resolved ResolvedMo
 			switch resolved.ThinkingLevel {
 			case ThinkingLevelLow:
 				raw = append(raw,
-					"gemini-3.8-flash-low",
 					"gemini-3-flash",
+					"gemini-3.8-flash-low",
 					"gemini-3.5-flash-lite",
 				)
 			case ThinkingLevelMedium:
@@ -1824,8 +2289,8 @@ func buildCCPACandidatesWithCache(endpoint, accScope string, resolved ResolvedMo
 			switch resolved.ThinkingLevel {
 			case ThinkingLevelLow:
 				raw = append(raw,
-					"gemini-3.8-flash-low",
 					"gemini-3-flash",
+					"gemini-3.8-flash-low",
 					"gemini-3.5-flash-lite",
 				)
 			case ThinkingLevelMedium:
@@ -1848,9 +2313,9 @@ func buildCCPACandidatesWithCache(endpoint, accScope string, resolved ResolvedMo
 		case strings.HasPrefix(resolved.CCPAModelID, "gemini-3.1-pro") || strings.Contains(canonLower, "gemini-3.1-pro"):
 			if resolved.ThinkingLevel == ThinkingLevelLow {
 				raw = append(raw,
-					"gemini-3.8-flash-tiered",
-					"gemini-3.8-flash-low",
 					"gemini-3-flash",
+					"gemini-3.8-flash-low",
+					"gemini-3.8-flash-tiered",
 				)
 			} else {
 				raw = append(raw,
@@ -1870,8 +2335,8 @@ func buildCCPACandidatesWithCache(endpoint, accScope string, resolved ResolvedMo
 				)
 			} else if resolved.ThinkingLevel == ThinkingLevelLow {
 				raw = append(raw,
-					"gemini-3.8-flash-low",
 					"gemini-3-flash",
+					"gemini-3.8-flash-low",
 					"gemini-3.5-flash-lite",
 				)
 			} else if resolved.ThinkingLevel == ThinkingLevelMedium {
@@ -1938,6 +2403,7 @@ func buildCCPACandidatesWithCache(endpoint, accScope string, resolved ResolvedMo
 				raw = append(raw,
 					"gemini-4-carbon-low",
 					"gemini-3-flash",
+					"gemini-3.8-flash-low",
 					"gemini-3.5-flash-lite",
 					"claude-sonnet-4-6",
 					"gemini-3.8-flash-tiered",
@@ -2375,8 +2841,26 @@ func (u *GatewayUpstream) handleOmniRouteWithFallback(
 			w.Header().Set("X-Omni-Gateway-Thinking-Level", string(resolved.ThinkingLevel))
 		}
 
+		cacheReq := cacheKeyRequestFromContext(ctx, req)
 		if req.Stream {
+			if bytes.HasPrefix(bytes.TrimSpace(bodyBytes), []byte("data:")) || bytes.Contains(bodyBytes, []byte("\ndata:")) {
+				agg := aggregateSSEToResponse(bodyBytes, resolved.RequestedID)
+				if len(agg.Choices) > 0 && agg.Choices[0].Message != nil && agg.Choices[0].Message.Content != "" && agg.Choices[0].FinishReason != "length" {
+					GetGlobalCache().Put(cacheReq, agg)
+				}
+			} else {
+				var parsed OpenAIChatResponse
+				if json.Unmarshal(bodyBytes, &parsed) == nil && len(parsed.Choices) > 0 && parsed.Choices[0].FinishReason != "length" {
+					parsed.Model = resolved.RequestedID
+					GetGlobalCache().Put(cacheReq, parsed)
+				}
+			}
 			return writeStreamingResponse(w, bodyBytes, resolved.RequestedID)
+		}
+		var parsed OpenAIChatResponse
+		if json.Unmarshal(bodyBytes, &parsed) == nil && len(parsed.Choices) > 0 && parsed.Choices[0].FinishReason != "length" {
+			parsed.Model = resolved.RequestedID
+			GetGlobalCache().Put(cacheReq, parsed)
 		}
 		return writeNonStreamingResponse(w, bodyBytes, resolved.RequestedID)
 	}
