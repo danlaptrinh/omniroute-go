@@ -1,15 +1,20 @@
 package gateway
 
 import (
+	"bytes"
 	"compress/gzip"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"regexp"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
+
+const maxLiteCompressMessageBytes = 128 * 1024
 
 var (
 	// Regex patterns for conversational filler and hedging (Caveman mode)
@@ -21,28 +26,69 @@ var (
 	multiNewlines = regexp.MustCompile(`\n{3,}`)
 	multiSpaces   = regexp.MustCompile(`[ \t]{2,}`)
 
-	// Global in-memory stats cache for compression
-	globalTokensSaved     int64
-	globalCallsCompressed int64
+	// Global in-memory stats cache for compression (lock-free hot path)
+	globalTokensSaved      int64
+	globalCallsCompressed  int64
+	pendingTokensSaved     atomic.Int64
+	pendingCallsCompressed atomic.Int64
+	compSyncScheduled      atomic.Bool
+	gzipEnabledFast        atomic.Bool
 )
 
-// RecordCompressionSavings records cumulative token savings and request count.
+func init() {
+	gzipEnabledFast.Store(true)
+}
+
+// RecordCompressionSavings records cumulative token savings and request count
+// using lock-free atomic increments and a 2-second debounced background config sync.
 func RecordCompressionSavings(savedTokens int) {
 	if savedTokens <= 0 {
 		return
 	}
 	atomic.AddInt64(&globalTokensSaved, int64(savedTokens))
 	atomic.AddInt64(&globalCallsCompressed, 1)
+	pendingTokensSaved.Add(int64(savedTokens))
+	pendingCallsCompressed.Add(1)
 
-	// Persist asynchronously without blocking the request path
+	if compSyncScheduled.CompareAndSwap(false, true) {
+		scheduledPath := GatewayConfigFilePath()
+		time.AfterFunc(2*time.Second, func() {
+			compSyncScheduled.Store(false)
+			flushCompressionSavingsForPath(scheduledPath)
+		})
+	}
+}
+
+// FlushCompressionSavings immediately flushes any pending in-memory compression counters to config.
+func FlushCompressionSavings() {
+	compSyncScheduled.Store(false)
+	flushCompressionSavingsForPath(GatewayConfigFilePath())
+}
+
+func flushCompressionSavingsForPath(expectedPath string) {
+	deltaTokens := pendingTokensSaved.Swap(0)
+	deltaCalls := pendingCallsCompressed.Swap(0)
+	if deltaTokens <= 0 && deltaCalls <= 0 {
+		return
+	}
+
 	configMu.Lock()
 	defer configMu.Unlock()
-	cfg := loadSavedAuthConfigLocked()
-	if cfg.CompressionConfig != nil {
-		cfg.CompressionConfig.TotalTokensSaved += int64(savedTokens)
-		cfg.CompressionConfig.TotalCallsHandled++
-		saveAuthConfigAsyncLocked(cfg)
+	if expectedPath != "" && GatewayConfigFilePath() != expectedPath {
+		return
 	}
+	cfg := loadSavedAuthConfigLocked()
+	if cfg.CompressionConfig == nil {
+		cfg.CompressionConfig = &CompressionConfig{
+			Mode:            CompressionLite,
+			CompressCode:    false,
+			MaxHistoryTurns: 10,
+			EnableGzip:      true,
+		}
+	}
+	cfg.CompressionConfig.TotalTokensSaved += deltaTokens
+	cfg.CompressionConfig.TotalCallsHandled += deltaCalls
+	saveAuthConfigAsyncLocked(cfg)
 }
 
 // GetCompressionConfig returns the current compression configuration and live stats.
@@ -51,53 +97,80 @@ func GetCompressionConfig() CompressionConfig {
 	defer configMu.Unlock()
 	cfg := loadSavedAuthConfigLocked()
 	if cfg.CompressionConfig == nil {
-		return CompressionConfig{
-			Mode:            CompressionLite,
-			CompressCode:    false,
-			MaxHistoryTurns: 10,
-			EnableGzip:      true,
+		res := CompressionConfig{
+			Mode:              CompressionLite,
+			CompressCode:      false,
+			MaxHistoryTurns:   10,
+			EnableGzip:        true,
+			TotalTokensSaved:  pendingTokensSaved.Load(),
+			TotalCallsHandled: pendingCallsCompressed.Load(),
 		}
+		gzipEnabledFast.Store(true)
+		return res
 	}
 	res := *cfg.CompressionConfig
-	// Update with atomic runtime counts if higher
+	res.TotalTokensSaved += pendingTokensSaved.Load()
+	res.TotalCallsHandled += pendingCallsCompressed.Load()
+
 	memSaved := atomic.LoadInt64(&globalTokensSaved)
-	if memSaved > res.TotalTokensSaved {
+	if memSaved > res.TotalTokensSaved && res.TotalTokensSaved > 0 {
 		res.TotalTokensSaved = memSaved
 	}
 	memCalls := atomic.LoadInt64(&globalCallsCompressed)
-	if memCalls > res.TotalCallsHandled {
+	if memCalls > res.TotalCallsHandled && res.TotalCallsHandled > 0 {
 		res.TotalCallsHandled = memCalls
 	}
+	gzipEnabledFast.Store(res.EnableGzip)
 	return res
 }
 
 // SetCompressionConfig saves updated compression parameters.
 func SetCompressionConfig(newCfg CompressionConfig) error {
+	deltaTokens := pendingTokensSaved.Swap(0)
+	deltaCalls := pendingCallsCompressed.Swap(0)
+
 	configMu.Lock()
 	defer configMu.Unlock()
 	cfg := loadSavedAuthConfigLocked()
 	if cfg.CompressionConfig != nil {
-		newCfg.TotalTokensSaved = cfg.CompressionConfig.TotalTokensSaved
-		newCfg.TotalCallsHandled = cfg.CompressionConfig.TotalCallsHandled
+		newCfg.TotalTokensSaved = cfg.CompressionConfig.TotalTokensSaved + deltaTokens
+		newCfg.TotalCallsHandled = cfg.CompressionConfig.TotalCallsHandled + deltaCalls
+	} else {
+		newCfg.TotalTokensSaved += deltaTokens
+		newCfg.TotalCallsHandled += deltaCalls
 	}
 	cfg.CompressionConfig = &newCfg
 	cfg.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	gzipEnabledFast.Store(newCfg.EnableGzip)
 	return saveAuthConfigLocked(cfg)
 }
 
+func isJSONArrayContent(raw json.RawMessage) bool {
+	for _, b := range raw {
+		switch b {
+		case ' ', '\t', '\r', '\n':
+			continue
+		case '[':
+			return true
+		default:
+			return false
+		}
+	}
+	return false
+}
+
 // CompressRequest applies the configured compression pipeline to an incoming OpenAI chat request.
-// Returns the compressed request, estimated tokens before, and estimated tokens after.
+// Preserves multimodal array content blocks intact, skips expensive Lite regex passes on >128KB messages,
+// and computes before/after token estimates in a single pass without redundant JSON unmarshaling.
 func CompressRequest(req OpenAIChatRequest, cfg CompressionConfig) (OpenAIChatRequest, int, int) {
 	tokensBefore := EstimateTokens(req.Messages)
-	if cfg.Mode == CompressionOff || cfg.Mode == "" {
+	if cfg.Mode == CompressionOff || cfg.Mode == "" || len(req.Messages) == 0 {
 		return req, tokensBefore, tokensBefore
 	}
 
 	cloned := req
 	cloned.Messages = make([]OpenAIChatMessage, len(req.Messages))
-	for i, m := range req.Messages {
-		cloned.Messages[i] = m
-	}
+	copy(cloned.Messages, req.Messages)
 
 	// 1. History compaction (Ultra mode)
 	if cfg.Mode == CompressionUltra {
@@ -108,10 +181,35 @@ func CompressRequest(req OpenAIChatRequest, cfg CompressionConfig) (OpenAIChatRe
 		cloned.Messages = compressUltraHistory(cloned.Messages, maxTurns)
 	}
 
-	// 2. Message-by-message compression
+	// 2. Single-pass message-by-message compression + token char accumulation
+	charsAfter := 0
 	for i := range cloned.Messages {
-		text := cloned.Messages[i].ContentText()
+		roleLen := len(cloned.Messages[i].Role)
+		raw := cloned.Messages[i].Content
+		if len(raw) == 0 {
+			charsAfter += roleLen
+			continue
+		}
+
+		// Preserve OpenAI/Anthropic multimodal content arrays (e.g. image_url / content blocks) intact!
+		if isJSONArrayContent(raw) {
+			charsAfter += roleLen + estimateRawContentChars(raw)
+			continue
+		}
+
+		// Fast-path: skip expensive multi-pass regex/line splitting on >128KB code prompts in Lite mode
+		if cfg.Mode == CompressionLite && len(raw) > maxLiteCompressMessageBytes {
+			charsAfter += roleLen + estimateRawContentChars(raw)
+			continue
+		}
+
+		var text string
+		if err := json.Unmarshal(raw, &text); err != nil {
+			charsAfter += roleLen + estimateRawContentChars(raw)
+			continue
+		}
 		if text == "" {
+			charsAfter += roleLen
 			continue
 		}
 
@@ -128,14 +226,21 @@ func CompressRequest(req OpenAIChatRequest, cfg CompressionConfig) (OpenAIChatRe
 			compressed = CompressTextLite(text, cfg.CompressCode)
 		}
 
-		// Re-encode message content as JSON string
-		raw, err := json.Marshal(compressed)
+		if compressed == text {
+			charsAfter += roleLen + len(text)
+			continue
+		}
+
+		encoded, err := json.Marshal(compressed)
 		if err == nil {
-			cloned.Messages[i].Content = raw
+			cloned.Messages[i].Content = encoded
+			charsAfter += roleLen + len(compressed)
+		} else {
+			charsAfter += roleLen + len(text)
 		}
 	}
 
-	tokensAfter := EstimateTokens(cloned.Messages)
+	tokensAfter := charsToTokens(charsAfter)
 	if tokensAfter > tokensBefore {
 		tokensAfter = tokensBefore
 	}
@@ -163,12 +268,15 @@ func CompressTextLite(text string, compressCode bool) string {
 }
 
 func cleanLiteWhitespace(s string) string {
-	s = multiNewlines.ReplaceAllString(s, "\n\n")
+	if strings.Contains(s, "\n\n\n") {
+		s = multiNewlines.ReplaceAllString(s, "\n\n")
+	}
 	lines := strings.Split(s, "\n")
 	for i, l := range lines {
 		trimmed := strings.TrimRight(l, " \t")
 		// Do not collapse indentation if leading spaces exist
-		if len(trimmed) > 0 && trimmed[0] != ' ' && trimmed[0] != '\t' {
+		if len(trimmed) > 0 && trimmed[0] != ' ' && trimmed[0] != '\t' &&
+			(strings.Contains(trimmed, "  ") || strings.IndexByte(trimmed, '\t') >= 0) {
 			trimmed = multiSpaces.ReplaceAllString(trimmed, " ")
 		}
 		lines[i] = trimmed
@@ -311,60 +419,248 @@ func compressUltraHistory(msgs []OpenAIChatMessage, maxTurns int) []OpenAIChatMe
 	return result
 }
 
-// EstimateTokens calculates an approximate token count based on standard character/word heuristic.
-func EstimateTokens(msgs []OpenAIChatMessage) int {
-	totalChars := 0
-	for _, m := range msgs {
-		totalChars += len(m.Role) + len(m.ContentText())
+func charsToTokens(totalChars int) int {
+	if totalChars <= 0 {
+		return 0
 	}
 	// Roughly 3.8 characters per token for mixed English / code
 	tokens := int(float64(totalChars) / 3.8)
-	if tokens < 1 && totalChars > 0 {
+	if tokens < 1 {
 		return 1
 	}
 	return tokens
 }
 
-// --- HTTP Transport Gzip Middleware ---
+// unescapedJSONStringLen counts the exact unmarshaled byte length of an inner JSON string slice (without quotes)
+// in a single pass with zero heap allocations.
+func unescapedJSONStringLen(inner []byte) int {
+	if bytes.IndexByte(inner, '\\') < 0 {
+		return len(inner)
+	}
+	n := 0
+	for i := 0; i < len(inner); i++ {
+		if inner[i] == '\\' && i+1 < len(inner) {
+			i++
+			if inner[i] == 'u' && i+4 < len(inner) {
+				i += 4
+				n += 2
+				continue
+			}
+		}
+		n++
+	}
+	return n
+}
 
-type gzipResponseWriter struct {
+var jsonTextFieldKey = []byte(`"text"`)
+
+// estimateJSONArrayTextChars scans a JSON multimodal array for "text":"..." string fields with zero heap allocations.
+func estimateJSONArrayTextChars(raw []byte) int {
+	total := 0
+	parts := 0
+	idx := 0
+	for idx < len(raw) {
+		pos := bytes.Index(raw[idx:], jsonTextFieldKey)
+		if pos < 0 {
+			break
+		}
+		idx += pos + len(jsonTextFieldKey)
+		for idx < len(raw) && (raw[idx] == ' ' || raw[idx] == '\t' || raw[idx] == '\r' || raw[idx] == '\n') {
+			idx++
+		}
+		if idx >= len(raw) || raw[idx] != ':' {
+			continue
+		}
+		idx++
+		for idx < len(raw) && (raw[idx] == ' ' || raw[idx] == '\t' || raw[idx] == '\r' || raw[idx] == '\n') {
+			idx++
+		}
+		if idx >= len(raw) || raw[idx] != '"' {
+			continue
+		}
+		idx++ // skip opening quote
+		start := idx
+		for idx < len(raw) {
+			if raw[idx] == '\\' {
+				idx += 2
+				continue
+			}
+			if raw[idx] == '"' {
+				break
+			}
+			idx++
+		}
+		if idx <= len(raw) {
+			segLen := unescapedJSONStringLen(raw[start:idx])
+			if segLen > 0 {
+				if parts > 0 {
+					total++ // newline separator matching ContentText()
+				}
+				total += segLen
+				parts++
+			}
+			idx++ // skip closing quote
+		}
+	}
+	return total
+}
+
+func estimateRawContentChars(raw json.RawMessage) int {
+	b := bytes.TrimSpace(raw)
+	if len(b) == 0 || bytes.Equal(b, []byte("null")) {
+		return 0
+	}
+	if b[0] == '"' && len(b) >= 2 && b[len(b)-1] == '"' {
+		return unescapedJSONStringLen(b[1 : len(b)-1])
+	}
+	if b[0] == '[' {
+		return estimateJSONArrayTextChars(b)
+	}
+	return len(b)
+}
+
+// EstimateTokens calculates an approximate token count without allocating or re-unmarshaling JSON strings.
+func EstimateTokens(msgs []OpenAIChatMessage) int {
+	totalChars := 0
+	for _, m := range msgs {
+		totalChars += len(m.Role) + estimateRawContentChars(m.Content)
+	}
+	return charsToTokens(totalChars)
+}
+
+// --- HTTP Transport Gzip Middleware (Pooled + Lazy SSE Sniffing) ---
+
+var gzipWriterPool = sync.Pool{
+	New: func() any {
+		gz, _ := gzip.NewWriterLevel(io.Discard, gzip.BestSpeed)
+		return gz
+	},
+}
+
+var lazyGzipWriterPool = sync.Pool{
+	New: func() any {
+		return &lazyGzipResponseWriter{}
+	},
+}
+
+func hasSSEMediaType(v string) bool {
+	v = strings.TrimSpace(v)
+	const ssePrefix = "text/event-stream"
+	return len(v) >= len(ssePrefix) && strings.EqualFold(v[:len(ssePrefix)], ssePrefix)
+}
+
+func addVaryAcceptEncoding(h http.Header) {
+	existing := h.Get("Vary")
+	if existing == "" {
+		h.Set("Vary", "Accept-Encoding")
+		return
+	}
+	if !strings.Contains(strings.ToLower(existing), "accept-encoding") {
+		h.Set("Vary", existing+", Accept-Encoding")
+	}
+}
+
+type lazyGzipResponseWriter struct {
 	http.ResponseWriter
-	writer *gzip.Writer
+	gz          *gzip.Writer
+	decided     bool
+	passthrough bool
 }
 
-func (w *gzipResponseWriter) Write(b []byte) (int, error) {
-	return w.writer.Write(b)
+func (lw *lazyGzipResponseWriter) Unwrap() http.ResponseWriter {
+	return lw.ResponseWriter
 }
 
-func (w *gzipResponseWriter) Flush() {
-	_ = w.writer.Flush()
-	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+func (lw *lazyGzipResponseWriter) WriteHeader(status int) {
+	if lw.decided {
+		return
+	}
+	lw.decided = true
+
+	h := lw.ResponseWriter.Header()
+	if status == http.StatusNoContent ||
+		status == http.StatusNotModified ||
+		(status >= 100 && status < 200) ||
+		hasSSEMediaType(h.Get("Content-Type")) ||
+		h.Get("Content-Encoding") != "" {
+		lw.passthrough = true
+		lw.ResponseWriter.WriteHeader(status)
+		return
+	}
+
+	lw.passthrough = false
+	h.Del("Content-Length")
+	h.Set("Content-Encoding", "gzip")
+	addVaryAcceptEncoding(h)
+
+	gz := gzipWriterPool.Get().(*gzip.Writer)
+	gz.Reset(lw.ResponseWriter)
+	lw.gz = gz
+	lw.ResponseWriter.WriteHeader(status)
+}
+
+func (lw *lazyGzipResponseWriter) Write(b []byte) (int, error) {
+	if !lw.decided {
+		h := lw.ResponseWriter.Header()
+		if h.Get("Content-Type") == "" && len(b) > 0 {
+			trimmed := bytes.TrimLeft(b, " \t\r\n")
+			if bytes.HasPrefix(trimmed, []byte("data:")) || bytes.HasPrefix(trimmed, []byte("event:")) {
+				h.Set("Content-Type", "text/event-stream")
+			} else {
+				h.Set("Content-Type", http.DetectContentType(b))
+			}
+		}
+		lw.WriteHeader(http.StatusOK)
+	}
+	if lw.passthrough {
+		return lw.ResponseWriter.Write(b)
+	}
+	return lw.gz.Write(b)
+}
+
+func (lw *lazyGzipResponseWriter) Flush() {
+	if !lw.decided {
+		lw.WriteHeader(http.StatusOK)
+	}
+	if !lw.passthrough && lw.gz != nil {
+		_ = lw.gz.Flush()
+	}
+	if flusher, ok := lw.ResponseWriter.(http.Flusher); ok {
 		flusher.Flush()
 	}
 }
 
-// withGzip wraps an http.Handler to automatically compress responses when requested by client.
+func (lw *lazyGzipResponseWriter) finishAndRecycle() {
+	if lw.gz != nil {
+		_ = lw.gz.Close()
+		lw.gz.Reset(io.Discard)
+		gzipWriterPool.Put(lw.gz)
+		lw.gz = nil
+	}
+	lw.ResponseWriter = nil
+	lw.decided = false
+	lw.passthrough = false
+	lazyGzipWriterPool.Put(lw)
+}
+
+// withGzip wraps an http.Handler to lazily compress JSON/HTML responses via a sync.Pool of *gzip.Writer
+// while passing Server-Sent Events (text/event-stream), 204/304, and HEAD responses raw with zero gzip allocation.
 func withGzip(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Do not gzip for Server-Sent Events (streaming) or if client does not support gzip
-		if !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") ||
-			r.Header.Get("Accept") == "text/event-stream" ||
+		if !gzipEnabledFast.Load() ||
+			r.Method == http.MethodHead ||
+			r.Method == http.MethodOptions ||
+			!strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") ||
+			hasSSEMediaType(r.Header.Get("Accept")) ||
 			strings.Contains(r.URL.Path, "stream") {
 			next.ServeHTTP(w, r)
 			return
 		}
 
-		w.Header().Set("Content-Encoding", "gzip")
-		w.Header().Set("Vary", "Accept-Encoding")
+		lw := lazyGzipWriterPool.Get().(*lazyGzipResponseWriter)
+		lw.ResponseWriter = w
+		defer lw.finishAndRecycle()
 
-		gz, err := gzip.NewWriterLevel(w, gzip.BestSpeed)
-		if err != nil {
-			next.ServeHTTP(w, r)
-			return
-		}
-		defer gz.Close()
-
-		gzw := &gzipResponseWriter{ResponseWriter: w, writer: gz}
-		next.ServeHTTP(gzw, r)
+		next.ServeHTTP(lw, r)
 	})
 }

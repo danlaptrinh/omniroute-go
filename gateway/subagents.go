@@ -22,12 +22,14 @@ var (
 	accountInFlight   = make(map[string]int)
 	accountActiveRole = make(map[string]string)
 
-	swarmHistoryMu       sync.RWMutex
-	recentSwarmRuns      []SwarmRunSummary
-	scheduledAutomations []ScheduledAutomation
-	vaultLoadedFromDisk  bool
-	totalSubAgentsRun    int64
-	activeSubAgentsNow   int64
+	swarmHistoryMu          sync.RWMutex
+	recentSwarmRuns         []SwarmRunSummary
+	scheduledAutomations    []ScheduledAutomation
+	vaultLoadedFromDisk     bool
+	vaultLoadedAtomic       atomic.Bool
+	enabledAutomationsCount atomic.Int32
+	totalSubAgentsRun       int64
+	activeSubAgentsNow      int64
 )
 
 // WithPinnedAccount attaches a specific account email/ID to ctx so SelectProviderAccount binds 1-to-1 to that account.
@@ -70,6 +72,19 @@ func AcquireAccountInFlightWithRole(email string, role string) {
 	inFlightMu.Lock()
 	accountInFlight[key]++
 	if role != "" {
+		accountActiveRole[key] = role
+	}
+	inFlightMu.Unlock()
+}
+
+// UpdateAccountActiveRole updates the active role/model label for an account currently in flight.
+func UpdateAccountActiveRole(email string, role string) {
+	key := strings.ToLower(strings.TrimSpace(email))
+	if key == "" || role == "" {
+		return
+	}
+	inFlightMu.Lock()
+	if accountInFlight[key] > 0 {
 		accountActiveRole[key] = role
 	}
 	inFlightMu.Unlock()
@@ -218,6 +233,17 @@ func defaultSeededAutomations() []ScheduledAutomation {
 	}
 }
 
+func syncEnabledAutomationsCountLocked() {
+	var cnt int32
+	for i := range scheduledAutomations {
+		if scheduledAutomations[i].Enabled {
+			cnt++
+		}
+	}
+	enabledAutomationsCount.Store(cnt)
+	vaultLoadedAtomic.Store(true)
+}
+
 func ensureSubAgentVaultLoadedLocked() {
 	if vaultLoadedFromDisk {
 		return
@@ -239,9 +265,11 @@ func ensureSubAgentVaultLoadedLocked() {
 	if len(scheduledAutomations) == 0 {
 		scheduledAutomations = defaultSeededAutomations()
 	}
+	syncEnabledAutomationsCountLocked()
 }
 
 func saveSubAgentVaultAsyncLocked() {
+	syncEnabledAutomationsCountLocked()
 	runsCopy := make([]SwarmRunSummary, len(recentSwarmRuns))
 	copy(runsCopy, recentSwarmRuns)
 	autoCopy := make([]ScheduledAutomation, len(scheduledAutomations))
@@ -854,79 +882,115 @@ func FormatSwarmRunMarkdown(run SwarmRunSummary) string {
 	return sb.String()
 }
 
-var automationSchedulerOnce sync.Once
+var (
+	automationSchedulerOnce     sync.Once
+	activeAutomationServer      atomic.Pointer[Server]
+	automationSchedulerGoroRuns atomic.Int64
+)
 
-// StartAutomationScheduler runs a background ticker that checks ScheduledAutomation items
-// every 60 seconds and executes due campaigns automatically (Orca Automations Engine).
+// EnabledAutomationsCountFast returns the lock-free count of enabled scheduled automations once loaded.
+func EnabledAutomationsCountFast() int32 {
+	if !vaultLoadedAtomic.Load() {
+		swarmHistoryMu.Lock()
+		ensureSubAgentVaultLoadedLocked()
+		swarmHistoryMu.Unlock()
+	}
+	return enabledAutomationsCount.Load()
+}
+
+func runAutomationSchedulerTick(now time.Time) {
+	// Fast-skip in < 2ns without locking swarmHistoryMu when 0 enabled automations exist
+	if vaultLoadedAtomic.Load() && enabledAutomationsCount.Load() == 0 {
+		return
+	}
+
+	srv := activeAutomationServer.Load()
+	if srv == nil {
+		return
+	}
+
+	loc := time.FixedZone("ICT", 7*3600)
+	vnNow := now.In(loc)
+	var dueList []ScheduledAutomation
+
+	swarmHistoryMu.Lock()
+	ensureSubAgentVaultLoadedLocked()
+	if enabledAutomationsCount.Load() == 0 {
+		swarmHistoryMu.Unlock()
+		return
+	}
+	for i := range scheduledAutomations {
+		auto := &scheduledAutomations[i]
+		if !auto.Enabled {
+			continue
+		}
+		isDue := false
+		if auto.NextRunUnix > 0 && vnNow.Unix() >= auto.NextRunUnix {
+			isDue = true
+		} else if (auto.ScheduleWindow == "nightly_21h" || auto.ScheduleWindow == "night-22h") && vnNow.Hour() >= 21 {
+			if auto.NextRunUnix == 0 {
+				isDue = true
+			}
+		}
+		if isDue {
+			auto.LastRunAt = vnNow.Format(time.RFC3339)
+			switch auto.ScheduleWindow {
+			case "interval_6h":
+				auto.NextRunUnix = vnNow.Add(6 * time.Hour).Unix()
+			case "interval_12h":
+				auto.NextRunUnix = vnNow.Add(12 * time.Hour).Unix()
+			default: // nightly_21h / night-22h
+				targetHour := 21
+				if auto.ScheduleWindow == "night-22h" {
+					targetHour = 22
+				}
+				next := time.Date(vnNow.Year(), vnNow.Month(), vnNow.Day(), targetHour, 0, 0, 0, loc)
+				if !next.After(vnNow) {
+					next = next.Add(24 * time.Hour)
+				}
+				auto.NextRunUnix = next.Unix()
+			}
+			dueList = append(dueList, *auto)
+		}
+	}
+	if len(dueList) > 0 {
+		saveSubAgentVaultAsyncLocked()
+	}
+	swarmHistoryMu.Unlock()
+
+	for _, auto := range dueList {
+		go func(a ScheduledAutomation) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			defer cancel()
+			summary := srv.ExecuteSubAgentSwarm(ctx, "auto-decompose", a.MasterGoal, a.AgentCount, a.Model, nil)
+			swarmHistoryMu.Lock()
+			for i := range scheduledAutomations {
+				if scheduledAutomations[i].ID == a.ID {
+					scheduledAutomations[i].LastRunID = summary.ID
+					scheduledAutomations[i].TotalRuns++
+					scheduledAutomations[i].LastStatus = fmt.Sprintf("Thành công %d/%d agents", summary.SuccessCount, summary.TotalSubAgents)
+					break
+				}
+			}
+			saveSubAgentVaultAsyncLocked()
+			swarmHistoryMu.Unlock()
+		}(auto)
+	}
+}
+
+// StartAutomationScheduler ensures a single sync.Once background ticker checks ScheduledAutomation items
+// every 60 seconds and fast-skips in O(1) when 0 enabled automations exist.
 func (s *Server) StartAutomationScheduler() {
+	if s != nil {
+		activeAutomationServer.Store(s)
+	}
 	automationSchedulerOnce.Do(func() {
+		automationSchedulerGoroRuns.Add(1)
 		go func() {
 			ticker := time.NewTicker(60 * time.Second)
 			defer ticker.Stop()
-			loc := time.FixedZone("ICT", 7*3600)
 			for now := range ticker.C {
-				vnNow := now.In(loc)
-				var dueList []ScheduledAutomation
-
-				swarmHistoryMu.Lock()
-				ensureSubAgentVaultLoadedLocked()
-				for i := range scheduledAutomations {
-					auto := &scheduledAutomations[i]
-					if !auto.Enabled {
-						continue
-					}
-					isDue := false
-					if auto.NextRunUnix > 0 && vnNow.Unix() >= auto.NextRunUnix {
-						isDue = true
-					} else if (auto.ScheduleWindow == "nightly_21h" || auto.ScheduleWindow == "night-22h") && vnNow.Hour() >= 21 {
-						if auto.NextRunUnix == 0 {
-							isDue = true
-						}
-					}
-					if isDue {
-						auto.LastRunAt = vnNow.Format(time.RFC3339)
-						switch auto.ScheduleWindow {
-						case "interval_6h":
-							auto.NextRunUnix = vnNow.Add(6 * time.Hour).Unix()
-						case "interval_12h":
-							auto.NextRunUnix = vnNow.Add(12 * time.Hour).Unix()
-						default: // nightly_21h / night-22h
-							targetHour := 21
-							if auto.ScheduleWindow == "night-22h" {
-								targetHour = 22
-							}
-							next := time.Date(vnNow.Year(), vnNow.Month(), vnNow.Day(), targetHour, 0, 0, 0, loc)
-							if !next.After(vnNow) {
-								next = next.Add(24 * time.Hour)
-							}
-							auto.NextRunUnix = next.Unix()
-						}
-						dueList = append(dueList, *auto)
-					}
-				}
-				if len(dueList) > 0 {
-					saveSubAgentVaultAsyncLocked()
-				}
-				swarmHistoryMu.Unlock()
-
-				for _, auto := range dueList {
-					go func(a ScheduledAutomation) {
-						ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-						defer cancel()
-						summary := s.ExecuteSubAgentSwarm(ctx, "auto-decompose", a.MasterGoal, a.AgentCount, a.Model, nil)
-						swarmHistoryMu.Lock()
-						for i := range scheduledAutomations {
-							if scheduledAutomations[i].ID == a.ID {
-								scheduledAutomations[i].LastRunID = summary.ID
-								scheduledAutomations[i].TotalRuns++
-								scheduledAutomations[i].LastStatus = fmt.Sprintf("Thành công %d/%d agents", summary.SuccessCount, summary.TotalSubAgents)
-								break
-							}
-						}
-						saveSubAgentVaultAsyncLocked()
-						swarmHistoryMu.Unlock()
-					}(auto)
-				}
+				runAutomationSchedulerTick(now)
 			}
 		}()
 	})

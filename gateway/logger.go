@@ -64,7 +64,9 @@ func (l *GatewayLogger) RecordLogEntry(entry GatewayLogEntry) {
 	l.mu.Unlock()
 
 	InsertPromptLogAsync(entry)
-	AutoLearnFromPromptLog(entry)
+	if IsVectorAutoLearnEnabledFast() {
+		AutoLearnFromPromptLog(entry)
+	}
 }
 
 // GetRecentLogs returns up to limit logs in reverse chronological order with optional filters.

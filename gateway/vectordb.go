@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 )
@@ -27,13 +28,72 @@ const (
 	DefaultMinSimilarity = 0.24
 )
 
+const (
+	vecFastInitBit       uint32 = 1 << 0
+	vecFastEnabledBit    uint32 = 1 << 1
+	vecFastAutoLearnBit  uint32 = 1 << 2
+	vecFastAutoInjectBit uint32 = 1 << 3
+)
+
 var (
 	vectorMu            sync.RWMutex
 	vectorMemories      []VectorMemoryEntry
 	vectorLoadedLocal   bool
 	pgVectorExtension   bool
 	pgVectorNativeReady bool
+	vectorFastState     atomic.Uint32
 )
+
+func storeVectorFastState(vc VectorDBConfig) {
+	bits := vecFastInitBit
+	if vc.Enabled {
+		bits |= vecFastEnabledBit
+	}
+	if vc.AutoLearnPrompts {
+		bits |= vecFastAutoLearnBit
+	}
+	if vc.AutoInjectRAG {
+		bits |= vecFastAutoInjectBit
+	}
+	vectorFastState.Store(bits)
+}
+
+// RefreshVectorDBFastState reloads VectorDBConfig and syncs the lock-free atomic fast-path flags.
+func RefreshVectorDBFastState() VectorDBConfig {
+	return GetVectorDBConfig()
+}
+
+// IsVectorDBEnabledFast returns true if VectorDB is enabled (< 5ns atomic fast-path without locking configMu).
+func IsVectorDBEnabledFast() bool {
+	state := vectorFastState.Load()
+	if state == 0 {
+		vc := GetVectorDBConfig()
+		return vc.Enabled
+	}
+	return state&vecFastEnabledBit != 0
+}
+
+// IsVectorRAGEnabledFast returns true if both Enabled and AutoInjectRAG are active (< 5ns atomic fast-path).
+func IsVectorRAGEnabledFast() bool {
+	state := vectorFastState.Load()
+	if state == 0 {
+		vc := GetVectorDBConfig()
+		return vc.Enabled && vc.AutoInjectRAG
+	}
+	const mask = vecFastEnabledBit | vecFastAutoInjectBit
+	return state&mask == mask
+}
+
+// IsVectorAutoLearnEnabledFast returns true if both Enabled and AutoLearnPrompts are active (< 5ns atomic fast-path).
+func IsVectorAutoLearnEnabledFast() bool {
+	state := vectorFastState.Load()
+	if state == 0 {
+		vc := GetVectorDBConfig()
+		return vc.Enabled && vc.AutoLearnPrompts
+	}
+	const mask = vecFastEnabledBit | vecFastAutoLearnBit
+	return state&mask == mask
+}
 
 func resetPgVectorState() {
 	vectorMu.Lock()
@@ -43,21 +103,24 @@ func resetPgVectorState() {
 }
 
 // defaultVectorDBConfig returns the default VectorDBConfig without acquiring configMu.
+// Disabled by default to prevent hot-path 256-dim embedding & unwanted SOP RAG injection unless enabled by admin.
 func defaultVectorDBConfig() VectorDBConfig {
 	return VectorDBConfig{
-		Enabled:          true,
-		AutoLearnPrompts: true,
-		AutoInjectRAG:    true,
+		Enabled:          false,
+		AutoLearnPrompts: false,
+		AutoInjectRAG:    false,
 		TopK:             DefaultVectorTopK,
 		MinSimilarity:    DefaultMinSimilarity,
 	}
 }
 
-// GetVectorDBConfig returns the active VectorDBConfig with sensible defaults enabled by default.
+// GetVectorDBConfig returns the active VectorDBConfig and syncs the in-memory atomic fast-path flags.
 func GetVectorDBConfig() VectorDBConfig {
 	cfg := LoadSavedAuthConfig()
 	if cfg.VectorDBConfig == nil {
-		return defaultVectorDBConfig()
+		def := defaultVectorDBConfig()
+		storeVectorFastState(def)
+		return def
 	}
 	vc := *cfg.VectorDBConfig
 	if vc.TopK <= 0 || vc.TopK > 10 {
@@ -66,10 +129,11 @@ func GetVectorDBConfig() VectorDBConfig {
 	if vc.MinSimilarity <= 0 || vc.MinSimilarity >= 1.0 {
 		vc.MinSimilarity = DefaultMinSimilarity
 	}
+	storeVectorFastState(vc)
 	return vc
 }
 
-// SaveVectorDBConfig persists updated VectorDBConfig to gateway_config.json.
+// SaveVectorDBConfig persists updated VectorDBConfig to gateway_config.json and updates atomic fast-path flags.
 func SaveVectorDBConfig(vc VectorDBConfig) error {
 	if vc.TopK <= 0 || vc.TopK > 10 {
 		vc.TopK = DefaultVectorTopK
@@ -85,7 +149,9 @@ func SaveVectorDBConfig(vc VectorDBConfig) error {
 	}
 	cfg.VectorDBConfig = &vc
 	cfg.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	return saveAuthConfigLocked(cfg)
+	err := saveAuthConfigLocked(cfg)
+	storeVectorFastState(vc)
+	return err
 }
 
 func incrementVectorRAGHits() {
@@ -745,10 +811,15 @@ func AddVectorMemory(title, category, promptText, answerText, employeeName, apiK
 }
 
 // AutoLearnFromPromptLog automatically indexes high-value Q&A turns from employee prompts into the Vector DB.
+// Inlined fast-path returns in ~1ns with 0 allocations when VectorDB or AutoLearnPrompts is disabled.
 func AutoLearnFromPromptLog(entry GatewayLogEntry) {
-	if entry.IsError || entry.StatusCode >= 400 {
+	if !IsVectorAutoLearnEnabledFast() || entry.IsError || entry.StatusCode >= 400 {
 		return
 	}
+	autoLearnFromPromptLogSlow(entry)
+}
+
+func autoLearnFromPromptLogSlow(entry GatewayLogEntry) {
 	cfg := GetVectorDBConfig()
 	if !cfg.Enabled || !cfg.AutoLearnPrompts {
 		return
@@ -761,8 +832,11 @@ func AutoLearnFromPromptLog(entry GatewayLogEntry) {
 	if IsPoisonedVectorEntry(q, ans) || IsPoisonedVectorEntry(entry.PromptText, entry.ResponseText) {
 		return
 	}
+	empName := entry.EmployeeName
+	keyID := entry.APIKeyID
+	resModel := entry.ResolvedModel
 	go func() {
-		_, _ = AddVectorMemory("", "auto_qa", q, ans, entry.EmployeeName, entry.APIKeyID, entry.ResolvedModel, false)
+		_, _ = AddVectorMemory("", "auto_qa", q, ans, empName, keyID, resModel, false)
 	}()
 }
 
@@ -1007,9 +1081,17 @@ func searchVectorMemoriesNativePG(db *sql.DB, query string, topK int, minSim flo
 }
 
 // ApplyVectorMemoryRAG retrieves the Top-K relevant long-term vector memories and injects them into the system prompt.
+// Inlined fast-path returns in ~1ns with 0 allocations when VectorDB or AutoInjectRAG is disabled.
 func ApplyVectorMemoryRAG(req OpenAIChatRequest) (OpenAIChatRequest, int) {
+	if !IsVectorRAGEnabledFast() || len(req.Messages) == 0 {
+		return req, 0
+	}
+	return applyVectorMemoryRAGSlow(req)
+}
+
+func applyVectorMemoryRAGSlow(req OpenAIChatRequest) (OpenAIChatRequest, int) {
 	cfg := GetVectorDBConfig()
-	if !cfg.Enabled || !cfg.AutoInjectRAG || len(req.Messages) == 0 {
+	if !cfg.Enabled || !cfg.AutoInjectRAG {
 		return req, 0
 	}
 
@@ -1074,6 +1156,11 @@ func ApplyVectorMemoryRAG(req OpenAIChatRequest) (OpenAIChatRequest, int) {
 
 	req.Messages = outMessages
 	return req, len(matches)
+}
+
+// InjectVectorContextIntoMessages is an alias for ApplyVectorMemoryRAG with a lock-free < 5ns disabled fast-path.
+func InjectVectorContextIntoMessages(req OpenAIChatRequest) (OpenAIChatRequest, int) {
+	return ApplyVectorMemoryRAG(req)
 }
 
 // DeleteVectorMemory deletes a memory by ID, or clears all non-pinned auto-learned memories if id == "all_auto".

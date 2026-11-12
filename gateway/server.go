@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -32,6 +33,7 @@ func NewServer(cfg GatewayConfig, resolver ModelResolver, upstream UpstreamHandl
 		resolver: resolver,
 		upstream: upstream,
 	}
+	RefreshVectorDBFastState()
 	s.StartAutomationScheduler()
 	return s
 }
@@ -1055,6 +1057,46 @@ func (s *Server) handleUI(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(gatewayUIHTML))
 }
 
+func (s *Server) connectedProviderMap() map[string]bool {
+	if strings.TrimSpace(s.cfg.OmniRouteBaseURL) != "" {
+		return map[string]bool{
+			string(ProviderAntigravity): true,
+			string(ProviderClaudeCode):  true,
+			string(ProviderAlibaba):     true,
+			string(ProviderAutoCombo):   true,
+		}
+	}
+	saved := LoadSavedAuthConfig()
+	conn := make(map[string]bool, 4)
+	if strings.TrimSpace(s.cfg.AgyOAuthToken) != "" ||
+		strings.TrimSpace(saved.AgyOAuthToken) != "" ||
+		strings.TrimSpace(os.Getenv("AGY_OAUTH_TOKEN")) != "" {
+		conn[string(ProviderAntigravity)] = true
+	}
+	if strings.TrimSpace(os.Getenv("CLAUDE_CODE_OAUTH_TOKEN")) != "" ||
+		strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY")) != "" {
+		conn[string(ProviderClaudeCode)] = true
+	}
+	if strings.TrimSpace(os.Getenv("ALIBABA_API_KEY")) != "" ||
+		strings.TrimSpace(os.Getenv("DASHSCOPE_API_KEY")) != "" {
+		conn[string(ProviderAlibaba)] = true
+	}
+	for _, a := range saved.Accounts {
+		if a.Disabled {
+			continue
+		}
+		prov := a.Provider
+		if prov == "" {
+			prov = ProviderAntigravity
+		}
+		conn[string(prov)] = true
+	}
+	if len(conn) > 0 {
+		conn[string(ProviderAutoCombo)] = true
+	}
+	return conn
+}
+
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		writeOpenAIError(w, http.StatusMethodNotAllowed, "method not allowed", "invalid_request_error")
@@ -1062,6 +1104,16 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cards := s.resolver.ListModels()
+	if qConn := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("connected"))); qConn == "1" || qConn == "true" {
+		connMap := s.connectedProviderMap()
+		filtered := make([]OpenAIModelCard, 0, len(cards))
+		for _, c := range cards {
+			if connMap[c.Provider] || connMap[c.OwnedBy] {
+				filtered = append(filtered, c)
+			}
+		}
+		cards = filtered
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]any{
@@ -1137,18 +1189,20 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// Check In-Memory Prompt & Response Cache
 	if cachedResp, ok := GetGlobalCache().Get(req); ok {
 		w.Header().Set("X-Omni-Gateway-Cache", "HIT")
-		if apiKeyObj != nil {
-			RecordAPIKeyUsage(apiKeyObj.Key, 1)
+		toks := EstimateTokens(req.Messages)
+		if cachedResp.Usage != nil && cachedResp.Usage.TotalTokens > 0 {
+			toks = cachedResp.Usage.TotalTokens
+		} else if toks <= 0 {
+			toks = 50
 		}
-		tokens := int64(50)
-		if cachedResp.Usage != nil {
-			tokens = int64(cachedResp.Usage.TotalTokens)
+		if apiKeyObj != nil {
+			RecordAPIKeyUsage(apiKeyObj.Key, toks)
 		}
 		cachedContent := ""
 		if len(cachedResp.Choices) > 0 && cachedResp.Choices[0].Message != nil {
 			cachedContent = cachedResp.Choices[0].Message.Content
 		}
-		SetAuditResponse(ctx, cachedContent, EstimateTokens(req.Messages), int(tokens))
+		SetAuditResponse(ctx, cachedContent, EstimateTokens(req.Messages), toks)
 		cacheEntry := GatewayLogEntry{
 			Provider:       resolved.Provider,
 			Account:        "in-memory-cache",
@@ -1156,7 +1210,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			ResolvedModel:  resolved.CanonicalID,
 			StatusCode:     http.StatusOK,
 			LatencyMs:      0,
-			TotalTokens:    int(tokens),
+			TotalTokens:    toks,
 			IsError:        false,
 		}
 		EnrichLogEntryFromContext(ctx, &cacheEntry, req)
@@ -1216,13 +1270,6 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(cachedResp)
-		if apiKeyObj != nil {
-			toks := EstimateTokens(req.Messages)
-			if cachedResp.Usage != nil && cachedResp.Usage.TotalTokens > 0 {
-				toks = cachedResp.Usage.TotalTokens
-			}
-			RecordAPIKeyUsage(apiKeyObj.Key, toks)
-		}
 		return
 	}
 	w.Header().Set("X-Omni-Gateway-Cache", "MISS")
@@ -1297,6 +1344,9 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 	}
 
 	ctx := WithAuditContext(r.Context(), apiKeyObj, oaiReq)
+	if pinAcc := strings.TrimSpace(r.Header.Get("X-Omni-Pin-Account")); pinAcc != "" {
+		ctx = WithPinnedAccount(ctx, pinAcc)
+	}
 	_ = s.upstream.HandleChatCompletion(ctx, w, oaiReq, resolved, incomingAuth)
 	if apiKeyObj != nil {
 		usedTokens := parseRecordedTokens(w.Header().Get("X-Omni-Gateway-Tokens"), oaiReq)
@@ -1311,8 +1361,8 @@ func withCORS(next http.Handler) http.Handler {
 		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS, HEAD")
-		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Accept, X-API-Key, x-api-key, X-Admin-Token, anthropic-version, anthropic-beta, OpenAI-Organization, OpenAI-Project")
-		w.Header().Set("Access-Control-Expose-Headers", "X-Omni-Gateway-Provider, X-Omni-Gateway-Resolved-Model, X-Omni-Gateway-Requested-Model, X-Omni-Gateway-Route, X-Omni-Gateway-Thinking-Level, X-Omni-Gateway-Account, X-Omni-Gateway-Tokens")
+		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Accept, X-API-Key, x-api-key, X-Admin-Token, X-Omni-Pin-Account, anthropic-version, anthropic-beta, OpenAI-Organization, OpenAI-Project")
+		w.Header().Set("Access-Control-Expose-Headers", "X-Omni-Gateway-Provider, X-Omni-Gateway-Resolved-Model, X-Omni-Gateway-Requested-Model, X-Omni-Gateway-Route, X-Omni-Gateway-Thinking-Level, X-Omni-Gateway-Account, X-Omni-Gateway-Tokens, X-Omni-Gateway-Cache, X-Omni-Gateway-Upstream-Model-Version")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
