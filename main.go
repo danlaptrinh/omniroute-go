@@ -51,6 +51,8 @@ type ParallelArgs struct {
 	ContextFiles   []string     `json:"context_files,omitempty"`
 	SystemPrompt   string       `json:"system_prompt,omitempty"`
 	Model          string       `json:"model,omitempty"`
+	ModelPool      []string     `json:"model_pool,omitempty"`
+	PinAccounts    []string     `json:"pin_accounts,omitempty"`
 	Endpoint       string       `json:"endpoint,omitempty"`
 	APIKey         string       `json:"api_key,omitempty"`
 	MaxConcurrency int          `json:"max_concurrency,omitempty"`
@@ -58,21 +60,24 @@ type ParallelArgs struct {
 }
 
 type WorkerTask struct {
-	FilePath string `json:"file_path"`
-	Prompt   string `json:"prompt"`
-	Model    string `json:"model,omitempty"`
+	FilePath      string `json:"file_path"`
+	Prompt        string `json:"prompt"`
+	Model         string `json:"model,omitempty"`
+	PinnedAccount string `json:"pinned_account,omitempty"`
 }
 
 type TaskResult struct {
-	Index     int
-	FilePath  string
-	ModelUsed string
-	Status    string
-	Error     string
-	Bytes     int
-	Lines     int
-	Duration  time.Duration
-	Err       error
+	Index         int
+	FilePath      string
+	PrimaryModel  string
+	ModelUsed     string
+	PinnedAccount string
+	Status        string
+	Error         string
+	Bytes         int
+	Lines         int
+	Duration      time.Duration
+	Err           error
 }
 
 // --- OpenAI / OmniRoute Chat Completion Types ---
@@ -108,9 +113,16 @@ type ChatResponse struct {
 var httpClient = &http.Client{
 	Timeout: 12 * time.Minute,
 	Transport: &http.Transport{
-		MaxIdleConns:        512,
-		MaxIdleConnsPerHost: 256,
-		IdleConnTimeout:     90 * time.Second,
+		Proxy:                 http.ProxyFromEnvironment,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          512,
+		MaxIdleConnsPerHost:   256,
+		MaxConnsPerHost:       0,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		WriteBufferSize:       64 * 1024,
+		ReadBufferSize:        64 * 1024,
 	},
 }
 
@@ -220,6 +232,16 @@ func toolDefinition() map[string]any {
 					"type":        "string",
 					"description": "Optional model name override for OmniRoute (e.g. 'antigravity/gemini-4-carbon-high' or 'antigravity/gemini-4-argon-high'; defaults to OMNI_DEFAULT_MODEL / OMNIROUTE_MODEL env var).",
 				},
+				"model_pool": map[string]any{
+					"type":        "array",
+					"items":       map[string]any{"type": "string"},
+					"description": "Optional list of models to stripe parallel workers across in round-robin order (worker idx uses model_pool[idx % len(model_pool)] as primary, with remaining pool models + antigravity/gemini-4-argon-high as automatic failover; defaults to OMNI_MODEL_POOL comma-separated env var when unset).",
+				},
+				"pin_accounts": map[string]any{
+					"type":        "array",
+					"items":       map[string]any{"type": "string"},
+					"description": "Optional list of OmniRoute account identifiers/emails to stripe across workers via the X-Omni-Pin-Account header (worker idx uses pin_accounts[idx % len(pin_accounts)] unless overridden by task.pinned_account).",
+				},
 				"endpoint": map[string]any{
 					"type":        "string",
 					"description": "Optional OmniRoute /v1/chat/completions endpoint URL override (defaults to OMNI_GATEWAY_URL / OMNIROUTE_BASE_URL).",
@@ -245,6 +267,10 @@ func toolDefinition() map[string]any {
 							"model": map[string]any{
 								"type":        "string",
 								"description": "Optional per-task model override.",
+							},
+							"pinned_account": map[string]any{
+								"type":        "string",
+								"description": "Optional per-task OmniRoute account identifier/email sent via the X-Omni-Pin-Account header.",
 							},
 						},
 						"required": []string{"file_path", "prompt"},
@@ -277,6 +303,8 @@ func handleToolCall(req RPCRequest) RPCResponse {
 	endpoint := resolveEndpoint(args.Endpoint)
 	apiKey := resolveAPIKey(args.APIKey)
 	defaultModel := resolveDefaultModel(args.Model)
+	modelPool := resolveModelPool(args.ModelPool, args.Model)
+	pinAccounts := cleanStringSlice(args.PinAccounts)
 	sysPrompt := firstNonEmpty(args.SystemPrompt,
 		"You are an elite software engineer worker. Output ONLY the raw, complete, compilable source code for the requested file. Do NOT wrap output in markdown fences (no ```go or ```), and do NOT include explanations outside code comments.")
 
@@ -307,7 +335,7 @@ func handleToolCall(req RPCRequest) RPCResponse {
 				sem <- struct{}{}
 				defer func() { <-sem }()
 			}
-			results[idx] = executeWorkerTask(idx, args.BaseDir, t, endpoint, apiKey, defaultModel, sysPrompt, sharedCtx)
+			results[idx] = executeWorkerTaskWithPool(idx, args.BaseDir, t, endpoint, apiKey, defaultModel, modelPool, pinAccounts, sysPrompt, sharedCtx)
 		}(i, task)
 	}
 
@@ -335,17 +363,27 @@ func handleToolCall(req RPCRequest) RPCResponse {
 	}
 
 	fmt.Fprintf(&sb, "OmniRoute Parallel Dispatcher Summary:\n")
-	fmt.Fprintf(&sb, "- Endpoint: %s (Primary: %s | Fallback: %s)\n", endpoint, defaultModel, primaryFallbackLabel(defaultModel))
+	if len(modelPool) > 0 {
+		fmt.Fprintf(&sb, "- Endpoint: %s (Model Pool [%d]: %s | Fallback: %s)\n", endpoint, len(modelPool), strings.Join(modelPool, ", "), DefaultFallbackModel)
+	} else {
+		fmt.Fprintf(&sb, "- Endpoint: %s (Primary: %s | Fallback: %s)\n", endpoint, defaultModel, primaryFallbackLabel(defaultModel))
+	}
+	if len(pinAccounts) > 0 {
+		fmt.Fprintf(&sb, "- Account Pin Pool [%d]: %s\n", len(pinAccounts), strings.Join(pinAccounts, ", "))
+	}
 	fmt.Fprintf(&sb, "- Workers Spawned: %d (%d succeeded, %d failed)\n", len(results), okCount, errCount)
 	fmt.Fprintf(&sb, "- Total Output: %d lines (%d bytes)\n", totalLines, totalBytes)
 	fmt.Fprintf(&sb, "- Wall-Clock Time: %s (Cumulative Worker Time: %s | Parallel Speedup: %.1fx)\n\n",
 		wallElapsed.Round(time.Millisecond), sumDuration.Round(time.Millisecond), speedup)
 
 	for _, r := range results {
+		expectedPrimary := firstNonEmpty(r.PrimaryModel, defaultModel)
 		if r.Err != nil {
 			fmt.Fprintf(&sb, "[ERR] #%03d %s (%s): %v\n", r.Index+1, r.FilePath, r.Duration.Round(time.Millisecond), r.Err)
-		} else if r.ModelUsed != "" && !strings.EqualFold(r.ModelUsed, defaultModel) {
+		} else if r.ModelUsed != "" && !strings.EqualFold(r.ModelUsed, expectedPrimary) {
 			fmt.Fprintf(&sb, "[OK]  #%03d %s (%d lines, %d bytes, %s) [failover -> %s]\n", r.Index+1, r.FilePath, r.Lines, r.Bytes, r.Duration.Round(time.Millisecond), r.ModelUsed)
+		} else if len(modelPool) > 0 && r.ModelUsed != "" {
+			fmt.Fprintf(&sb, "[OK]  #%03d %s (%d lines, %d bytes, %s) [model: %s]\n", r.Index+1, r.FilePath, r.Lines, r.Bytes, r.Duration.Round(time.Millisecond), r.ModelUsed)
 		} else {
 			fmt.Fprintf(&sb, "[OK]  #%03d %s (%d lines, %d bytes, %s)\n", r.Index+1, r.FilePath, r.Lines, r.Bytes, r.Duration.Round(time.Millisecond))
 		}
@@ -416,6 +454,10 @@ func buildUserPrompt(filePath, taskPrompt, sharedCtx string) string {
 }
 
 func executeWorkerTask(idx int, baseDir string, t WorkerTask, endpoint, apiKey, defaultModel, sysPrompt, sharedCtx string) TaskResult {
+	return executeWorkerTaskWithPool(idx, baseDir, t, endpoint, apiKey, defaultModel, nil, nil, sysPrompt, sharedCtx)
+}
+
+func executeWorkerTaskWithPool(idx int, baseDir string, t WorkerTask, endpoint, apiKey, defaultModel string, modelPool, pinAccounts []string, sysPrompt, sharedCtx string) TaskResult {
 	tStart := time.Now()
 	targetPath, err := resolvePathSafe(baseDir, t.FilePath)
 	if err != nil {
@@ -429,18 +471,25 @@ func executeWorkerTask(idx int, baseDir string, t WorkerTask, endpoint, apiKey, 
 		}
 	}
 
-	model := firstNonEmpty(t.Model, defaultModel)
+	candidates := buildWorkerCandidateChain(idx, t.Model, defaultModel, modelPool)
+	primaryModel := defaultModel
+	if len(candidates) > 0 {
+		primaryModel = candidates[0]
+	}
+	pinnedAcc := resolveWorkerPinnedAccount(idx, t.PinnedAccount, pinAccounts)
 	userPrompt := buildUserPrompt(t.FilePath, t.Prompt, sharedCtx)
 
-	rawOutput, usedModel, err := callOmniRouteWithFailover(endpoint, apiKey, model, sysPrompt, userPrompt)
+	rawOutput, usedModel, err := callOmniRouteCandidates(endpoint, apiKey, candidates, pinnedAcc, sysPrompt, userPrompt)
 	if err != nil {
 		return TaskResult{
-			Index:    idx,
-			FilePath: targetPath,
-			Status:   "error",
-			Error:    err.Error(),
-			Duration: time.Since(tStart),
-			Err:      err,
+			Index:         idx,
+			FilePath:      targetPath,
+			PrimaryModel:  primaryModel,
+			PinnedAccount: pinnedAcc,
+			Status:        "error",
+			Error:         err.Error(),
+			Duration:      time.Since(tStart),
+			Err:           err,
 		}
 	}
 
@@ -448,45 +497,56 @@ func executeWorkerTask(idx int, baseDir string, t WorkerTask, endpoint, apiKey, 
 	if strings.Contains(strings.ToLower(cleanCode), "this version of antigravity is no longer supported") {
 		bannerErr := fmt.Errorf("upstream gateway returned unsupported Antigravity client banner; refusing to overwrite file")
 		return TaskResult{
-			Index:    idx,
-			FilePath: targetPath,
-			Status:   "error",
-			Error:    bannerErr.Error(),
-			Duration: time.Since(tStart),
-			Err:      bannerErr,
+			Index:         idx,
+			FilePath:      targetPath,
+			PrimaryModel:  primaryModel,
+			ModelUsed:     usedModel,
+			PinnedAccount: pinnedAcc,
+			Status:        "error",
+			Error:         bannerErr.Error(),
+			Duration:      time.Since(tStart),
+			Err:           bannerErr,
 		}
 	}
 
 	if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
 		return TaskResult{
-			Index:    idx,
-			FilePath: targetPath,
-			Status:   "error",
-			Error:    err.Error(),
-			Duration: time.Since(tStart),
-			Err:      err,
+			Index:         idx,
+			FilePath:      targetPath,
+			PrimaryModel:  primaryModel,
+			ModelUsed:     usedModel,
+			PinnedAccount: pinnedAcc,
+			Status:        "error",
+			Error:         err.Error(),
+			Duration:      time.Since(tStart),
+			Err:           err,
 		}
 	}
 	if err := os.WriteFile(targetPath, []byte(cleanCode), 0644); err != nil {
 		return TaskResult{
-			Index:    idx,
-			FilePath: targetPath,
-			Status:   "error",
-			Error:    err.Error(),
-			Duration: time.Since(tStart),
-			Err:      err,
+			Index:         idx,
+			FilePath:      targetPath,
+			PrimaryModel:  primaryModel,
+			ModelUsed:     usedModel,
+			PinnedAccount: pinnedAcc,
+			Status:        "error",
+			Error:         err.Error(),
+			Duration:      time.Since(tStart),
+			Err:           err,
 		}
 	}
 
 	lines := strings.Count(cleanCode, "\n") + 1
 	return TaskResult{
-		Index:     idx,
-		FilePath:  targetPath,
-		ModelUsed: usedModel,
-		Status:    "ok",
-		Bytes:     len(cleanCode),
-		Lines:     lines,
-		Duration:  time.Since(tStart),
+		Index:         idx,
+		FilePath:      targetPath,
+		PrimaryModel:  primaryModel,
+		ModelUsed:     usedModel,
+		PinnedAccount: pinnedAcc,
+		Status:        "ok",
+		Bytes:         len(cleanCode),
+		Lines:         lines,
+		Duration:      time.Since(tStart),
 	}
 }
 

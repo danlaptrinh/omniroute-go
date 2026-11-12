@@ -30,6 +30,83 @@ func resolveDefaultModel(argModel string) string {
 	)
 }
 
+func cleanStringSlice(items []string) []string {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		if s := strings.TrimSpace(item); s != "" {
+			out = append(out, s)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func resolveModelPool(argPool []string, explicitModel string) []string {
+	if cleaned := cleanStringSlice(argPool); len(cleaned) > 0 {
+		return cleaned
+	}
+	if strings.TrimSpace(explicitModel) == "" {
+		if envPool := strings.TrimSpace(os.Getenv("OMNI_MODEL_POOL")); envPool != "" {
+			return cleanStringSlice(strings.Split(envPool, ","))
+		}
+	}
+	return nil
+}
+
+func resolveWorkerPinnedAccount(idx int, taskPinned string, pinAccounts []string) string {
+	if tp := strings.TrimSpace(taskPinned); tp != "" {
+		return tp
+	}
+	if len(pinAccounts) > 0 {
+		if idx < 0 {
+			idx = 0
+		}
+		return pinAccounts[idx%len(pinAccounts)]
+	}
+	return ""
+}
+
+func deduplicateModelCandidates(raw []string) []string {
+	seenRaw := make(map[string]bool, len(raw))
+	seenCanonical := make(map[string]bool, len(raw))
+	out := make([]string, 0, len(raw))
+
+	for _, cand := range raw {
+		c := strings.TrimSpace(cand)
+		if c == "" {
+			continue
+		}
+		lowerRaw := strings.ToLower(c)
+		if seenRaw[lowerRaw] {
+			continue
+		}
+		res := gateway.ResolveModel(c, nil)
+		lowerCanon := strings.ToLower(strings.TrimSpace(res.CanonicalID))
+		if lowerCanon != "" && seenCanonical[lowerCanon] {
+			continue
+		}
+		seenRaw[lowerRaw] = true
+		if lowerCanon != "" {
+			seenCanonical[lowerCanon] = true
+		}
+		if (res.IsCarbonFamily || res.IsArgonFamily) && res.CanonicalID != "" {
+			out = append(out, res.CanonicalID)
+		} else {
+			out = append(out, c)
+		}
+	}
+
+	if len(out) == 0 {
+		return []string{DefaultModel}
+	}
+	return out
+}
+
 // buildCandidateChain constructs a deduplicated model failover sequence where
 // antigravity/gemini-4-carbon-high is primary and antigravity/gemini-4-argon-high
 // is only invoked when Carbon fails, stalls, or hits rate/account limits.
@@ -64,39 +141,38 @@ func buildCandidateChain(primaryModel string) []string {
 		raw = append(raw, emergencyFallback)
 	}
 
-	seenRaw := make(map[string]bool, len(raw))
-	seenCanonical := make(map[string]bool, len(raw))
-	out := make([]string, 0, len(raw))
+	return deduplicateModelCandidates(raw)
+}
 
-	for _, cand := range raw {
-		c := strings.TrimSpace(cand)
-		if c == "" {
-			continue
-		}
-		lowerRaw := strings.ToLower(c)
-		if seenRaw[lowerRaw] {
-			continue
-		}
-		res := gateway.ResolveModel(c, nil)
-		lowerCanon := strings.ToLower(strings.TrimSpace(res.CanonicalID))
-		if lowerCanon != "" && seenCanonical[lowerCanon] {
-			continue
-		}
-		seenRaw[lowerRaw] = true
-		if lowerCanon != "" {
-			seenCanonical[lowerCanon] = true
-		}
-		if (res.IsCarbonFamily || res.IsArgonFamily) && res.CanonicalID != "" {
-			out = append(out, res.CanonicalID)
-		} else {
-			out = append(out, c)
-		}
+// buildWorkerCandidateChain selects worker idx's primary model and automatic failover chain.
+// When modelPool is non-empty and taskModel is unset, worker idx stripes across
+// modelPool[idx % len(modelPool)] with the remaining pool models + DefaultFallbackModel as failover.
+func buildWorkerCandidateChain(idx int, taskModel, defaultModel string, modelPool []string) []string {
+	if idx < 0 {
+		idx = 0
+	}
+	explicitTaskModel := strings.TrimSpace(taskModel)
+	if len(modelPool) == 0 {
+		return buildCandidateChain(firstNonEmpty(explicitTaskModel, defaultModel))
 	}
 
-	if len(out) == 0 {
-		return []string{DefaultModel}
+	raw := make([]string, 0, len(modelPool)+3)
+	if explicitTaskModel != "" {
+		raw = append(raw, explicitTaskModel)
 	}
-	return out
+	start := idx % len(modelPool)
+	for offset := 0; offset < len(modelPool); offset++ {
+		raw = append(raw, modelPool[(start+offset)%len(modelPool)])
+	}
+	if envFB := strings.TrimSpace(os.Getenv("OMNI_FALLBACK_MODELS")); envFB != "" {
+		for _, part := range strings.Split(envFB, ",") {
+			if m := strings.TrimSpace(part); m != "" {
+				raw = append(raw, m)
+			}
+		}
+	}
+	raw = append(raw, DefaultFallbackModel)
+	return deduplicateModelCandidates(raw)
 }
 
 func primaryFallbackLabel(primaryModel string) string {
@@ -155,7 +231,13 @@ func resolveStreamIdleTimeout() time.Duration {
 }
 
 func callOmniRouteWithFailover(endpoint, apiKey, model, sysPrompt, userPrompt string) (string, string, error) {
-	rawCandidates := buildCandidateChain(model)
+	return callOmniRouteCandidates(endpoint, apiKey, buildCandidateChain(model), "", sysPrompt, userPrompt)
+}
+
+func callOmniRouteCandidates(endpoint, apiKey string, rawCandidates []string, pinnedAccount, sysPrompt, userPrompt string) (string, string, error) {
+	if len(rawCandidates) == 0 {
+		rawCandidates = buildCandidateChain(DefaultModel)
+	}
 	isOmniKey := strings.HasPrefix(strings.ToLower(strings.TrimSpace(apiKey)), "sk-omni-")
 	candidates := make([]string, 0, len(rawCandidates))
 	for _, c := range rawCandidates {
@@ -165,8 +247,9 @@ func callOmniRouteWithFailover(endpoint, apiKey, model, sysPrompt, userPrompt st
 		candidates = append(candidates, c)
 	}
 	if len(candidates) == 0 {
-		candidates = []string{model}
+		candidates = []string{rawCandidates[0]}
 	}
+	trimmedPin := strings.TrimSpace(pinnedAccount)
 	var lastErr error
 	sawBannerErr := false
 	maxOutTokens := resolveWorkerMaxTokens()
@@ -197,8 +280,8 @@ func callOmniRouteWithFailover(endpoint, apiKey, model, sysPrompt, userPrompt st
 			return "", "", err
 		}
 
-		isPrimaryWithFallback := idx == 0 && len(candidates) > 1
-		firstChunkTimeout := resolveFirstChunkTimeout(isPrimaryWithFallback, promptChars)
+		hasMoreFallbacks := idx < len(candidates)-1
+		firstChunkTimeout := resolveFirstChunkTimeout(hasMoreFallbacks, promptChars)
 		streamIdleTimeout := resolveStreamIdleTimeout()
 		maxCeiling := 10 * time.Minute
 		if firstChunkTimeout > maxCeiling {
@@ -206,9 +289,9 @@ func callOmniRouteWithFailover(endpoint, apiKey, model, sysPrompt, userPrompt st
 		}
 
 		maxRetries := 2
-		if isPrimaryWithFallback {
-			// Single attempt on primary when backup exists: if Carbon stalls, times out,
-			// or hits rate/account errors, switch immediately to Argon without delay.
+		if hasMoreFallbacks {
+			// Single attempt when backup candidate exists: if primary/pool model stalls, times out,
+			// or hits rate/account errors, switch immediately to the next healthy candidate without delay.
 			maxRetries = 1
 		}
 
@@ -230,6 +313,9 @@ func callOmniRouteWithFailover(endpoint, apiKey, model, sysPrompt, userPrompt st
 			httpReq.Header.Set("Accept", "text/event-stream, application/json")
 			if apiKey != "" {
 				httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+			}
+			if trimmedPin != "" {
+				httpReq.Header.Set("X-Omni-Pin-Account", trimmedPin)
 			}
 
 			resp, err := httpClient.Do(httpReq)
