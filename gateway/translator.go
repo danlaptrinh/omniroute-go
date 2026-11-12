@@ -1117,17 +1117,25 @@ func (u *GatewayUpstream) handleDirectCCPA(
 		if strings.Contains(candidate, "lite") && candInner.GenerationConfig.MaxOutputTokens > 32768 {
 			candInner.GenerationConfig.MaxOutputTokens = 32768
 		}
-		// Anthropic models, flash-lite/gemini-3-flash, pre-tiered gemini-3.8-flash-high/medium/low, and image models
-		// on CCPA encode their thinking tier in the modelId and do not accept thinkingLevel overrides.
+		// Anthropic models, flash-lite/gemini-3-flash, and image models do not accept thinkingConfig.
+		// Pre-tiered gemini-3.8-flash-high/medium/low reject thinkingLevel/thinkingBudget overrides,
+		// MUST keep includeThoughts:true (so CCPA streams thought chunks early instead of buffering 15-21s),
+		// and need >=4096 maxOutputTokens headroom so internal thoughts never starve short max_tokens callers!
 		if (strings.HasPrefix(candidate, "claude-") ||
 			candidate == "gemini-3-flash" ||
 			candidate == "gemini-3.5-flash-lite" ||
 			candidate == "gemini-3.1-flash-lite" ||
-			candidate == "gemini-3.8-flash-high" ||
-			candidate == "gemini-3.8-flash-medium" ||
-			candidate == "gemini-3.8-flash-low" ||
 			strings.Contains(candidate, "image")) && candInner.GenerationConfig.ThinkingConfig != nil {
 			candInner.GenerationConfig.ThinkingConfig = nil
+		} else if candidate == "gemini-3.8-flash-high" || candidate == "gemini-3.8-flash-medium" || candidate == "gemini-3.8-flash-low" {
+			if !noThinking {
+				candInner.GenerationConfig.ThinkingConfig = &ccpaThinkingConfig{IncludeThoughts: true}
+			} else {
+				candInner.GenerationConfig.ThinkingConfig = nil
+			}
+			if candInner.GenerationConfig.MaxOutputTokens < 4096 {
+				candInner.GenerationConfig.MaxOutputTokens += 4096
+			}
 		} else if candidate == "gemini-3.8-flash-tiered" && candInner.GenerationConfig.ThinkingConfig != nil {
 			origTC := *candInner.GenerationConfig.ThinkingConfig
 			cappedBudget := 1024
@@ -1140,6 +1148,9 @@ func (u *GatewayUpstream) handleDirectCCPA(
 				IncludeThoughts: origTC.IncludeThoughts,
 				ThinkingLevel:   "",
 				ThinkingBudget:  &cappedBudget,
+			}
+			if cappedBudget > 0 && candInner.GenerationConfig.MaxOutputTokens < 2048 {
+				candInner.GenerationConfig.MaxOutputTokens += 2048
 			}
 		}
 
@@ -1183,7 +1194,11 @@ func (u *GatewayUpstream) handleDirectCCPA(
 				return ctx.Err()
 			}
 			if timedOut.Load() || candErr != nil {
-				markDeadCCPAModel(endpoint, candidate, 2*time.Minute)
+				if isDefaultProdEndpoint && strings.Contains(accScope, "@") {
+					markAccountDeadCCPAModel(endpoint, accScope, candidate, 30*time.Second)
+				} else {
+					markDeadCCPAModel(endpoint, candidate, 2*time.Minute)
+				}
 			}
 			lastCCPAErr = err
 			log.Printf("[omni-gateway] CCPA candidate %q transport error: %v; trying next CCPA tier model", candidate, err)
@@ -1313,7 +1328,11 @@ func (u *GatewayUpstream) handleDirectCCPA(
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			markDeadCCPAModel(endpoint, candidate, 2*time.Minute)
+			if isDefaultProdEndpoint && strings.Contains(accScope, "@") {
+				markAccountDeadCCPAModel(endpoint, accScope, candidate, 30*time.Second)
+			} else {
+				markDeadCCPAModel(endpoint, candidate, 2*time.Minute)
+			}
 			if candErr != nil {
 				lastCCPAErr = fmt.Errorf("CCPA candidate %q timed out waiting for first token: %v", candidate, candErr)
 			} else {
