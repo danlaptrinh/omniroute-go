@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"html"
@@ -11,10 +12,13 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
 const GatewayVersion = "2.0.0-omniroute-go"
+
+var cacheLogSeq atomic.Uint64
 
 // Server exposes the OmniRoute-Go v2.0 HTTP API (/v1/models, /v1/chat/completions, /v1/messages,
 // /v1/providers, /v1/providers/strategy, /v1/providers/alibaba, /v1/oauth/url, /v1/oauth/exchange,
@@ -125,6 +129,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/models/toggle-visibility", s.requireAdmin(s.handleModelToggleVisibility))
 	mux.HandleFunc("/v1/keys", s.requireAdmin(s.handleAPIKeys))
 	mux.HandleFunc("/v1/logs", s.requireAdmin(s.handleLogs))
+	mux.HandleFunc("/ui/api/logs", s.requireAdmin(s.handleLogs))
 	mux.HandleFunc("/v1/database", s.requireAdmin(s.handleDatabaseConfig))
 	mux.HandleFunc("/v1/vector", s.requireAdmin(s.handleVectorDB))
 	mux.HandleFunc("/v1/quota", s.requireAdmin(s.handleQuotaSummary))
@@ -211,6 +216,7 @@ func (s *Server) handleProvidersList(w http.ResponseWriter, r *http.Request) {
 	type accountView struct {
 		ID            string     `json:"id"`
 		Provider      ProviderID `json:"provider"`
+		Tier          string     `json:"tier,omitempty"`
 		Label         string     `json:"label"`
 		Email         string     `json:"email"`
 		ProjectID     string     `json:"project_id,omitempty"`
@@ -219,6 +225,7 @@ func (s *Server) handleProvidersList(w http.ResponseWriter, r *http.Request) {
 		InCooldown    bool       `json:"in_cooldown"`
 		CooldownLeftS int64      `json:"cooldown_left_s"`
 		SuccessCount  int64      `json:"success_count"`
+		RequestsOK    int64      `json:"requests_ok"`
 		FailureCount  int        `json:"failure_count"`
 		TotalTokens   int64      `json:"total_tokens"`
 		AvgLatencyMs  int64      `json:"avg_latency_ms"`
@@ -241,9 +248,20 @@ func (s *Server) handleProvidersList(w http.ResponseWriter, r *http.Request) {
 		if a.CooldownUntil > now {
 			cdLeft = a.CooldownUntil - now
 		}
+		tier := LookupCachedAccountTier(a, nil)
+		if tier == "" {
+			if prov == ProviderClaudeCode {
+				tier = "Max"
+			} else if prov == ProviderAlibaba {
+				tier = "Coding Plan"
+			} else {
+				tier = "Pro"
+			}
+		}
 		list = append(list, accountView{
 			ID:            a.ID,
 			Provider:      prov,
+			Tier:          tier,
 			Label:         a.Label,
 			Email:         a.Email,
 			ProjectID:     a.ProjectID,
@@ -252,6 +270,7 @@ func (s *Server) handleProvidersList(w http.ResponseWriter, r *http.Request) {
 			InCooldown:    cdLeft > 0,
 			CooldownLeftS: cdLeft,
 			SuccessCount:  a.SuccessCount,
+			RequestsOK:    a.SuccessCount,
 			FailureCount:  a.FailureCount,
 			TotalTokens:   a.TotalTokens,
 			AvgLatencyMs:  a.AvgLatencyMs,
@@ -603,7 +622,9 @@ func (s *Server) handleVectorDB(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		q := strings.TrimSpace(r.URL.Query().Get("q"))
 		var memories []VectorMemoryEntry
-		if q != "" {
+		if !GetVectorDBConfig().Enabled {
+			memories = []VectorMemoryEntry{}
+		} else if q != "" {
 			memories = SearchVectorMemories(q, 20, 0.05)
 		} else {
 			memories = ListVectorMemories(100)
@@ -1122,24 +1143,125 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func readRequestBodyFast(r *http.Request, maxBytes int64) ([]byte, error) {
+	if r == nil || r.Body == nil {
+		return nil, nil
+	}
+	defer r.Body.Close()
+	if r.ContentLength > 0 && r.ContentLength <= maxBytes {
+		buf := make([]byte, int(r.ContentLength))
+		n, err := io.ReadFull(r.Body, buf)
+		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+			return nil, err
+		}
+		return buf[:n], nil
+	}
+	return io.ReadAll(io.LimitReader(r.Body, maxBytes))
+}
+
+func recordCacheHitGatewayLog(
+	entry *CacheEntry,
+	req OpenAIChatRequest,
+	resolved ResolvedModel,
+	apiKeyObj *GatewayAPIKey,
+	totalTokens int,
+) {
+	empName := "Admin / Local"
+	apiKeyID := ""
+	maskedKey := ""
+	if apiKeyObj != nil {
+		apiKeyID = apiKeyObj.ID
+		maskedKey = apiKeyObj.MaskedKey
+		if strings.TrimSpace(apiKeyObj.Name) != "" {
+			empName = apiKeyObj.Name
+		}
+	}
+	promptToks := 0
+	compToks := 0
+	if entry.Response.Usage != nil {
+		promptToks = entry.Response.Usage.PromptTokens
+		compToks = entry.Response.Usage.CompletionTokens
+	}
+	var idBuf [32]byte
+	idBytes := append(idBuf[:0], "log-cache-"...)
+	idBytes = strconv.AppendUint(idBytes, cacheLogSeq.Add(1), 36)
+	var tsBuf [32]byte
+	tsBytes := time.Now().UTC().AppendFormat(tsBuf[:0], time.RFC3339)
+	RecordLogEntry(GatewayLogEntry{
+		ID:               string(idBytes),
+		Timestamp:        string(tsBytes),
+		Provider:         resolved.Provider,
+		Account:          "in-memory-cache",
+		RequestedModel:   req.Model,
+		ResolvedModel:    resolved.CanonicalID,
+		UpstreamModel:    "cache-hit",
+		StatusCode:       http.StatusOK,
+		LatencyMs:        0,
+		PromptTokens:     promptToks,
+		CompletionTokens: compToks,
+		TotalTokens:      totalTokens,
+		APIKeyID:         apiKeyID,
+		EmployeeName:     empName,
+		MaskedKey:        maskedKey,
+		PromptText:       entry.PromptSummary,
+		ResponseText:     entry.ContentText(),
+		IsError:          false,
+	})
+}
+
+type chatCompletionEnvelope struct {
+	OpenAIChatRequest
+	StreamOptions *StreamOptions    `json:"stream_options,omitempty"`
+	Tools         []json.RawMessage `json:"tools,omitempty"`
+}
+
+type nonStreamCaptureWriter struct {
+	http.ResponseWriter
+	statusCode int
+	buf        bytes.Buffer
+}
+
+func (cw *nonStreamCaptureWriter) WriteHeader(code int) {
+	if cw.statusCode == 0 {
+		cw.statusCode = code
+	}
+	cw.ResponseWriter.WriteHeader(code)
+}
+
+func (cw *nonStreamCaptureWriter) Write(p []byte) (int, error) {
+	if cw.statusCode == 0 {
+		cw.statusCode = http.StatusOK
+	}
+	if cw.statusCode == http.StatusOK && cw.buf.Len()+len(p) <= 512*1024 {
+		_, _ = cw.buf.Write(p)
+	}
+	return cw.ResponseWriter.Write(p)
+}
+
+func (cw *nonStreamCaptureWriter) Flush() {
+	if fl, ok := cw.ResponseWriter.(http.Flusher); ok {
+		fl.Flush()
+	}
+}
+
 func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeOpenAIError(w, http.StatusMethodNotAllowed, "only POST is supported for /v1/chat/completions", "invalid_request_error")
 		return
 	}
 
-	bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, 32*1024*1024))
+	bodyBytes, err := readRequestBodyFast(r, 32*1024*1024)
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "failed to read request body: "+err.Error(), "invalid_request_error")
 		return
 	}
-	defer r.Body.Close()
 
-	var req OpenAIChatRequest
-	if err := json.Unmarshal(bodyBytes, &req); err != nil {
+	var env chatCompletionEnvelope
+	if err := json.Unmarshal(bodyBytes, &env); err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid JSON payload: "+err.Error(), "invalid_request_error")
 		return
 	}
+	req := env.OpenAIChatRequest
 
 	if strings.TrimSpace(req.Model) == "" {
 		req.Model = "antigravity/gemini-4-carbon-high"
@@ -1157,12 +1279,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx := WithAuditContext(r.Context(), apiKeyObj, req)
-	if pinAcc := strings.TrimSpace(r.Header.Get("X-Omni-Pin-Account")); pinAcc != "" {
-		ctx = WithPinnedAccount(ctx, pinAcc)
-	}
-
 	if IsImageModel(req.Model) {
+		ctx := WithAuditContext(r.Context(), apiKeyObj, req)
+		if pinAcc := strings.TrimSpace(r.Header.Get("X-Omni-Pin-Account")); pinAcc != "" {
+			ctx = WithPinnedAccount(ctx, pinAcc)
+		}
 		prompt := ""
 		for i := len(req.Messages) - 1; i >= 0; i-- {
 			if req.Messages[i].Role == "user" {
@@ -1186,93 +1307,57 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check In-Memory Prompt & Response Cache
-	if cachedResp, ok := GetGlobalCache().Get(req); ok {
-		w.Header().Set("X-Omni-Gateway-Cache", "HIT")
-		toks := EstimateTokens(req.Messages)
-		if cachedResp.Usage != nil && cachedResp.Usage.TotalTokens > 0 {
-			toks = cachedResp.Usage.TotalTokens
-		} else if toks <= 0 {
-			toks = 50
-		}
-		if apiKeyObj != nil {
-			RecordAPIKeyUsage(apiKeyObj.Key, toks)
-		}
-		cachedContent := ""
-		if len(cachedResp.Choices) > 0 && cachedResp.Choices[0].Message != nil {
-			cachedContent = cachedResp.Choices[0].Message.Content
-		}
-		SetAuditResponse(ctx, cachedContent, EstimateTokens(req.Messages), toks)
-		cacheEntry := GatewayLogEntry{
-			Provider:       resolved.Provider,
-			Account:        "in-memory-cache",
-			RequestedModel: req.Model,
-			ResolvedModel:  resolved.CanonicalID,
-			StatusCode:     http.StatusOK,
-			LatencyMs:      0,
-			TotalTokens:    toks,
-			IsError:        false,
-		}
-		EnrichLogEntryFromContext(ctx, &cacheEntry, req)
-		RecordLogEntry(cacheEntry)
-		if req.Stream {
-			w.Header().Set("Content-Type", "text/event-stream")
-			w.Header().Set("Cache-Control", "no-cache")
-			w.Header().Set("Connection", "keep-alive")
+	// Check In-Memory Pre-Serialized Prompt & Response Cache (only when toolless)
+	if len(env.Tools) == 0 {
+		if entry, ok := GetGlobalCache().GetEntry(req); ok {
+			toks := 0
+			if entry.Response.Usage != nil && entry.Response.Usage.TotalTokens > 0 {
+				toks = entry.Response.Usage.TotalTokens
+			} else {
+				toks = EstimateTokens(req.Messages)
+				if toks <= 0 {
+					toks = 50
+				}
+			}
+			if apiKeyObj != nil {
+				RecordAPIKeyUsage(apiKeyObj.Key, toks)
+			}
+			recordCacheHitGatewayLog(entry, req, resolved, apiKeyObj, toks)
+
+			hdr := w.Header()
+			hdr.Set("X-Omni-Gateway-Cache", "HIT")
+			hdr.Set("X-Omni-Gateway-Account", "in-memory-cache")
+			hdr.Set("X-Omni-Gateway-Provider", string(resolved.Provider))
+			hdr.Set("X-Omni-Gateway-Resolved-Model", resolved.CanonicalID)
+			hdr.Set("X-Omni-Gateway-Upstream-Model-Version", "cache-hit")
+			hdr.Set("X-Omni-Gateway-Tokens", strconv.Itoa(toks))
+
+			if req.Stream {
+				hdr.Set("Content-Type", "text/event-stream")
+				hdr.Set("Cache-Control", "no-cache")
+				hdr.Set("Connection", "keep-alive")
+				hdr.Set("X-Accel-Buffering", "no")
+				w.WriteHeader(http.StatusOK)
+				includeUsage := env.StreamOptions != nil && env.StreamOptions.IncludeUsage
+				_, _ = w.Write(entry.SSEPayload(includeUsage))
+				if flusher, ok := w.(http.Flusher); ok {
+					flusher.Flush()
+				}
+				return
+			}
+
+			hdr.Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
-			flusher, _ := w.(http.Flusher)
-			respID := fmt.Sprintf("chatcmpl-cache-%d", time.Now().UnixNano())
-			content := ""
-			reasoning := ""
-			if len(cachedResp.Choices) > 0 && cachedResp.Choices[0].Message != nil {
-				content = cachedResp.Choices[0].Message.Content
-				reasoning = cachedResp.Choices[0].Message.ReasoningContent
-			}
-			chunk := OpenAIChatResponse{
-				ID:      respID,
-				Object:  "chat.completion.chunk",
-				Created: time.Now().Unix(),
-				Model:   req.Model,
-				Choices: []OpenAIChatChoice{
-					{
-						Index: 0,
-						Delta: &OpenAIOutputMessage{
-							Role:             "assistant",
-							Content:          content,
-							ReasoningContent: reasoning,
-						},
-					},
-				},
-			}
-			b, _ := json.Marshal(chunk)
-			_, _ = fmt.Fprintf(w, "data: %s\n\n", b)
-			finalChunk := OpenAIChatResponse{
-				ID:      respID,
-				Object:  "chat.completion.chunk",
-				Created: time.Now().Unix(),
-				Model:   req.Model,
-				Choices: []OpenAIChatChoice{
-					{
-						Index:        0,
-						Delta:        &OpenAIOutputMessage{},
-						FinishReason: "stop",
-					},
-				},
-			}
-			bFinal, _ := json.Marshal(finalChunk)
-			_, _ = fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", bFinal)
-			if flusher != nil {
-				flusher.Flush()
-			}
+			_, _ = w.Write(entry.JSONBytes)
 			return
 		}
-
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(cachedResp)
-		return
 	}
+
 	w.Header().Set("X-Omni-Gateway-Cache", "MISS")
+	ctx := WithAuditContext(r.Context(), apiKeyObj, req)
+	if pinAcc := strings.TrimSpace(r.Header.Get("X-Omni-Pin-Account")); pinAcc != "" {
+		ctx = WithPinnedAccount(ctx, pinAcc)
+	}
 
 	_ = s.upstream.HandleChatCompletion(ctx, w, req, resolved, incomingAuth)
 	if apiKeyObj != nil {
@@ -1281,26 +1366,52 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func extractAnthropicSystemText(raw json.RawMessage) string {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return ""
+	}
+	var sysStr string
+	if err := json.Unmarshal(trimmed, &sysStr); err == nil {
+		return strings.TrimSpace(sysStr)
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(trimmed, &blocks); err == nil && len(blocks) > 0 {
+		var parts []string
+		for _, b := range blocks {
+			if t := strings.TrimSpace(b.Text); t != "" {
+				parts = append(parts, t)
+			}
+		}
+		return strings.Join(parts, "\n")
+	}
+	return ""
+}
+
 func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeOpenAIError(w, http.StatusMethodNotAllowed, "only POST is supported for /v1/messages", "invalid_request_error")
 		return
 	}
-	bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, 32*1024*1024))
+	bodyBytes, err := readRequestBodyFast(r, 32*1024*1024)
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "failed to read request body: "+err.Error(), "invalid_request_error")
 		return
 	}
-	defer r.Body.Close()
 
 	var antReq struct {
-		Model     string              `json:"model"`
-		System    any                 `json:"system,omitempty"`
-		Messages  []OpenAIChatMessage `json:"messages"`
-		MaxTokens int                 `json:"max_tokens,omitempty"`
-		Stream    bool                `json:"stream,omitempty"`
-		Thinking  map[string]any      `json:"thinking,omitempty"`
-		Metadata  map[string]string   `json:"metadata,omitempty"`
+		Model       string              `json:"model"`
+		System      json.RawMessage     `json:"system,omitempty"`
+		Messages    []OpenAIChatMessage `json:"messages"`
+		MaxTokens   int                 `json:"max_tokens,omitempty"`
+		Temperature *float64            `json:"temperature,omitempty"`
+		Stream      bool                `json:"stream,omitempty"`
+		Tools       []json.RawMessage   `json:"tools,omitempty"`
+		Thinking    map[string]any      `json:"thinking,omitempty"`
+		Metadata    map[string]string   `json:"metadata,omitempty"`
 	}
 	if err := json.Unmarshal(bodyBytes, &antReq); err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid JSON payload: "+err.Error(), "invalid_request_error")
@@ -1308,11 +1419,14 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 	}
 
 	var msgs []OpenAIChatMessage
-	if sysStr, ok := antReq.System.(string); ok && strings.TrimSpace(sysStr) != "" {
+	if sysStr := extractAnthropicSystemText(antReq.System); sysStr != "" {
 		rawSys, _ := json.Marshal(sysStr)
+		msgs = make([]OpenAIChatMessage, 0, len(antReq.Messages)+1)
 		msgs = append(msgs, OpenAIChatMessage{Role: "system", Content: rawSys})
+		msgs = append(msgs, antReq.Messages...)
+	} else {
+		msgs = antReq.Messages
 	}
-	msgs = append(msgs, antReq.Messages...)
 
 	model := strings.TrimSpace(antReq.Model)
 	if model == "" {
@@ -1325,10 +1439,11 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 	}
 
 	oaiReq := OpenAIChatRequest{
-		Model:     model,
-		Messages:  msgs,
-		MaxTokens: maxTok,
-		Stream:    antReq.Stream,
+		Model:       model,
+		Messages:    msgs,
+		Temperature: antReq.Temperature,
+		MaxTokens:   maxTok,
+		Stream:      antReq.Stream,
 	}
 
 	resolved := s.resolver.Resolve(oaiReq.Model, s.cfg.FallbackModels)
@@ -1343,11 +1458,72 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Sub-millisecond pre-serialized Anthropic JSON & SSE cache lookup when toolless & deterministic
+	if len(antReq.Tools) == 0 {
+		if entry, ok := GetGlobalCache().GetEntry(oaiReq); ok {
+			toks := 0
+			if entry.Response.Usage != nil && entry.Response.Usage.TotalTokens > 0 {
+				toks = entry.Response.Usage.TotalTokens
+			} else {
+				toks = EstimateTokens(oaiReq.Messages)
+				if toks <= 0 {
+					toks = 50
+				}
+			}
+			if apiKeyObj != nil {
+				RecordAPIKeyUsage(apiKeyObj.Key, toks)
+			}
+			recordCacheHitGatewayLog(entry, oaiReq, resolved, apiKeyObj, toks)
+
+			hdr := w.Header()
+			hdr.Set("X-Omni-Gateway-Cache", "HIT")
+			hdr.Set("X-Omni-Gateway-Account", "in-memory-cache")
+			hdr.Set("X-Omni-Gateway-Provider", string(resolved.Provider))
+			hdr.Set("X-Omni-Gateway-Resolved-Model", resolved.CanonicalID)
+			hdr.Set("X-Omni-Gateway-Upstream-Model-Version", "cache-hit")
+			hdr.Set("X-Omni-Gateway-Tokens", strconv.Itoa(toks))
+
+			if antReq.Stream {
+				hdr.Set("Content-Type", "text/event-stream")
+				hdr.Set("Cache-Control", "no-cache")
+				hdr.Set("Connection", "keep-alive")
+				hdr.Set("X-Accel-Buffering", "no")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write(entry.AnthropicSSEBytes)
+				if flusher, ok := w.(http.Flusher); ok {
+					flusher.Flush()
+				}
+				return
+			}
+
+			hdr.Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(entry.AnthropicJSONBytes)
+			return
+		}
+	}
+
+	w.Header().Set("X-Omni-Gateway-Cache", "MISS")
 	ctx := WithAuditContext(r.Context(), apiKeyObj, oaiReq)
 	if pinAcc := strings.TrimSpace(r.Header.Get("X-Omni-Pin-Account")); pinAcc != "" {
 		ctx = WithPinnedAccount(ctx, pinAcc)
 	}
-	_ = s.upstream.HandleChatCompletion(ctx, w, oaiReq, resolved, incomingAuth)
+
+	if !antReq.Stream && len(antReq.Tools) == 0 && IsCacheable(oaiReq) {
+		cw := &nonStreamCaptureWriter{ResponseWriter: w}
+		upErr := s.upstream.HandleChatCompletion(ctx, cw, oaiReq, resolved, incomingAuth)
+		if upErr == nil && (cw.statusCode == 0 || cw.statusCode == http.StatusOK) && cw.buf.Len() > 0 && !GetGlobalCache().Has(oaiReq) {
+			var parsed OpenAIChatResponse
+			if decErr := json.Unmarshal(cw.buf.Bytes(), &parsed); decErr == nil && len(parsed.Choices) > 0 {
+				if parsed.Choices[0].FinishReason != "length" {
+					GetGlobalCache().Put(oaiReq, parsed)
+				}
+			}
+		}
+	} else {
+		_ = s.upstream.HandleChatCompletion(ctx, w, oaiReq, resolved, incomingAuth)
+	}
+
 	if apiKeyObj != nil {
 		usedTokens := parseRecordedTokens(w.Header().Get("X-Omni-Gateway-Tokens"), oaiReq)
 		RecordAPIKeyUsage(apiKeyObj.Key, usedTokens)
