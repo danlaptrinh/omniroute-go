@@ -47,6 +47,7 @@ services:
       - "20128:20128"
     environment:
       - GATEWAY_LISTEN_ADDR=0.0.0.0:8787
+      - GATEWAY_UNIX_SOCKET=/run/omni/gateway.sock
       - GATEWAY_OAUTH_CALLBACK_ADDR=0.0.0.0:20128
       - GATEWAY_CONFIG_FILE=/data/gateway_config.json
       - OMNI_AGY_USER_AGENT=${OMNI_AGY_USER_AGENT:-antigravity/2.6.0 windows/amd64}
@@ -57,6 +58,7 @@ services:
       - TZ=${TZ:-Asia/Ho_Chi_Minh}
     volumes:
       - ./data:/data
+      - /dev/shm/omni:/run/omni
 
 volumes:
   pgdata18:

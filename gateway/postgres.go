@@ -314,9 +314,10 @@ func InitPostgresDB(dsn string) error {
 
 	ensurePromptLogWorker()
 
-	// Bidirectional sync of API keys and Vector DB memories on startup
+	// Bidirectional sync of API keys, Vector DB memories, and warm ring-buffer logs on startup
 	syncAPIKeysBidirectional(db)
 	InitVectorDBSchema(db)
+	hydrateGlobalLoggerFromPostgres(db)
 	return nil
 }
 
@@ -362,6 +363,11 @@ func ClearPromptLogsFromPostgres() error {
 	return nil
 }
 
+// InitPostgresSchema runs idempotent PostgreSQL schema creation and column migrations.
+func InitPostgresSchema(ctx context.Context, db *sql.DB) error {
+	return migrateSchema(ctx, db)
+}
+
 func migratePostgresTables(ctx context.Context, db *sql.DB) error {
 	return migrateSchema(ctx, db)
 }
@@ -396,6 +402,7 @@ func migrateSchema(ctx context.Context, db *sql.DB) error {
 			account TEXT NOT NULL DEFAULT '',
 			requested_model TEXT NOT NULL DEFAULT '',
 			resolved_model TEXT NOT NULL DEFAULT '',
+			upstream_model TEXT NOT NULL DEFAULT '',
 			prompt_text TEXT NOT NULL DEFAULT '',
 			response_text TEXT NOT NULL DEFAULT '',
 			prompt_tokens INT NOT NULL DEFAULT 0,
@@ -409,6 +416,7 @@ func migrateSchema(ctx context.Context, db *sql.DB) error {
 			error_detail TEXT NOT NULL DEFAULT ''
 		);`,
 		`ALTER TABLE omni_prompt_logs ADD COLUMN IF NOT EXISTS error_detail TEXT NOT NULL DEFAULT '';`,
+		`ALTER TABLE omni_prompt_logs ADD COLUMN IF NOT EXISTS upstream_model TEXT NOT NULL DEFAULT '';`,
 		`CREATE INDEX IF NOT EXISTS idx_omni_prompt_logs_created_at ON omni_prompt_logs(created_at DESC);`,
 		`CREATE INDEX IF NOT EXISTS idx_omni_prompt_logs_api_key_id ON omni_prompt_logs(api_key_id);`,
 		`CREATE INDEX IF NOT EXISTS idx_omni_prompt_logs_employee ON omni_prompt_logs(employee_name);`,
@@ -635,6 +643,7 @@ func sanitizePromptLogEntry(e GatewayLogEntry, seq int) GatewayLogEntry {
 	e.Account = TruncateUTF8(e.Account, 256)
 	e.RequestedModel = TruncateUTF8(e.RequestedModel, 256)
 	e.ResolvedModel = TruncateUTF8(e.ResolvedModel, 256)
+	e.UpstreamModel = TruncateUTF8(e.UpstreamModel, 256)
 	e.PromptText = TruncateUTF8(e.PromptText, 16000)
 	e.ResponseText = TruncateUTF8(e.ResponseText, 16000)
 	e.ErrorMessage = TruncateUTF8(e.ErrorMessage, 4000)
@@ -646,15 +655,42 @@ func buildBatchInsertPromptLogsSQL(entries []GatewayLogEntry) (string, []any) {
 	if len(entries) == 0 {
 		return "", nil
 	}
-	const colsPerRow = 20
+	includeUpstream := false
+	for _, raw := range entries {
+		if strings.TrimSpace(raw.UpstreamModel) != "" {
+			includeUpstream = true
+			break
+		}
+	}
+	return buildBatchInsertPromptLogsWithUpstreamSQL(entries, includeUpstream)
+}
+
+func buildBatchInsertPromptLogsWithUpstreamSQL(entries []GatewayLogEntry, includeUpstream bool) (string, []any) {
+	if len(entries) == 0 {
+		return "", nil
+	}
+	colsPerRow := 20
+	if includeUpstream {
+		colsPerRow = 21
+	}
+
 	var sb strings.Builder
-	sb.Grow(280 + len(entries)*96)
-	sb.WriteString(`INSERT INTO omni_prompt_logs (
+	sb.Grow(300 + len(entries)*104)
+	if includeUpstream {
+		sb.WriteString(`INSERT INTO omni_prompt_logs (
+	id, timestamp_str, api_key_id, employee_name, masked_key,
+	provider, account, requested_model, resolved_model, upstream_model,
+	prompt_text, response_text, prompt_tokens, completion_tokens, total_tokens, tokens_saved,
+	latency_ms, status_code, is_error, error_message, error_detail
+) VALUES `)
+	} else {
+		sb.WriteString(`INSERT INTO omni_prompt_logs (
 	id, timestamp_str, api_key_id, employee_name, masked_key,
 	provider, account, requested_model, resolved_model,
 	prompt_text, response_text, prompt_tokens, completion_tokens, total_tokens, tokens_saved,
 	latency_ms, status_code, is_error, error_message, error_detail
 ) VALUES `)
+	}
 
 	args := make([]any, 0, len(entries)*colsPerRow)
 	for i, raw := range entries {
@@ -673,15 +709,41 @@ func buildBatchInsertPromptLogsSQL(entries []GatewayLogEntry) (string, []any) {
 		}
 		sb.WriteByte(')')
 
-		args = append(args,
-			e.ID, e.Timestamp, e.APIKeyID, e.EmployeeName, e.MaskedKey,
-			string(e.Provider), e.Account, e.RequestedModel, e.ResolvedModel,
-			e.PromptText, e.ResponseText, e.PromptTokens, e.CompletionTokens, e.TotalTokens, e.TokensSaved,
-			e.LatencyMs, e.StatusCode, e.IsError, e.ErrorMessage, e.ErrorDetail,
-		)
+		if includeUpstream {
+			args = append(args,
+				e.ID, e.Timestamp, e.APIKeyID, e.EmployeeName, e.MaskedKey,
+				string(e.Provider), e.Account, e.RequestedModel, e.ResolvedModel, e.UpstreamModel,
+				e.PromptText, e.ResponseText, e.PromptTokens, e.CompletionTokens, e.TotalTokens, e.TokensSaved,
+				e.LatencyMs, e.StatusCode, e.IsError, e.ErrorMessage, e.ErrorDetail,
+			)
+		} else {
+			args = append(args,
+				e.ID, e.Timestamp, e.APIKeyID, e.EmployeeName, e.MaskedKey,
+				string(e.Provider), e.Account, e.RequestedModel, e.ResolvedModel,
+				e.PromptText, e.ResponseText, e.PromptTokens, e.CompletionTokens, e.TotalTokens, e.TokensSaved,
+				e.LatencyMs, e.StatusCode, e.IsError, e.ErrorMessage, e.ErrorDetail,
+			)
+		}
 	}
 	sb.WriteString(` ON CONFLICT (id) DO NOTHING`)
 	return sb.String(), args
+}
+
+func flushPromptLogsBatch(entries []GatewayLogEntry) {
+	writePromptLogBatch(entries)
+}
+
+func execPromptLogsBatchQuery(ctx context.Context, db *sql.DB, query string, args []any) error {
+	tx, txErr := db.BeginTx(ctx, nil)
+	if txErr == nil && tx != nil {
+		if _, err := tx.ExecContext(ctx, query, args...); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+		return tx.Commit()
+	}
+	_, err := db.ExecContext(ctx, query, args...)
+	return err
 }
 
 func writePromptLogBatch(entries []GatewayLogEntry) {
@@ -704,17 +766,14 @@ func writePromptLogBatch(entries []GatewayLogEntry) {
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 	defer cancel()
 
-	var execErr error
-	tx, txErr := db.BeginTx(ctx, nil)
-	if txErr == nil && tx != nil {
-		if _, err := tx.ExecContext(ctx, query, args...); err != nil {
-			_ = tx.Rollback()
-			execErr = err
-		} else if commitErr := tx.Commit(); commitErr != nil {
-			execErr = commitErr
+	execErr := execPromptLogsBatchQuery(ctx, db, query, args)
+	if execErr != nil && strings.Contains(strings.ToLower(execErr.Error()), "upstream_model") {
+		_, _ = db.ExecContext(ctx, `ALTER TABLE omni_prompt_logs ADD COLUMN IF NOT EXISTS upstream_model TEXT NOT NULL DEFAULT ''`)
+		execErr = execPromptLogsBatchQuery(ctx, db, query, args)
+		if execErr != nil {
+			fbQuery, fbArgs := buildBatchInsertPromptLogsWithUpstreamSQL(entries, false)
+			execErr = execPromptLogsBatchQuery(ctx, db, fbQuery, fbArgs)
 		}
-	} else {
-		_, execErr = db.ExecContext(ctx, query, args...)
 	}
 
 	if execErr != nil {
@@ -852,6 +911,87 @@ func FlushPromptLogs(timeout time.Duration) error {
 	}
 }
 
+// LoadPromptLogsFromPostgres loads the most recent prompt logs (including COALESCE(upstream_model, '')) from PostgreSQL.
+func LoadPromptLogsFromPostgres(limit int) ([]GatewayLogEntry, error) {
+	if limit <= 0 || limit > 2000 {
+		limit = DefaultMaxLogEntries
+	}
+	pgMu.RLock()
+	connected := pgConnected
+	db := pgDB
+	pgMu.RUnlock()
+	if !connected || db == nil {
+		return nil, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return loadPromptLogsFromDB(ctx, db, limit)
+}
+
+func loadPromptLogsFromDB(ctx context.Context, db *sql.DB, limit int) ([]GatewayLogEntry, error) {
+	if db == nil {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = DefaultMaxLogEntries
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT id, timestamp_str, api_key_id, employee_name, masked_key,
+		       provider, account, requested_model, resolved_model, COALESCE(upstream_model, ''),
+		       prompt_text, response_text, prompt_tokens, completion_tokens, total_tokens, tokens_saved,
+		       latency_ms, status_code, is_error, error_message, error_detail
+		FROM omni_prompt_logs
+		ORDER BY created_at DESC
+		LIMIT $1
+	`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]GatewayLogEntry, 0, limit)
+	for rows.Next() {
+		var e GatewayLogEntry
+		var prov string
+		if scanErr := rows.Scan(
+			&e.ID, &e.Timestamp, &e.APIKeyID, &e.EmployeeName, &e.MaskedKey,
+			&prov, &e.Account, &e.RequestedModel, &e.ResolvedModel, &e.UpstreamModel,
+			&e.PromptText, &e.ResponseText, &e.PromptTokens, &e.CompletionTokens, &e.TotalTokens, &e.TokensSaved,
+			&e.LatencyMs, &e.StatusCode, &e.IsError, &e.ErrorMessage, &e.ErrorDetail,
+		); scanErr == nil {
+			e.Provider = ProviderID(prov)
+			out = append(out, e)
+		}
+	}
+	return out, rows.Err()
+}
+
+func hydrateGlobalLoggerFromPostgres(db *sql.DB) {
+	if db == nil || GlobalLogger == nil || GlobalLogger.Len() > 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	recent, err := loadPromptLogsFromDB(ctx, db, DefaultMaxLogEntries)
+	if err != nil || len(recent) == 0 {
+		return
+	}
+
+	GlobalLogger.mu.Lock()
+	defer GlobalLogger.mu.Unlock()
+	if len(GlobalLogger.entries) > 0 {
+		return
+	}
+	// recent is newest-first; GlobalLogger stores entries oldest-first.
+	for i := len(recent) - 1; i >= 0; i-- {
+		if len(GlobalLogger.entries) >= GlobalLogger.maxEntries {
+			break
+		}
+		GlobalLogger.entries = append(GlobalLogger.entries, recent[i])
+	}
+}
+
 // QueryPromptLogs queries prompt audit logs from PostgreSQL when connected, or falls back to in-memory ring buffer.
 func QueryPromptLogs(limit int, providerFilter string, errorsOnly bool, apiKeyFilter string, searchQuery string) []GatewayLogEntry {
 	if limit <= 0 || limit > 500 {
@@ -890,8 +1030,8 @@ func QueryPromptLogs(limit int, providerFilter string, errorsOnly bool, apiKeyFi
 		if searchQuery != "" {
 			escapedPattern := "%" + escapeILIKE(searchQuery) + "%"
 			where = append(where, fmt.Sprintf(
-				"(prompt_text ILIKE $%d ESCAPE '\\' OR response_text ILIKE $%d ESCAPE '\\' OR employee_name ILIKE $%d ESCAPE '\\' OR requested_model ILIKE $%d ESCAPE '\\')",
-				argIdx, argIdx, argIdx, argIdx,
+				"(prompt_text ILIKE $%d ESCAPE '\\' OR response_text ILIKE $%d ESCAPE '\\' OR employee_name ILIKE $%d ESCAPE '\\' OR requested_model ILIKE $%d ESCAPE '\\' OR resolved_model ILIKE $%d ESCAPE '\\' OR upstream_model ILIKE $%d ESCAPE '\\')",
+				argIdx, argIdx, argIdx, argIdx, argIdx, argIdx,
 			))
 			args = append(args, escapedPattern)
 			argIdx++
@@ -899,7 +1039,7 @@ func QueryPromptLogs(limit int, providerFilter string, errorsOnly bool, apiKeyFi
 
 		query := `
 			SELECT id, timestamp_str, api_key_id, employee_name, masked_key,
-			       provider, account, requested_model, resolved_model,
+			       provider, account, requested_model, resolved_model, COALESCE(upstream_model, ''),
 			       prompt_text, response_text, prompt_tokens, completion_tokens, total_tokens, tokens_saved,
 			       latency_ms, status_code, is_error, error_message, error_detail
 			FROM omni_prompt_logs
@@ -919,7 +1059,7 @@ func QueryPromptLogs(limit int, providerFilter string, errorsOnly bool, apiKeyFi
 				var prov string
 				if err := rows.Scan(
 					&e.ID, &e.Timestamp, &e.APIKeyID, &e.EmployeeName, &e.MaskedKey,
-					&prov, &e.Account, &e.RequestedModel, &e.ResolvedModel,
+					&prov, &e.Account, &e.RequestedModel, &e.ResolvedModel, &e.UpstreamModel,
 					&e.PromptText, &e.ResponseText, &e.PromptTokens, &e.CompletionTokens, &e.TotalTokens, &e.TokensSaved,
 					&e.LatencyMs, &e.StatusCode, &e.IsError, &e.ErrorMessage, &e.ErrorDetail,
 				); err == nil {
@@ -945,7 +1085,7 @@ func QueryPromptLogs(limit int, providerFilter string, errorsOnly bool, apiKeyFi
 			}
 		}
 		if qLower != "" {
-			haystack := strings.ToLower(item.PromptText + " " + item.ResponseText + " " + item.EmployeeName + " " + item.RequestedModel)
+			haystack := strings.ToLower(item.PromptText + " " + item.ResponseText + " " + item.EmployeeName + " " + item.RequestedModel + " " + item.ResolvedModel + " " + item.UpstreamModel)
 			if !strings.Contains(haystack, qLower) {
 				continue
 			}
