@@ -1242,6 +1242,40 @@ func IsDeepReasoningGeminiModel(modelID string) bool {
 	return false
 }
 
+// HasConfiguredUltraAccount reports whether the saved auth config has at least one active Antigravity account with Tier == "Ultra".
+func HasConfiguredUltraAccount() bool {
+	accounts := readAuthAccountsSnapshotFast()
+	for _, a := range accounts {
+		if !a.Disabled && strings.EqualFold(strings.TrimSpace(a.Tier), "Ultra") {
+			return true
+		}
+	}
+	return false
+}
+
+// IsCarbonOrArgonHighOrMedium reports whether modelID represents Gemini 4 Carbon or Gemini 4 Argon High/Medium flagship models
+// which must strictly be executed on Antigravity Ultra accounts without touching Pro accounts.
+func IsCarbonOrArgonHighOrMedium(modelID string) bool {
+	raw := strings.ToLower(strings.TrimSpace(modelID))
+	if raw == "" || raw == "auto/fast" || raw == "auto/max-speed" {
+		return false
+	}
+	m := stripKnownModelPrefixes(raw)
+	if m == "auto/fast" || m == "auto/max-speed" || strings.HasSuffix(m, "-low") || strings.HasSuffix(m, ":low") || m == "carbon-low" {
+		return false
+	}
+	return strings.HasPrefix(m, "gemini-4-carbon") ||
+		strings.HasPrefix(m, "carbon") ||
+		strings.HasPrefix(m, "gemini-4-argon") ||
+		strings.HasPrefix(m, "argon")
+}
+
+// IsCarbonOrArgonFamilyModel reports whether modelID represents Gemini 4 Carbon or Gemini 4 Argon models
+// which must strictly be executed on Antigravity Ultra accounts without touching Pro accounts.
+func IsCarbonOrArgonFamilyModel(modelID string) bool {
+	return IsCarbonOrArgonHighOrMedium(modelID)
+}
+
 // IsFastSpeedGeminiModel reports whether modelID targets low-latency flash / flash-lite / *-low / auto/fast pools
 // where Pro accounts deliver ~0.8s latency while preserving Ultra concurrency slots for deep reasoning.
 func IsFastSpeedGeminiModel(modelID string) bool {
@@ -1707,6 +1741,10 @@ func hasAlternateFlagshipAccount(endpoint, currentEmail, modelHint string, flags
 		if a.CooldownUntil > nowUnix {
 			continue
 		}
+		if HasConfiguredUltraAccount() && IsCarbonOrArgonHighOrMedium(modelHint) && !strings.EqualFold(strings.TrimSpace(a.Tier), "Ultra") {
+			// Pro accounts do not host Carbon/Argon Ultra flagship
+			continue
+		}
 		if modelHint != "" && IsAccountModelRateLimited(otherEmail, modelHint) {
 			continue
 		}
@@ -1849,24 +1887,52 @@ func selectProviderAccountCore(ctx context.Context, provider ProviderID, modelHi
 	// 2. Model-Quota Aware Filter: for Antigravity, deprioritize accounts where modelHint
 	// (or underlying Claude Opus / Sonnet tier for Carbon/Argon High/Medium) is in per-account 429 cooldown.
 	if provider == ProviderAntigravity && len(candidates) > 1 && strings.TrimSpace(modelHint) != "" {
-		modelFresh := make([]ConnectedAccount, 0, len(candidates))
-		useDirectGeminiFilter := hasAnyTier && isGeminiPrimaryDeepReasoningModel(modelHint)
-		for _, c := range candidates {
-			limited := false
-			if useDirectGeminiFilter {
-				limited = isDirectGeminiTierRateLimited(c.Email, modelHint)
+		if hasAnyTier && HasConfiguredUltraAccount() && IsCarbonOrArgonHighOrMedium(modelHint) {
+			// Carbon 4 / Argon 4 High requests must strictly route to Antigravity Ultra accounts without touching Pro accounts.
+			ultraFresh := make([]ConnectedAccount, 0, len(candidates))
+			for _, c := range candidates {
+				if strings.EqualFold(strings.TrimSpace(c.Tier), "Ultra") &&
+					!isDirectGeminiTierRateLimited(c.Email, modelHint) &&
+					!IsAccountModelRateLimited(c.Email, modelHint) {
+					ultraFresh = append(ultraFresh, c)
+				}
+			}
+			if len(ultraFresh) > 0 {
+				// Healthy Ultra accounts available: restrict candidates ONLY to Ultra accounts (Pro accounts NEVER touched)
+				candidates = ultraFresh
 			} else {
-				limited = IsAccountModelRateLimited(c.Email, modelHint)
+				// All Ultra accounts exhausted for Carbon/Argon: fall back to Pro accounts for Gemini 3.1 Pro High coding
+				proFresh := make([]ConnectedAccount, 0, len(candidates))
+				for _, c := range candidates {
+					if !strings.EqualFold(strings.TrimSpace(c.Tier), "Ultra") &&
+						!IsAccountModelRateLimited(c.Email, "gemini-3.1-pro-high") {
+						proFresh = append(proFresh, c)
+					}
+				}
+				if len(proFresh) > 0 {
+					candidates = proFresh
+				}
 			}
-			if !limited {
-				modelFresh = append(modelFresh, c)
+		} else {
+			modelFresh := make([]ConnectedAccount, 0, len(candidates))
+			useDirectGeminiFilter := hasAnyTier && isGeminiPrimaryDeepReasoningModel(modelHint)
+			for _, c := range candidates {
+				limited := false
+				if useDirectGeminiFilter {
+					limited = isDirectGeminiTierRateLimited(c.Email, modelHint)
+				} else {
+					limited = IsAccountModelRateLimited(c.Email, modelHint)
+				}
+				if !limited {
+					modelFresh = append(modelFresh, c)
+				}
 			}
-		}
-		if len(modelFresh) > 0 {
-			candidates = modelFresh
-		} else if isHedgePickFromContext(ctx) {
-			accountSelectMu.Unlock()
-			return nil, func() {}, fmt.Errorf("no rate-limit-free alternate account for %s", modelHint)
+			if len(modelFresh) > 0 {
+				candidates = modelFresh
+			} else if isHedgePickFromContext(ctx) {
+				accountSelectMu.Unlock()
+				return nil, func() {}, fmt.Errorf("no rate-limit-free alternate account for %s", modelHint)
+			}
 		}
 	}
 
@@ -1896,7 +1962,14 @@ func selectProviderAccountCore(ctx context.Context, provider ProviderID, modelHi
 			}
 		}
 
-		if isHedgePickFromContext(ctx) {
+		if HasConfiguredUltraAccount() && IsCarbonOrArgonHighOrMedium(modelHint) {
+			// Carbon 4 / Argon 4 strictly routes to Ultra accounts unless ALL Ultra accounts are exhausted
+			if len(ultraCands) > 0 {
+				candidates = ultraCands
+			} else if len(nonUltraCands) > 0 {
+				candidates = nonUltraCands
+			}
+		} else if isHedgePickFromContext(ctx) {
 			if IsFastSpeedGeminiModel(modelHint) {
 				if len(nonUltraCands) > 0 {
 					proLowLoad := make([]ConnectedAccount, 0, len(nonUltraCands))
@@ -1927,7 +2000,12 @@ func selectProviderAccountCore(ctx context.Context, provider ProviderID, modelHi
 				}
 			}
 		} else if len(ultraCands) > 0 && len(nonUltraCands) > 0 {
-			if IsDeepReasoningGeminiModel(modelHint) {
+			if strings.HasPrefix(stripKnownModelPrefixes(strings.ToLower(modelHint)), "gemini-3.1-pro") {
+				// Gemini 3.1 Pro High prioritizes Pro accounts to preserve Ultra accounts for Carbon & Argon
+				if minProInFlight <= minOverallInFlight+3 {
+					candidates = nonUltraCands
+				}
+			} else if IsDeepReasoningGeminiModel(modelHint) {
 				if minUltraInFlight <= minOverallInFlight+2 && minUltraInFlight < 4 {
 					candidates = ultraCands
 				} else if minProInFlight <= minUltraInFlight {

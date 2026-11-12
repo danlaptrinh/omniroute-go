@@ -737,6 +737,18 @@ func ExecuteAntigravityWithReactiveRefresh(
 				}
 				accountEmail = acc.Email
 				releaseInFlight = rel
+
+				// Tier-Aware Ultra fallback: If requested model is Carbon or Argon High, but an Ultra account was not used
+				// (because all Ultra accounts are exhausted), step down to Gemini 3.1 Pro High on the Pro account for coding continuity.
+				if HasConfiguredUltraAccount() &&
+					IsCarbonOrArgonHighOrMedium(target.CanonicalID) &&
+					!strings.EqualFold(strings.TrimSpace(acc.Tier), "Ultra") {
+					target = ResolveModel("antigravity/gemini-3.1-pro-high", nil)
+					modelHint = target.CanonicalID
+					w.Header().Set("X-Omni-Gateway-Tier-Stepdown", "gemini-3.1-pro-high")
+					log.Printf("[omniroute-go] Antigravity Ultra accounts exhausted for %q; stepping down to Gemini 3.1 Pro High on Pro account %s for coding continuity",
+						req.Model, accountEmail)
+				}
 			} else {
 				if rel != nil {
 					rel()

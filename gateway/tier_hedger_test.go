@@ -189,7 +189,7 @@ func TestTierHedger_UltraVsProRoutingAndSpillover(t *testing.T) {
 	// 1. N=12 concurrent deep-reasoning requests MUST route 100% to the 4 Ultra accounts (3 each).
 	var releases []func()
 	for i := 0; i < 12; i++ {
-		acc, rel, err := AcquireProviderAccountForModel(context.Background(), ProviderAntigravity, "antigravity/gemini-4-carbon-high", "carbon-high")
+		acc, rel, err := AcquireProviderAccountForModel(context.Background(), ProviderAntigravity, "antigravity/gemini-3.8-flash-high", "flash-high")
 		if err != nil {
 			t.Fatalf("acquire #%d failed: %v", i+1, err)
 		}
@@ -200,7 +200,7 @@ func TestTierHedger_UltraVsProRoutingAndSpillover(t *testing.T) {
 	}
 
 	// 2. Request #13 has minUltraInFlight=3 > minOverallInFlight(0)+2, so it MUST spill to Pro!
-	spillAcc, spillRel, err := AcquireProviderAccountForModel(context.Background(), ProviderAntigravity, "antigravity/gemini-4-carbon-high", "carbon-high")
+	spillAcc, spillRel, err := AcquireProviderAccountForModel(context.Background(), ProviderAntigravity, "antigravity/gemini-3.8-flash-high", "flash-high")
 	if err != nil {
 		t.Fatalf("spillover acquire failed: %v", err)
 	}
@@ -212,7 +212,7 @@ func TestTierHedger_UltraVsProRoutingAndSpillover(t *testing.T) {
 	// Fill remaining 4 Pro accounts to 1 in-flight so minOverallInFlight becomes 1;
 	// then Ultra can take 1 more slot each (up to inFlight == 4), and at >=4 MUST spill to Pro again.
 	for i := 0; i < 4; i++ {
-		acc, rel, err := AcquireProviderAccountForModel(context.Background(), ProviderAntigravity, "antigravity/gemini-4-carbon-high", "carbon-high")
+		acc, rel, err := AcquireProviderAccountForModel(context.Background(), ProviderAntigravity, "antigravity/gemini-3.8-flash-high", "flash-high")
 		if err != nil {
 			t.Fatalf("pro balance acquire failed: %v", err)
 		}
@@ -223,7 +223,7 @@ func TestTierHedger_UltraVsProRoutingAndSpillover(t *testing.T) {
 	}
 	// Now Ultra=3, Pro=1 (minOverall=1 -> 3 <= 1+2 && 3 < 4), next 4 go to Ultra (reaching 4 in-flight each).
 	for i := 0; i < 4; i++ {
-		acc, rel, err := AcquireProviderAccountForModel(context.Background(), ProviderAntigravity, "antigravity/gemini-4-carbon-high", "carbon-high")
+		acc, rel, err := AcquireProviderAccountForModel(context.Background(), ProviderAntigravity, "antigravity/gemini-3.8-flash-high", "flash-high")
 		if err != nil {
 			t.Fatalf("ultra 4th slot acquire failed: %v", err)
 		}
@@ -233,7 +233,7 @@ func TestTierHedger_UltraVsProRoutingAndSpillover(t *testing.T) {
 		}
 	}
 	// Now all 4 Ultra accounts have inFlight == 4 (>= 4 cap): next request MUST spill to Pro!
-	capSpillAcc, capSpillRel, err := AcquireProviderAccountForModel(context.Background(), ProviderAntigravity, "antigravity/gemini-4-carbon-high", "carbon-high")
+	capSpillAcc, capSpillRel, err := AcquireProviderAccountForModel(context.Background(), ProviderAntigravity, "antigravity/gemini-3.8-flash-high", "flash-high")
 	if err != nil {
 		t.Fatalf("cap>=4 spillover failed: %v", err)
 	}
