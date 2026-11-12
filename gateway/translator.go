@@ -1067,14 +1067,14 @@ func primaryFlagshipTierForModel(endpoint string, isConnected bool, resolved Res
 		switch {
 		case resolved.IsCarbonFamily || strings.HasPrefix(ccpaID, "gemini-4-carbon"):
 			if resolved.ThinkingLevel == ThinkingLevelMedium {
-				return []string{"gemini-4-carbon-medium", "gemini-4-carbon", "claude-sonnet-4-6", "claude-opus-4-6-thinking"}
+				return []string{"gemini-4-carbon-medium", "gemini-4-carbon", "gemini-3.8-flash-medium", "gemini-3.8-flash-high", "claude-sonnet-4-6", "claude-opus-4-6-thinking"}
 			}
-			return []string{"gemini-4-carbon-high", "gemini-4-carbon", "claude-opus-4-6-thinking", "claude-sonnet-4-6"}
+			return []string{"gemini-4-carbon-high", "gemini-4-carbon", "gemini-3.8-flash-high", "claude-opus-4-6-thinking", "claude-sonnet-4-6"}
 		case resolved.IsArgonFamily || strings.HasPrefix(ccpaID, "gemini-4-argon"):
 			if resolved.ThinkingLevel == ThinkingLevelMedium {
-				return []string{"gemini-4-argon-medium", "gemini-4-argon", "claude-sonnet-4-6", "claude-opus-4-6-thinking"}
+				return []string{"gemini-4-argon-medium", "gemini-4-argon", "gemini-3.8-flash-medium", "gemini-3.8-flash-high", "claude-sonnet-4-6", "claude-opus-4-6-thinking"}
 			}
-			return []string{"gemini-4-argon-high", "gemini-4-argon", "claude-opus-4-6-thinking", "claude-sonnet-4-6"}
+			return []string{"gemini-4-argon-high", "gemini-4-argon", "gemini-3.8-flash-high", "claude-opus-4-6-thinking", "claude-sonnet-4-6"}
 		case strings.HasPrefix(ccpaID, "gemini-3.1-pro") || strings.Contains(canon, "gemini-3.1-pro"):
 			return []string{"claude-opus-4-6-thinking", "claude-sonnet-4-6", "gemini-3.8-flash-high"}
 		case strings.HasPrefix(ccpaID, "gemini-3.8-flash") || strings.Contains(canon, "gemini-3.8-flash"):
@@ -2473,19 +2473,23 @@ func buildCCPACandidatesWithCache(endpoint, accScope string, resolved ResolvedMo
 					)
 				}
 			case ThinkingLevelMedium:
-				raw = append(raw, "gemini-4-argon-medium")
-				appendClaude("claude-sonnet-4-6", "claude-opus-4-6-thinking")
 				raw = append(raw,
+					"gemini-4-argon-medium",
 					"gemini-3.8-flash-medium",
 					"gemini-3.8-flash-high",
+				)
+				appendClaude("claude-sonnet-4-6", "claude-opus-4-6-thinking")
+				raw = append(raw,
 					"gemini-3.8-flash-tiered",
 					"gemini-3-flash",
 				)
 			default:
-				raw = append(raw, "gemini-4-argon-high")
+				raw = append(raw,
+					"gemini-4-argon-high",
+					"gemini-3.8-flash-high",
+				)
 				appendClaude("claude-opus-4-6-thinking", "claude-sonnet-4-6")
 				raw = append(raw,
-					"gemini-3.8-flash-high",
 					"gemini-3.8-flash-tiered",
 					"gemini-3-flash",
 				)

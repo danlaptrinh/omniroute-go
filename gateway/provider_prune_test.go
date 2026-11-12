@@ -650,10 +650,10 @@ func TestCCPAModelVersionHeaderLiveActiveRoleHonestLogsAndMultiAccountFlagshipFa
 			t.Fatalf("expected connected Gemini 3.1 Pro High (fresh Claude) primary = claude-opus-4-6-thinking, got %v", proFresh)
 		}
 
-		// Argon High preserves gemini-4-argon-high at index 0, followed by claude-opus-4-6-thinking on fresh Claude or gemini-3.8-flash-high when exhausted
+		// Argon High preserves gemini-4-argon-high at index 0, followed by gemini-3.8-flash-high (Gemini priority)
 		argonFresh := buildCCPACandidatesWithCache(DefaultCCPAEndpoint, "claude-fresh@gmail.com", ResolveModel("antigravity/gemini-4-argon-high", nil), false)
-		if len(argonFresh) < 2 || argonFresh[0] != "gemini-4-argon-high" || argonFresh[1] != "claude-opus-4-6-thinking" {
-			t.Fatalf("expected Argon High on fresh Claude account = [gemini-4-argon-high, claude-opus-4-6-thinking, ...], got %v", argonFresh)
+		if len(argonFresh) < 3 || argonFresh[0] != "gemini-4-argon-high" || argonFresh[1] != "gemini-3.8-flash-high" || argonFresh[2] != "claude-opus-4-6-thinking" {
+			t.Fatalf("expected Argon High on fresh Claude account = [gemini-4-argon-high, gemini-3.8-flash-high, claude-opus-4-6-thinking, ...], got %v", argonFresh)
 		}
 		argonExhausted := buildCCPACandidatesWithCache(DefaultCCPAEndpoint, "thuctapsinh316@gmail.com", ResolveModel("antigravity/gemini-4-argon-high", nil), false)
 		if len(argonExhausted) < 2 || argonExhausted[0] != "gemini-4-argon-high" || argonExhausted[1] != "gemini-3.8-flash-high" {
