@@ -903,22 +903,18 @@ func ExecuteAntigravityWithReactiveRefresh(
 			failCode = http.StatusTooManyRequests
 		}
 
-		if isFlagshipFailover && accountEmail != "" && attempt+1 < maxAttempts {
-			if modelHint != "" {
-				RecordAccountModelRateLimit(accountEmail, modelHint, 2*time.Minute)
-			}
-			lastErr = err
-			log.Printf("[omniroute-go] antigravity flagship quota exhausted on %s for %q; failing over to alternate flagship account (attempt %d/%d)",
-				accountEmail, modelHint, attempt+1, maxAttempts)
-			continue
-		}
+		isCarbonArgon := IsCarbonOrArgonHighOrMedium(target.CanonicalID) || IsCarbonOrArgonHighOrMedium(req.Model)
 
 		if accountEmail != "" {
-			if failCode == http.StatusTooManyRequests && modelHint != "" {
-				RecordAccountModelRateLimit(accountEmail, modelHint, 2*time.Minute)
+			if isCarbonArgon || failCode == http.StatusTooManyRequests || isFlagshipFailover {
+				RecordAccountModelRateLimit(accountEmail, target.CanonicalID, 2*time.Minute)
+				if modelHint != "" {
+					RecordAccountModelRateLimit(accountEmail, modelHint, 2*time.Minute)
+				}
 			}
 			RecordAccountModelResult(accountEmail, ProviderAntigravity, target.CanonicalID, false, lat, 0, failCode)
 		}
+
 		errEntry := GatewayLogEntry{
 			Provider:       ProviderAntigravity,
 			Account:        accountEmail,
@@ -934,7 +930,49 @@ func ExecuteAntigravityWithReactiveRefresh(
 		RecordLogEntry(errEntry)
 		lastErr = err
 		log.Printf("[omniroute-go] antigravity CCPA attempt %d for %q (%s, acc=%s) failed: %v", attempt+1, target.RequestedID, target.CCPAModelID, accountEmail, err)
-		if failCode != http.StatusUnauthorized && failCode != http.StatusForbidden && failCode != http.StatusTooManyRequests {
+
+		// 1. Carbon 4 / Argon 4 High: if stuck, failed, or rate-limited on Ultra account,
+		// check if another healthy Ultra account exists. If not, IMMEDIATELY step down to Gemini 3.1 Pro High on Pro accounts!
+		if isCarbonArgon && accountEmail != "" {
+			flagshipCands := []string{"gemini-4-carbon-high", "gemini-4-carbon", "gemini-4-argon-high", "gemini-4-argon"}
+			hasOtherUltra := hasAlternateFlagshipAccount(u.cfg.CCPAEndpoint, accountEmail, target.CanonicalID, flagshipCands)
+			if hasOtherUltra && attempt+1 < maxAttempts {
+				log.Printf("[omniroute-go] Carbon/Argon stuck or exhausted on Ultra account %s (%v); failing over to alternate Ultra account (attempt %d/%d)",
+					accountEmail, err, attempt+1, maxAttempts)
+				forcedAcc = nil
+				continue
+			}
+
+			// All Ultra accounts are stuck/exhausted or this was the last Ultra account:
+			// Jump immediately to Gemini 3.1 Pro High on Pro accounts to avoid hanging!
+			log.Printf("[omniroute-go] Carbon/Argon stuck or exhausted on Ultra accounts (%v); immediately jumping to antigravity/gemini-3.1-pro-high on Pro accounts", err)
+			target = ResolveModel("antigravity/gemini-3.1-pro-high", nil)
+			modelHint = target.CanonicalID
+			w.Header().Set("X-Omni-Gateway-Tier-Stepdown", "gemini-3.1-pro-high")
+			forcedAcc = nil
+			if attempt+1 >= maxAttempts {
+				maxAttempts = attempt + 2
+			}
+			continue
+		}
+
+		// 2. Generic flagship failover across accounts
+		if isFlagshipFailover && accountEmail != "" && attempt+1 < maxAttempts {
+			log.Printf("[omniroute-go] antigravity flagship quota exhausted on %s for %q; failing over to alternate account (attempt %d/%d)",
+				accountEmail, modelHint, attempt+1, maxAttempts)
+			forcedAcc = nil
+			continue
+		}
+
+		// 3. Upstream 5xx retry across accounts (502, 503, 504)
+		if (failCode == http.StatusBadGateway || failCode == http.StatusServiceUnavailable || failCode == http.StatusGatewayTimeout) && attempt+1 < maxAttempts {
+			log.Printf("[omniroute-go] antigravity upstream transient 5xx (%d) on %s; retrying on alternate account (attempt %d/%d)",
+				failCode, accountEmail, attempt+1, maxAttempts)
+			forcedAcc = nil
+			continue
+		}
+
+		if failCode != http.StatusUnauthorized && failCode != http.StatusForbidden && failCode != http.StatusTooManyRequests && failCode != http.StatusBadGateway && failCode != http.StatusServiceUnavailable && failCode != http.StatusGatewayTimeout {
 			break
 		}
 	}

@@ -2,8 +2,13 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -282,4 +287,123 @@ func TestEveningAlibabaQwen38MaxCodingSupport(t *testing.T) {
 	if !foundQwen {
 		t.Fatalf("expected alibaba/qwen3.8-max in top 4 coding fallback models, got %v", res.FallbackChain)
 	}
+}
+
+func TestCarbonArgonStuckFailsOverToProGemini31ProHigh(t *testing.T) {
+	tmpCfg := filepath.Join(t.TempDir(), "gateway_config.json")
+	t.Setenv("GATEWAY_CONFIG_FILE", tmpCfg)
+	resetAuthCacheForTest(t)
+	ResetCCPAModelCaches()
+	ClearAccountModelRateLimits("")
+	t.Cleanup(func() {
+		ResetCCPAModelCaches()
+		ClearAccountModelRateLimits("")
+		resetAuthCacheForTest(t)
+	})
+
+	var mu sync.Mutex
+	callsByTokenAndModel := make(map[string]int)
+
+	mockCCPA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload ccpaRequestPayload
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		authHdr := strings.TrimSpace(r.Header.Get("Authorization"))
+
+		mu.Lock()
+		callsByTokenAndModel[authHdr+"|"+payload.Model]++
+		mu.Unlock()
+
+		// Ultra account gets 503 / congestion on Carbon / Argon High
+		if authHdr == "Bearer ya29.ultra1" && (payload.Model == "gemini-4-carbon" || payload.Model == "gemini-4-carbon-high" || payload.Model == "gemini-4-argon-high") {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error":{"code":503,"status":"UNAVAILABLE","message":"upstream model congested"}}`))
+			return
+		}
+
+		// Pro account succeeds on gemini-3.1-pro-high
+		if authHdr == "Bearer ya29.pro1" && (payload.Model == "gemini-3.1-pro-high" || strings.Contains(payload.Model, "gemini-3.1-pro")) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			_, _ = fmt.Fprintf(w, "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"served-by-pro-gemini-3.1\"}]}}]}}\n\ndata: [DONE]\n\n")
+			return
+		}
+
+		// Fallback for flash
+		if strings.Contains(payload.Model, "flash") {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			_, _ = fmt.Fprintf(w, "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"served-by-%s\"}]}}]}}\n\ndata: [DONE]\n\n", payload.Model)
+			return
+		}
+
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer mockCCPA.Close()
+
+	cfg := SavedGatewayAuth{
+		RoutingStrategy: StrategyRoundRobin,
+		Accounts: []ConnectedAccount{
+			{
+				Email:       "ultra1@gmail.com",
+				Provider:    ProviderAntigravity,
+				Tier:        "Ultra",
+				AccessToken: "ya29.ultra1",
+				ProjectID:   "proj-ultra1",
+				ExpiresAt:   time.Now().Unix() + 3600,
+			},
+			{
+				Email:       "pro1@gmail.com",
+				Provider:    ProviderAntigravity,
+				Tier:        "Pro",
+				AccessToken: "ya29.pro1",
+				ProjectID:   "proj-pro1",
+				ExpiresAt:   time.Now().Unix() + 3600,
+			},
+		},
+	}
+	if err := saveAuthConfigLocked(cfg); err != nil {
+		t.Fatalf("saveAuthConfigLocked failed: %v", err)
+	}
+
+	upstream := NewUpstream(GatewayConfig{CCPAEndpoint: mockCCPA.URL})
+	resolved := ResolveModel("antigravity/gemini-4-carbon-high", nil)
+
+	req := OpenAIChatRequest{
+		Model: "antigravity/gemini-4-carbon-high",
+		Messages: []OpenAIChatMessage{
+			{Role: "user", Content: json.RawMessage(`"Write production code"`)},
+		},
+	}
+	rec := httptest.NewRecorder()
+	if err := upstream.HandleChatCompletion(context.Background(), rec, req, resolved, ""); err != nil {
+		t.Fatalf("HandleChatCompletion failed: %v", err)
+	}
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200 OK, got %d, body: %s", rec.Code, rec.Body.String())
+	}
+
+	if gotAcc := rec.Header().Get("X-Omni-Gateway-Account"); gotAcc != "pro1@gmail.com" {
+		t.Fatalf("expected stepdown to Pro account pro1@gmail.com, got %q", gotAcc)
+	}
+
+	if gotStepdown := rec.Header().Get("X-Omni-Gateway-Tier-Stepdown"); gotStepdown != "gemini-3.1-pro-high" {
+		t.Fatalf("expected X-Omni-Gateway-Tier-Stepdown = gemini-3.1-pro-high, got %q", gotStepdown)
+	}
+
+	if !strings.Contains(rec.Body.String(), "served-by-pro-gemini-3.1") {
+		t.Fatalf("expected response served by Pro gemini-3.1, got: %s", rec.Body.String())
+	}
+
+	// Verify Claude models were NEVER invoked
+	mu.Lock()
+	for k := range callsByTokenAndModel {
+		if strings.Contains(k, "claude") {
+			t.Fatalf("unexpected call to Claude model %q during Gemini failover: %v", k, callsByTokenAndModel)
+		}
+	}
+	mu.Unlock()
 }

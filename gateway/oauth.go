@@ -1705,6 +1705,16 @@ func isAccountClaudeQuotaExhaustedFast(emailOrID string) bool {
 	if norm == "" {
 		return false
 	}
+	now := time.Now()
+	accountModelRLMu.RLock()
+	for _, m := range []string{"claude-opus-4-6-thinking", "claude-sonnet-4-6", "claude"} {
+		if exp, ok := accountModelRateLimits[norm+"|"+m]; ok && now.Before(exp) {
+			accountModelRLMu.RUnlock()
+			return true
+		}
+	}
+	accountModelRLMu.RUnlock()
+
 	acc, ok := lookupConnectedAntigravityAccountFast(norm)
 	if !ok || acc.WeeklyClaudePercent == nil {
 		return false

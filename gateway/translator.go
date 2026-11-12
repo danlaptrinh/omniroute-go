@@ -242,9 +242,9 @@ func isAccountOverloadedForHint(endpoint, accScope, modelHint string, now time.T
 	probes := []string{normModel}
 	switch {
 	case strings.Contains(normModel, "carbon-high") || strings.Contains(normModel, "argon-high") || normModel == "gemini-4-carbon" || normModel == "gemini-4-argon":
-		probes = append(probes, "gemini-4-carbon-high", "gemini-4-argon-high", "claude-opus-4-6-thinking")
+		probes = append(probes, "gemini-4-carbon-high", "gemini-4-argon-high")
 	case strings.Contains(normModel, "carbon-medium") || strings.Contains(normModel, "argon-medium"):
-		probes = append(probes, "gemini-4-carbon-medium", "gemini-4-argon-medium", "claude-sonnet-4-6")
+		probes = append(probes, "gemini-4-carbon-medium", "gemini-4-argon-medium")
 	case normModel == "auto/fast":
 		probes = append(probes, "gemini-3-flash")
 	}
@@ -1941,19 +1941,21 @@ func (u *GatewayUpstream) openCCPAStreamWithFirstChunk(
 
 		// Multi-Account Flagship Protection: before downgrading to a lower model tier on the current account
 		// after a 429/404, check if another healthy Antigravity account still has flagship quota available.
-		// Never abort a local step-down after a transient per-account 5xx!
-		if !saw5xxInAttempt &&
+		// For Carbon 4 & Argon 4: never fall through to Flash on the Ultra account when flagship models fail or stall;
+		// signal [flagship-failover] immediately so the scheduler tries alternate Ultra accounts or jumps to Pro Gemini 3.1 Pro High!
+		isCarbonArgon := IsCarbonOrArgonHighOrMedium(resolved.CanonicalID)
+		if (!saw5xxInAttempt || isCarbonArgon) &&
 			PinnedAccountFromContext(attemptCtx) == "" &&
 			len(flagshipTier) > 0 &&
 			!stringSliceContains(flagshipTier, candidate) &&
-			hasAlternateFlagshipAccount(endpoint, accScope, resolved.CanonicalID, flagshipTier) {
+			(hasAlternateFlagshipAccount(endpoint, accScope, resolved.CanonicalID, flagshipTier) || isCarbonArgon) {
 			if strings.Contains(accScope, "@") {
 				RecordAccountModelRateLimit(accScope, resolved.CanonicalID, 2*time.Minute)
 			}
 			if lastCCPAErr != nil {
 				lastCCPAErr = fmt.Errorf("[flagship-failover] %w", lastCCPAErr)
 			} else {
-				lastCCPAErr = fmt.Errorf("[flagship-failover] CCPA HTTP 429: flagship tier %v rate-limited on %s", flagshipTier, accScope)
+				lastCCPAErr = fmt.Errorf("[flagship-failover] CCPA: flagship tier %v rate-limited/stuck on %s", flagshipTier, accScope)
 			}
 			break
 		}
@@ -2650,7 +2652,6 @@ func buildCCPACandidatesWithCache(endpoint, accScope string, resolved ResolvedMo
 						"gemini-3-flash",
 						"gemini-3.8-flash-low",
 						"gemini-3.5-flash-lite",
-						"claude-sonnet-4-6",
 						"gemini-3.8-flash-tiered",
 					)
 				}
@@ -2728,14 +2729,12 @@ func buildCCPACandidatesWithCache(endpoint, accScope string, resolved ResolvedMo
 					"gemini-3-flash",
 					"gemini-3.8-flash-low",
 					"gemini-3.5-flash-lite",
-					"claude-sonnet-4-6",
 					"gemini-3.8-flash-tiered",
 				)
 			} else {
 				raw = append(raw,
 					"gemini-3-flash",
 					"gemini-3.8-flash-high",
-					"claude-sonnet-4-6",
 					"gemini-3.8-flash-tiered",
 				)
 			}
@@ -2778,13 +2777,22 @@ func buildCCPACandidatesWithCache(endpoint, accScope string, resolved ResolvedMo
 			if resolved.CCPAModelID != "" {
 				raw = append(raw, resolved.CCPAModelID)
 			}
-			raw = append(raw,
-				"claude-sonnet-4-6",
-				"claude-opus-4-6-thinking",
-				"gemini-3.8-flash-high",
-				"gemini-3-flash",
-				"gemini-3.8-flash-tiered",
-			)
+			canonLower := strings.ToLower(resolved.CanonicalID)
+			if strings.Contains(canonLower, "claude") {
+				raw = append(raw,
+					"claude-sonnet-4-6",
+					"claude-opus-4-6-thinking",
+					"gemini-3.8-flash-high",
+					"gemini-3-flash",
+					"gemini-3.8-flash-tiered",
+				)
+			} else {
+				raw = append(raw,
+					"gemini-3.8-flash-high",
+					"gemini-3-flash",
+					"gemini-3.8-flash-tiered",
+				)
+			}
 		}
 	}
 
