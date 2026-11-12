@@ -266,6 +266,7 @@ func TestModelQuotaAwareSelectionBypassesRateLimitedModelOnly(t *testing.T) {
 
 	rateLimitedAcc := emails[0]
 	RecordAccountModelRateLimit(rateLimitedAcc, "claude-opus-4-6-thinking", 2*time.Minute)
+	RecordAccountModelRateLimit(rateLimitedAcc, "antigravity/gemini-4-carbon-high", 2*time.Minute)
 
 	// Verify helper predicates across Opus, Carbon-High, Argon-High, Sonnet, and Gemini-3-Flash
 	if !IsAccountModelRateLimited(rateLimitedAcc, "claude-opus-4-6-thinking") {
@@ -384,11 +385,11 @@ func TestEndToEndCCPA429AutoRecordsPerAccountModelCooldownForNextRequest(t *test
 	defer mockCCPA.Close()
 
 	upstream := NewUpstream(GatewayConfig{CCPAEndpoint: mockCCPA.URL})
-	resolved := ResolveModel("antigravity/gemini-4-carbon-high", nil)
+	resolved := ResolveModel("antigravity/claude-opus-4-6-thinking", nil)
 
 	// Seed 1st request pinned to opus-429@example.com so it discovers the 429 on claude-opus-4-6-thinking
 	seedReq := OpenAIChatRequest{
-		Model:    "antigravity/gemini-4-carbon-high",
+		Model:    "antigravity/claude-opus-4-6-thinking",
 		Messages: []OpenAIChatMessage{{Role: "user", Content: json.RawMessage(`"seed 429 discovery"`)}},
 	}
 	seedRec := httptest.NewRecorder()
@@ -399,11 +400,11 @@ func TestEndToEndCCPA429AutoRecordsPerAccountModelCooldownForNextRequest(t *test
 		t.Fatalf("expected 1 initial 429 hit on opus-429@example.com, got %d", opus429Hits.Load())
 	}
 
-	// Next 6 UNPINNED Carbon-High requests must all bypass opus-429@example.com and land directly on opus-fresh@example.com!
+	// Next 6 UNPINNED Claude Opus requests must all bypass opus-429@example.com and land directly on opus-fresh@example.com!
 	for i := 0; i < 6; i++ {
 		req := OpenAIChatRequest{
-			Model:    "antigravity/gemini-4-carbon-high",
-			Messages: []OpenAIChatMessage{{Role: "user", Content: json.RawMessage(fmt.Sprintf(`"unpinned carbon req %d"`, i))}},
+			Model:    "antigravity/claude-opus-4-6-thinking",
+			Messages: []OpenAIChatMessage{{Role: "user", Content: json.RawMessage(fmt.Sprintf(`"unpinned opus req %d"`, i))}},
 		}
 		rec := httptest.NewRecorder()
 		if err := upstream.HandleChatCompletion(context.Background(), rec, req, resolved, ""); err != nil {

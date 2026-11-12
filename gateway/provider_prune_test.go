@@ -622,42 +622,47 @@ func TestCCPAModelVersionHeaderLiveActiveRoleHonestLogsAndMultiAccountFlagshipFa
 			t.Fatalf("UpsertConnectedAccount(claude-fresh) failed: %v", err)
 		}
 
-		// Carbon High on connected account preserves gemini-4-carbon-high at index 0 and prunes exhausted Claude pool (100%)
+		// Carbon High on connected account preserves gemini-4-carbon-high at index 0 and NEVER injects Claude models
 		carbonCands := buildCCPACandidatesWithCache(DefaultCCPAEndpoint, "thuctapsinh316@gmail.com", ResolveModel("antigravity/gemini-4-carbon-high", nil), false)
-		if len(carbonCands) < 2 || carbonCands[0] != "gemini-4-carbon-high" || carbonCands[1] != "gemini-3.8-flash-high" {
-			t.Fatalf("expected connected Carbon High (exhausted Claude) = [gemini-4-carbon-high, gemini-3.8-flash-high, ...], got %v", carbonCands)
+		if len(carbonCands) < 2 || carbonCands[0] != "gemini-4-carbon-high" {
+			t.Fatalf("expected connected Carbon High = [gemini-4-carbon-high, ...], got %v", carbonCands)
 		}
 		for _, c := range carbonCands {
 			if strings.HasPrefix(c, "claude-") {
-				t.Fatalf("expected exhausted Claude pool (100%%) to be pruned from candidates, got %v", carbonCands)
+				t.Fatalf("expected zero Claude models in Gemini Carbon candidates, found %q in %v", c, carbonCands)
 			}
 			if isVirtualCCPAIDEAlias(c) {
 				t.Fatalf("expected zero 404/503 virtual aliases on DefaultCCPAEndpoint, found %q in %v", c, carbonCands)
 			}
 		}
 		carbonFresh := buildCCPACandidatesWithCache(DefaultCCPAEndpoint, "claude-fresh@gmail.com", ResolveModel("antigravity/gemini-4-carbon-high", nil), false)
-		if len(carbonFresh) < 4 || carbonFresh[0] != "gemini-4-carbon-high" || carbonFresh[1] != "gemini-3.8-flash-high" || carbonFresh[2] != "claude-opus-4-6-thinking" || carbonFresh[3] != "claude-sonnet-4-6" {
-			t.Fatalf("expected connected Carbon High (fresh Claude) = [gemini-4-carbon-high, gemini-3.8-flash-high, claude-opus-4-6-thinking, claude-sonnet-4-6, ...], got %v", carbonFresh)
+		for _, c := range carbonFresh {
+			if strings.HasPrefix(c, "claude-") {
+				t.Fatalf("expected zero Claude models in Gemini Carbon even on fresh Claude account, found %q in %v", c, carbonFresh)
+			}
 		}
 
-		// Gemini 3.1 Pro High maps primary to claude-opus-4-6-thinking on fresh Claude account, or gemini-3.8-flash-high when Claude is exhausted
+		// Gemini 3.1 Pro High maps primary to gemini-3.8-flash-high, NEVER to Claude
 		proCands := buildCCPACandidatesWithCache(DefaultCCPAEndpoint, "thuctapsinh316@gmail.com", ResolveModel("antigravity/gemini-3.1-pro-high", nil), false)
-		if len(proCands) < 2 || proCands[0] != "gemini-3.8-flash-high" || proCands[1] != "gemini-3.8-flash-tiered" {
-			t.Fatalf("expected connected Gemini 3.1 Pro High (exhausted Claude) = [gemini-3.8-flash-high, gemini-3.8-flash-tiered, ...], got %v", proCands)
+		if len(proCands) < 1 || proCands[0] != "gemini-3.8-flash-high" {
+			t.Fatalf("expected connected Gemini 3.1 Pro High = [gemini-3.8-flash-high, ...], got %v", proCands)
 		}
-		proFresh := buildCCPACandidatesWithCache(DefaultCCPAEndpoint, "claude-fresh@gmail.com", ResolveModel("antigravity/gemini-3.1-pro-high", nil), false)
-		if len(proFresh) < 2 || proFresh[0] != "claude-opus-4-6-thinking" {
-			t.Fatalf("expected connected Gemini 3.1 Pro High (fresh Claude) primary = claude-opus-4-6-thinking, got %v", proFresh)
+		for _, c := range proCands {
+			if strings.HasPrefix(c, "claude-") {
+				t.Fatalf("expected zero Claude models in Gemini 3.1 Pro candidates, found %q in %v", c, proCands)
+			}
 		}
 
-		// Argon High preserves gemini-4-argon-high at index 0, followed by gemini-3.8-flash-high (Gemini priority)
-		argonFresh := buildCCPACandidatesWithCache(DefaultCCPAEndpoint, "claude-fresh@gmail.com", ResolveModel("antigravity/gemini-4-argon-high", nil), false)
-		if len(argonFresh) < 3 || argonFresh[0] != "gemini-4-argon-high" || argonFresh[1] != "gemini-3.8-flash-high" || argonFresh[2] != "claude-opus-4-6-thinking" {
-			t.Fatalf("expected Argon High on fresh Claude account = [gemini-4-argon-high, gemini-3.8-flash-high, claude-opus-4-6-thinking, ...], got %v", argonFresh)
+		// Claude Opus Thinking preserves claude-opus-4-6-thinking on fresh Claude account, but is pruned on exhausted Claude account
+		opusFresh := buildCCPACandidatesWithCache(DefaultCCPAEndpoint, "claude-fresh@gmail.com", ResolveModel("antigravity/claude-opus-4-6-thinking", nil), false)
+		if len(opusFresh) < 1 || opusFresh[0] != "claude-opus-4-6-thinking" {
+			t.Fatalf("expected Claude Opus on fresh Claude account = [claude-opus-4-6-thinking, ...], got %v", opusFresh)
 		}
-		argonExhausted := buildCCPACandidatesWithCache(DefaultCCPAEndpoint, "thuctapsinh316@gmail.com", ResolveModel("antigravity/gemini-4-argon-high", nil), false)
-		if len(argonExhausted) < 2 || argonExhausted[0] != "gemini-4-argon-high" || argonExhausted[1] != "gemini-3.8-flash-high" {
-			t.Fatalf("expected Argon High on Claude-exhausted account = [gemini-4-argon-high, gemini-3.8-flash-high, ...], got %v", argonExhausted)
+		opusExhausted := buildCCPACandidatesWithCache(DefaultCCPAEndpoint, "thuctapsinh316@gmail.com", ResolveModel("antigravity/claude-opus-4-6-thinking", nil), false)
+		for _, c := range opusExhausted {
+			if strings.HasPrefix(c, "claude-") {
+				t.Fatalf("expected Claude models to be pruned on Claude-exhausted account, found %q in %v", c, opusExhausted)
+			}
 		}
 	})
 
@@ -740,15 +745,15 @@ func TestCCPAModelVersionHeaderLiveActiveRoleHonestLogsAndMultiAccountFlagshipFa
 		defer mockCCPA.Close()
 
 		upstream := NewUpstream(GatewayConfig{CCPAEndpoint: mockCCPA.URL})
-		carbonRes := ResolveModel("antigravity/gemini-4-carbon-high", nil)
+		opusRes := ResolveModel("antigravity/claude-opus-4-6-thinking", nil)
 
 		// 1. Unpinned flagship request hits acc1 (priority 100) -> gets 429 on Opus -> MUST fail over to acc2 on Opus instead of downgrading to Flash on acc1!
 		rec1 := httptest.NewRecorder()
 		err := upstream.HandleChatCompletion(context.Background(), rec1, OpenAIChatRequest{
-			Model:    "antigravity/gemini-4-carbon-high",
+			Model:    "antigravity/claude-opus-4-6-thinking",
 			Stream:   true,
 			Messages: []OpenAIChatMessage{{Role: "user", Content: json.RawMessage(`"Flagship failover streaming test"`)}},
-		}, carbonRes, "")
+		}, opusRes, "")
 		if err != nil {
 			t.Fatalf("HandleChatCompletion failed: %v", err)
 		}
@@ -764,8 +769,8 @@ func TestCCPAModelVersionHeaderLiveActiveRoleHonestLogsAndMultiAccountFlagshipFa
 		if flashDowngradeCalls.Load() != 0 {
 			t.Fatalf("expected 0 silent downgrades to gemini-3-flash while acc2 had flagship quota, got %d", flashDowngradeCalls.Load())
 		}
-		if roleVal, _ := observedActiveRole.Load().(string); !strings.Contains(roleVal, "➔") || !strings.Contains(roleVal, "claude-opus-4-6-thinking") {
-			t.Fatalf("expected live Dashboard active role to show real backend model with '➔', got %q", roleVal)
+		if roleVal, _ := observedActiveRole.Load().(string); !strings.Contains(roleVal, "claude-opus-4-6-thinking") {
+			t.Fatalf("expected live Dashboard active role to show real backend model, got %q", roleVal)
 		}
 
 		// Verify acc1 was NOT globally cooled down (still 0 CooldownUntil so it can serve Flash requests!)

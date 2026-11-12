@@ -1423,16 +1423,20 @@ func rateLimitProbeKeysForHint(modelHint string) []string {
 	case m == "gemini-4-carbon-high" || m == "gemini-4-carbon" ||
 		strings.HasPrefix(m, "gemini-3.1-pro"):
 		addUnique("gemini-3.8-flash-high")
-		addUnique("claude-opus-4-6-thinking")
-	case m == "gemini-4-argon-high" || m == "gemini-4-argon" ||
-		strings.HasPrefix(m, "claude-opus"):
+		addUnique("gemini-4-argon-high")
+	case m == "gemini-4-argon-high" || m == "gemini-4-argon":
+		addUnique("gemini-4-carbon-high")
+		addUnique("gemini-3.8-flash-high")
+	case strings.HasPrefix(m, "claude-opus"):
 		addUnique("claude-opus-4-6-thinking")
 		addUnique("claude-opus-4-6")
 	case m == "gemini-4-carbon-medium":
 		addUnique("gemini-3.8-flash-medium")
-		addUnique("claude-sonnet-4-6")
-	case m == "gemini-4-argon-medium" ||
-		strings.HasPrefix(m, "claude-sonnet"):
+		addUnique("gemini-4-argon-medium")
+	case m == "gemini-4-argon-medium":
+		addUnique("gemini-4-carbon-medium")
+		addUnique("gemini-3.8-flash-medium")
+	case strings.HasPrefix(m, "claude-sonnet"):
 		addUnique("claude-sonnet-4-6")
 	case m == "gemini-4-carbon-low" || m == "gemini-4-argon-low":
 		addUnique("gemini-3.8-flash-low")
@@ -1753,7 +1757,7 @@ func hasAlternateFlagshipAccount(endpoint, currentEmail, modelHint string, flags
 			if cand == "" {
 				continue
 			}
-			if strings.HasPrefix(cand, "claude-") && a.WeeklyClaudePercent != nil && *a.WeeklyClaudePercent >= 100 {
+			if strings.HasPrefix(cand, "claude-") && (isAccountClaudeQuotaExhaustedFast(otherEmail) || (a.WeeklyClaudePercent != nil && (*a.WeeklyClaudePercent >= 100 || *a.WeeklyClaudePercent <= 0))) {
 				continue
 			}
 			if !isDeadCCPAModel(endpoint, cand, nowTime) && !isAccountDeadCCPAModel(endpoint, otherEmail, cand, nowTime) {

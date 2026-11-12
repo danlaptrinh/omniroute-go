@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -197,5 +198,88 @@ func TestGemini31ProPrefersProAccounts(t *testing.T) {
 	}
 	if acc.Email != "pro1@gmail.com" {
 		t.Fatalf("expected gemini-3.1-pro-high to prefer Pro account pro1@gmail.com, got %s", acc.Email)
+	}
+}
+
+func TestGeminiNeverFallsBackToClaudeAndClaudeExhaustionRespected(t *testing.T) {
+	tmpCfg := filepath.Join(t.TempDir(), "gateway_config.json")
+	t.Setenv("GATEWAY_CONFIG_FILE", tmpCfg)
+	resetAuthCacheForTest(t)
+	ResetCCPAModelCaches()
+	ClearAccountModelRateLimits("")
+	t.Cleanup(func() {
+		ResetCCPAModelCaches()
+		ClearAccountModelRateLimits("")
+		resetAuthCacheForTest(t)
+	})
+
+	zeroPct := 0
+	freshPct := 50
+	cfg := SavedGatewayAuth{
+		RoutingStrategy: StrategyFillFirst,
+		Accounts: []ConnectedAccount{
+			{
+				Email:               "ultra-fresh@gmail.com",
+				Provider:            ProviderAntigravity,
+				Tier:                "Ultra",
+				AccessToken:         "ya29.ultra-fresh",
+				ProjectID:           "proj-ultra-fresh",
+				ExpiresAt:           time.Now().Unix() + 3600,
+				WeeklyClaudePercent: &freshPct,
+			},
+			{
+				Email:               "ultra-exhausted@gmail.com",
+				Provider:            ProviderAntigravity,
+				Tier:                "Ultra",
+				AccessToken:         "ya29.ultra-exhausted",
+				ProjectID:           "proj-ultra-exhausted",
+				ExpiresAt:           time.Now().Unix() + 3600,
+				WeeklyClaudePercent: &zeroPct,
+			},
+		},
+	}
+	if err := saveAuthConfigLocked(cfg); err != nil {
+		t.Fatalf("saveAuthConfigLocked failed: %v", err)
+	}
+
+	// 1. Verify Gemini models NEVER produce Claude candidates
+	for _, m := range []string{
+		"antigravity/gemini-4-carbon-high",
+		"antigravity/gemini-4-argon-high",
+		"antigravity/gemini-3.1-pro-high",
+	} {
+		res := ResolveModel(m, nil)
+		cands := buildCCPACandidatesWithCache(DefaultCCPAEndpoint, "ultra-fresh@gmail.com", res, false)
+		for _, c := range cands {
+			if strings.HasPrefix(c, "claude-") {
+				t.Fatalf("model %s produced Claude candidate %q on fresh account: %v", m, c, cands)
+			}
+		}
+	}
+
+	// 2. Verify Claude exhausted account is recognized
+	if !isAccountClaudeQuotaExhaustedFast("ultra-exhausted@gmail.com") {
+		t.Fatalf("expected ultra-exhausted@gmail.com to be flagged as Claude quota exhausted")
+	}
+	if isAccountClaudeQuotaExhaustedFast("ultra-fresh@gmail.com") {
+		t.Fatalf("expected ultra-fresh@gmail.com NOT to be flagged as Claude quota exhausted")
+	}
+}
+
+func TestEveningAlibabaQwen38MaxCodingSupport(t *testing.T) {
+	// Verify auto/best-coding has alibaba/qwen3.8-max in top 4 models
+	res := ResolveModel("auto/best-coding", nil)
+	if len(res.FallbackChain) < 3 {
+		t.Fatalf("auto/best-coding FallbackChain too short: %v", res.FallbackChain)
+	}
+	foundQwen := false
+	for i := 0; i < 4 && i < len(res.FallbackChain); i++ {
+		if res.FallbackChain[i] == "alibaba/qwen3.8-max" {
+			foundQwen = true
+			break
+		}
+	}
+	if !foundQwen {
+		t.Fatalf("expected alibaba/qwen3.8-max in top 4 coding fallback models, got %v", res.FallbackChain)
 	}
 }

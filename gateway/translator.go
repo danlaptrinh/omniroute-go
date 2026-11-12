@@ -665,6 +665,40 @@ func (u *GatewayUpstream) HandleChatCompletion(
 		}
 	}
 
+	// Evening/Night coding support: when running at night (19:00 - 07:00 UTC+7) and Alibaba account is configured,
+	// promote alibaba/qwen3.8-max in coding failover chains right after Carbon 4 / Argon 4 for high-speed, 40% discounted coding.
+	if isVietnamNightHours() && u.isProviderConfigured(ProviderAlibaba, cleanAuth) {
+		canonLower := strings.ToLower(strings.TrimSpace(resolved.CanonicalID))
+		if canonLower == "auto/best-coding" || resolved.ComboMode == ComboModeNightSaver {
+			var reordered []ResolvedModel
+			var qwenTarget *ResolvedModel
+			for _, t := range targets {
+				if t.Provider == ProviderAlibaba && strings.Contains(strings.ToLower(t.CanonicalID), "qwen3.8-max") {
+					qCopy := t
+					qwenTarget = &qCopy
+					break
+				}
+			}
+			if qwenTarget == nil {
+				resQwen := ResolveModel("alibaba/qwen3.8-max", nil)
+				qwenTarget = &resQwen
+			}
+			// Keep Carbon/Argon flagships first
+			for _, t := range targets {
+				if strings.Contains(t.CanonicalID, "carbon") || strings.Contains(t.CanonicalID, "argon") {
+					reordered = append(reordered, t)
+				}
+			}
+			reordered = append(reordered, *qwenTarget)
+			for _, t := range targets {
+				if !strings.Contains(t.CanonicalID, "carbon") && !strings.Contains(t.CanonicalID, "argon") && !strings.Contains(t.CanonicalID, "qwen3.8-max") {
+					reordered = append(reordered, t)
+				}
+			}
+			targets = reordered
+		}
+	}
+
 	standaloneMode := strings.TrimSpace(u.cfg.OmniRouteBaseURL) == ""
 	var lastErr error
 	var firstUpstreamErr error
@@ -1067,16 +1101,16 @@ func primaryFlagshipTierForModel(endpoint string, isConnected bool, resolved Res
 		switch {
 		case resolved.IsCarbonFamily || strings.HasPrefix(ccpaID, "gemini-4-carbon"):
 			if resolved.ThinkingLevel == ThinkingLevelMedium {
-				return []string{"gemini-4-carbon-medium", "gemini-4-carbon", "gemini-3.8-flash-medium", "gemini-3.8-flash-high", "claude-sonnet-4-6", "claude-opus-4-6-thinking"}
+				return []string{"gemini-4-carbon-medium", "gemini-4-carbon", "gemini-4-argon-medium", "gemini-3.8-flash-medium", "gemini-3.8-flash-high"}
 			}
-			return []string{"gemini-4-carbon-high", "gemini-4-carbon", "gemini-3.8-flash-high", "claude-opus-4-6-thinking", "claude-sonnet-4-6"}
+			return []string{"gemini-4-carbon-high", "gemini-4-carbon", "gemini-4-argon-high", "gemini-3.8-flash-high"}
 		case resolved.IsArgonFamily || strings.HasPrefix(ccpaID, "gemini-4-argon"):
 			if resolved.ThinkingLevel == ThinkingLevelMedium {
-				return []string{"gemini-4-argon-medium", "gemini-4-argon", "gemini-3.8-flash-medium", "gemini-3.8-flash-high", "claude-sonnet-4-6", "claude-opus-4-6-thinking"}
+				return []string{"gemini-4-argon-medium", "gemini-4-argon", "gemini-4-carbon-medium", "gemini-3.8-flash-medium", "gemini-3.8-flash-high"}
 			}
-			return []string{"gemini-4-argon-high", "gemini-4-argon", "gemini-3.8-flash-high", "claude-opus-4-6-thinking", "claude-sonnet-4-6"}
+			return []string{"gemini-4-argon-high", "gemini-4-argon", "gemini-4-carbon-high", "gemini-3.8-flash-high"}
 		case strings.HasPrefix(ccpaID, "gemini-3.1-pro") || strings.Contains(canon, "gemini-3.1-pro"):
-			return []string{"claude-opus-4-6-thinking", "claude-sonnet-4-6", "gemini-3.8-flash-high"}
+			return []string{"gemini-3.1-pro-high", "gemini-3.8-flash-high"}
 		case strings.HasPrefix(ccpaID, "gemini-3.8-flash") || strings.Contains(canon, "gemini-3.8-flash"):
 			if strings.Contains(canon, "tiered") {
 				return []string{"gemini-3.8-flash-tiered", "gemini-3.8-flash-high"}
@@ -1094,14 +1128,20 @@ func primaryFlagshipTierForModel(endpoint string, isConnected bool, resolved Res
 	}
 
 	switch {
-	case resolved.IsCarbonFamily || strings.HasPrefix(ccpaID, "gemini-4-carbon") ||
-		resolved.IsArgonFamily || strings.HasPrefix(ccpaID, "gemini-4-argon") ||
-		strings.HasPrefix(ccpaID, "gemini-3.1-pro") || strings.Contains(canon, "gemini-3.1-pro") ||
-		strings.HasPrefix(ccpaID, "claude-opus"):
+	case resolved.IsCarbonFamily || strings.HasPrefix(ccpaID, "gemini-4-carbon"):
 		if resolved.ThinkingLevel == ThinkingLevelMedium {
-			return []string{"gemini-4-carbon-medium", "gemini-4-carbon", "gemini-4-argon-medium", "claude-sonnet-4-6", "claude-opus-4-6-thinking"}
+			return []string{"gemini-4-carbon-medium", "gemini-4-carbon", "gemini-4-argon-medium"}
 		}
-		return []string{"gemini-4-carbon-high", "gemini-4-carbon", "gemini-4-argon-high", "gemini-4-argon", "gemini-3.1-pro-high", "gemini-3.1-pro-preview", "claude-opus-4-6-thinking"}
+		return []string{"gemini-4-carbon-high", "gemini-4-carbon", "gemini-4-argon-high", "gemini-4-argon", "gemini-3.1-pro-high"}
+	case resolved.IsArgonFamily || strings.HasPrefix(ccpaID, "gemini-4-argon"):
+		if resolved.ThinkingLevel == ThinkingLevelMedium {
+			return []string{"gemini-4-argon-medium", "gemini-4-argon", "gemini-4-carbon-medium"}
+		}
+		return []string{"gemini-4-argon-high", "gemini-4-argon", "gemini-4-carbon-high", "gemini-4-carbon", "gemini-3.1-pro-high"}
+	case strings.HasPrefix(ccpaID, "gemini-3.1-pro") || strings.Contains(canon, "gemini-3.1-pro"):
+		return []string{"gemini-3.1-pro-high", "gemini-3.1-pro-preview"}
+	case strings.HasPrefix(ccpaID, "claude-opus"):
+		return []string{"claude-opus-4-6-thinking", "claude-sonnet-4-6"}
 	case strings.HasPrefix(ccpaID, "claude-sonnet"):
 		return []string{"claude-sonnet-4-6", "claude-opus-4-6-thinking"}
 	}
@@ -1495,7 +1535,9 @@ func (u *GatewayUpstream) handleDirectCCPA(
 
 	isAutoFastReq := strings.EqualFold(strings.TrimSpace(resolved.RequestedID), "auto/fast") ||
 		strings.EqualFold(strings.TrimSpace(resolved.CanonicalID), "auto/fast")
-	if !noThinking && !(isDefaultProdEndpoint && (isAutoFastReq || resolved.CCPAModelID == "gemini-3.8-flash-low")) && resolved.CanonicalID != "" {
+	isGeminiReq := strings.Contains(resolved.CanonicalID, "gemini") || resolved.IsCarbonFamily || resolved.IsArgonFamily
+	isClaudeWinner := strings.HasPrefix(strings.ToLower(activeCCPAModel), "claude-")
+	if !noThinking && !(isDefaultProdEndpoint && (isAutoFastReq || resolved.CCPAModelID == "gemini-3.8-flash-low")) && resolved.CanonicalID != "" && !(isGeminiReq && isClaudeWinner) {
 		workingCCPAModelCache.Store(endpoint+"|acc:"+normalizeAccScope(accScope)+"|"+resolved.CanonicalID, activeCCPAModel)
 	}
 
@@ -2384,10 +2426,15 @@ func buildCCPACandidatesWithCache(endpoint, accScope string, resolved ResolvedMo
 			if s, ok := cached.(string); ok && s != "" {
 				sTrim := strings.TrimSpace(s)
 				sLower := strings.ToLower(sTrim)
-				rateMasked := isDefaultProdEndpoint && strings.Contains(scope, "@") && IsAccountModelRateLimited(scope, sTrim)
-				if !rateMasked && !(claudeExhausted && strings.HasPrefix(sLower, "claude-")) {
-					cachedWinner = sTrim
-					raw = append(raw, cachedWinner)
+				isGeminiReq := strings.Contains(resolved.CanonicalID, "gemini") || resolved.IsCarbonFamily || resolved.IsArgonFamily
+				if isGeminiReq && strings.HasPrefix(sLower, "claude-") {
+					workingCCPAModelCache.Delete(endpoint + "|acc:" + scope + "|" + resolved.CanonicalID)
+				} else {
+					rateMasked := isDefaultProdEndpoint && strings.Contains(scope, "@") && IsAccountModelRateLimited(scope, sTrim)
+					if !rateMasked && !(claudeExhausted && strings.HasPrefix(sLower, "claude-")) {
+						cachedWinner = sTrim
+						raw = append(raw, cachedWinner)
+					}
 				}
 			}
 		}
@@ -2435,21 +2482,21 @@ func buildCCPACandidatesWithCache(endpoint, accScope string, resolved ResolvedMo
 			case ThinkingLevelMedium:
 				raw = append(raw,
 					"gemini-4-carbon-medium",
+					"gemini-4-argon-medium",
+					"gemini-4-carbon",
+					"gemini-3.1-pro-high",
 					"gemini-3.8-flash-medium",
 					"gemini-3.8-flash-high",
-				)
-				appendClaude("claude-sonnet-4-6", "claude-opus-4-6-thinking")
-				raw = append(raw,
 					"gemini-3.8-flash-tiered",
 					"gemini-3-flash",
 				)
 			default:
 				raw = append(raw,
 					"gemini-4-carbon-high",
+					"gemini-4-argon-high",
+					"gemini-4-carbon",
+					"gemini-3.1-pro-high",
 					"gemini-3.8-flash-high",
-				)
-				appendClaude("claude-opus-4-6-thinking", "claude-sonnet-4-6")
-				raw = append(raw,
 					"gemini-3.8-flash-tiered",
 					"gemini-3-flash",
 				)
@@ -2475,21 +2522,21 @@ func buildCCPACandidatesWithCache(endpoint, accScope string, resolved ResolvedMo
 			case ThinkingLevelMedium:
 				raw = append(raw,
 					"gemini-4-argon-medium",
+					"gemini-4-carbon-medium",
+					"gemini-4-argon",
+					"gemini-3.1-pro-high",
 					"gemini-3.8-flash-medium",
 					"gemini-3.8-flash-high",
-				)
-				appendClaude("claude-sonnet-4-6", "claude-opus-4-6-thinking")
-				raw = append(raw,
 					"gemini-3.8-flash-tiered",
 					"gemini-3-flash",
 				)
 			default:
 				raw = append(raw,
 					"gemini-4-argon-high",
+					"gemini-4-carbon-high",
+					"gemini-4-argon",
+					"gemini-3.1-pro-high",
 					"gemini-3.8-flash-high",
-				)
-				appendClaude("claude-opus-4-6-thinking", "claude-sonnet-4-6")
-				raw = append(raw,
 					"gemini-3.8-flash-tiered",
 					"gemini-3-flash",
 				)
@@ -2503,8 +2550,8 @@ func buildCCPACandidatesWithCache(endpoint, accScope string, resolved ResolvedMo
 					"gemini-3.8-flash-tiered",
 				)
 			} else {
-				appendClaude("claude-opus-4-6-thinking", "claude-sonnet-4-6")
 				raw = append(raw,
+					"gemini-3.1-pro-high",
 					"gemini-3.8-flash-high",
 					"gemini-3.8-flash-tiered",
 					"gemini-3-flash",
@@ -2610,18 +2657,19 @@ func buildCCPACandidatesWithCache(endpoint, accScope string, resolved ResolvedMo
 			case ThinkingLevelMedium:
 				raw = append(raw,
 					"gemini-4-carbon-medium",
+					"gemini-4-argon-medium",
 					"gemini-4-carbon",
-					"claude-sonnet-4-6",
-					"claude-opus-4-6-thinking",
+					"gemini-3.8-flash-medium",
+					"gemini-3.8-flash-high",
 					"gemini-3-flash",
 					"gemini-3.8-flash-tiered",
 				)
 			default:
 				raw = append(raw,
 					"gemini-4-carbon-high",
+					"gemini-4-argon-high",
 					"gemini-4-carbon",
-					"claude-opus-4-6-thinking",
-					"claude-sonnet-4-6",
+					"gemini-3.8-flash-high",
 					"gemini-3-flash",
 					"gemini-3.8-flash-tiered",
 				)
@@ -2638,23 +2686,23 @@ func buildCCPACandidatesWithCache(endpoint, accScope string, resolved ResolvedMo
 					"gemini-3-flash",
 					"gemini-3.8-flash-low",
 					"gemini-3.5-flash-lite",
-					"claude-sonnet-4-6",
 					"gemini-3.8-flash-tiered",
 				)
 			case ThinkingLevelMedium:
 				raw = append(raw,
 					"gemini-4-argon-medium",
-					"claude-sonnet-4-6",
-					"claude-opus-4-6-thinking",
+					"gemini-4-carbon-medium",
+					"gemini-4-argon",
 					"gemini-3.8-flash-medium",
+					"gemini-3.8-flash-high",
 					"gemini-3-flash",
 					"gemini-3.8-flash-tiered",
 				)
 			default:
 				raw = append(raw,
 					"gemini-4-argon-high",
-					"claude-opus-4-6-thinking",
-					"claude-sonnet-4-6",
+					"gemini-4-carbon-high",
+					"gemini-4-argon",
 					"gemini-3.8-flash-high",
 					"gemini-3-flash",
 					"gemini-3.8-flash-tiered",
@@ -2666,9 +2714,6 @@ func buildCCPACandidatesWithCache(endpoint, accScope string, resolved ResolvedMo
 				raw = append(raw, resolved.CCPAModelID)
 			}
 			raw = append(raw,
-				"gemini-3.1-pro-preview",
-				"claude-opus-4-6-thinking",
-				"claude-sonnet-4-6",
 				"gemini-3.8-flash-high",
 				"gemini-3-flash",
 				"gemini-3.8-flash-tiered",

@@ -283,8 +283,8 @@ func TestResolve(t *testing.T) {
 			checkFallbackPrefix: []string{
 				"antigravity/gemini-4-carbon-high",
 				"antigravity/gemini-4-argon-high",
-				"claude-code/claude-opus-4-6-thinking",
-				"alibaba/qwen3-coder-plus",
+				"alibaba/qwen3.8-max",
+				"antigravity/gemini-3.1-pro-high",
 			},
 		},
 		{

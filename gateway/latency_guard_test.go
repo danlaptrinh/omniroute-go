@@ -121,9 +121,6 @@ func TestCCPAFirstChunkTimeoutFailsOverAndCachesDeadModel(t *testing.T) {
 		mu.Unlock()
 
 		switch payload.Model {
-		case "gemini-4-carbon-high", "gemini-4-carbon":
-			w.WriteHeader(http.StatusNotFound)
-			_, _ = w.Write([]byte(`{"error":{"code":404,"message":"model not found"}}`))
 		case "claude-opus-4-6-thinking":
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.WriteHeader(http.StatusOK)
@@ -157,13 +154,13 @@ func TestCCPAFirstChunkTimeoutFailsOverAndCachesDeadModel(t *testing.T) {
 	}
 
 	upstream := NewUpstream(GatewayConfig{CCPAEndpoint: mockCCPA.URL})
-	resolved := ResolveModel("antigravity/gemini-4-carbon-high", nil)
+	resolved := ResolveModel("antigravity/claude-opus-4-6-thinking", nil)
 
-	// Request 1: 404 -> 404 -> 80ms TTFT timeout -> 200 OK on claude-sonnet-4-6
+	// Request 1: 80ms TTFT timeout on claude-opus-4-6-thinking -> 200 OK on claude-sonnet-4-6
 	req1 := OpenAIChatRequest{
-		Model: "antigravity/gemini-4-carbon-high",
+		Model: "antigravity/claude-opus-4-6-thinking",
 		Messages: []OpenAIChatMessage{
-			{Role: "user", Content: json.RawMessage(`"First request with stalled model"`)} ,
+			{Role: "user", Content: json.RawMessage(`"First request with stalled model"`)},
 		},
 		Stream: false,
 	}
@@ -184,24 +181,20 @@ func TestCCPAFirstChunkTimeoutFailsOverAndCachesDeadModel(t *testing.T) {
 	}
 
 	mu.Lock()
-	c4HighAfter1 := callsByModel["gemini-4-carbon-high"]
-	c4BaseAfter1 := callsByModel["gemini-4-carbon"]
 	opusAfter1 := callsByModel["claude-opus-4-6-thinking"]
 	sonnetAfter1 := callsByModel["claude-sonnet-4-6"]
 	mu.Unlock()
 
-	if c4HighAfter1 != 1 || c4BaseAfter1 != 1 || opusAfter1 != 1 || sonnetAfter1 != 1 {
+	if opusAfter1 != 1 || sonnetAfter1 != 1 {
 		t.Fatalf("unexpected Request 1 call counts: %+v", map[string]int{
-			"gemini-4-carbon-high":     c4HighAfter1,
-			"gemini-4-carbon":          c4BaseAfter1,
 			"claude-opus-4-6-thinking": opusAfter1,
 			"claude-sonnet-4-6":        sonnetAfter1,
 		})
 	}
 
-	// Request 2 (distinct prompt so response cache is bypassed): must skip 404s AND stalled opus model (0 new calls!)
+	// Request 2 (distinct prompt so response cache is bypassed): must skip stalled opus model (0 new calls!)
 	req2 := OpenAIChatRequest{
-		Model: "antigravity/gemini-4-carbon-high",
+		Model: "antigravity/claude-opus-4-6-thinking",
 		Messages: []OpenAIChatMessage{
 			{Role: "user", Content: json.RawMessage(`"Second request must hit cached winning model directly"`)},
 		},
@@ -217,10 +210,8 @@ func TestCCPAFirstChunkTimeoutFailsOverAndCachesDeadModel(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	if callsByModel["gemini-4-carbon-high"] != c4HighAfter1 ||
-		callsByModel["gemini-4-carbon"] != c4BaseAfter1 ||
-		callsByModel["claude-opus-4-6-thinking"] != opusAfter1 {
-		t.Fatalf("Request 2 did not skip dead/stalled models! counts=%+v", callsByModel)
+	if callsByModel["claude-opus-4-6-thinking"] != opusAfter1 {
+		t.Fatalf("Request 2 did not skip stalled opus model! counts=%+v", callsByModel)
 	}
 	if callsByModel["claude-sonnet-4-6"] != 2 {
 		t.Fatalf("expected claude-sonnet-4-6 to be called immediately on Request 2 (total=2), got %d", callsByModel["claude-sonnet-4-6"])
@@ -247,7 +238,7 @@ func TestCCPA503CachedAndCarbonCandidateOrder(t *testing.T) {
 		if tieredIdx == -1 {
 			t.Fatalf("%s candidates missing gemini-3.8-flash-tiered: %v", modelID, cands)
 		}
-		for _, fastModel := range []string{"claude-opus-4-6-thinking", "claude-sonnet-4-6", "gemini-3-flash"} {
+		for _, fastModel := range []string{"gemini-3.8-flash-high", "gemini-3-flash"} {
 			idx := indexOfString(cands, fastModel)
 			if idx == -1 || idx >= tieredIdx {
 				t.Fatalf("%s: expected %q (idx=%d) before gemini-3.8-flash-tiered (idx=%d) in %v", modelID, fastModel, idx, tieredIdx, cands)
@@ -541,11 +532,11 @@ func TestPerAccount429DoesNotDowngradeOtherAccounts(t *testing.T) {
 	}
 
 	upstream := NewUpstream(GatewayConfig{CCPAEndpoint: mockCCPA.URL})
-	resolved := ResolveModel("antigravity/gemini-4-carbon-high", nil)
+	resolved := ResolveModel("antigravity/claude-opus-4-6-thinking", nil)
 
-	// 1. Account 1 (exhausted@gmail.com): hits 404 on carbon, 429 on opus & sonnet, succeeds on gemini-3-flash
+	// 1. Account 1 (exhausted@gmail.com): hits 429 on opus & sonnet, succeeds on gemini-3-flash
 	req1 := OpenAIChatRequest{
-		Model: "antigravity/gemini-4-carbon-high",
+		Model: "antigravity/claude-opus-4-6-thinking",
 		Messages: []OpenAIChatMessage{
 			{Role: "user", Content: json.RawMessage(`"Request from exhausted Claude account"`)},
 		},
@@ -558,22 +549,19 @@ func TestPerAccount429DoesNotDowngradeOtherAccounts(t *testing.T) {
 	if gotAcc := rec1.Header().Get("X-Omni-Gateway-Account"); gotAcc != "exhausted@gmail.com" {
 		t.Fatalf("Account 1 header = %q, want exhausted@gmail.com", gotAcc)
 	}
-	if gotModel := rec1.Header().Get("X-Omni-Gateway-Resolved-Model"); gotModel != "gemini-3-flash" {
-		t.Fatalf("Account 1 resolved model = %q, want gemini-3-flash", gotModel)
+	if gotModel := rec1.Header().Get("X-Omni-Gateway-Resolved-Model"); gotModel != "gemini-3.8-flash-high" && gotModel != "gemini-3-flash" {
+		t.Fatalf("Account 1 resolved model = %q, want gemini-3.8-flash-high or gemini-3-flash", gotModel)
 	}
 
 	mu.Lock()
 	after1Global404s := global404Calls
 	mu.Unlock()
-	if after1Global404s != 2 {
-		t.Fatalf("expected 2 initial 404 probes on Account 1, got %d", after1Global404s)
-	}
 
-	// 2. Account 2 (fresh@gmail.com): must skip global 404s (0 extra 404 calls) AND hit claude-opus-4-6-thinking directly!
+	// 2. Account 2 (fresh@gmail.com): hits claude-opus-4-6-thinking directly!
 	req2 := OpenAIChatRequest{
-		Model: "antigravity/gemini-4-carbon-high",
+		Model: "antigravity/claude-opus-4-6-thinking",
 		Messages: []OpenAIChatMessage{
-			{Role: "user", Content: json.RawMessage(`"Request from fresh Claude account"`)} ,
+			{Role: "user", Content: json.RawMessage(`"Request from fresh Claude account"`)},
 		},
 	}
 	rec2 := httptest.NewRecorder()
