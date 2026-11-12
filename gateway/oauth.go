@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -59,6 +60,7 @@ var (
 	cachedAuthCfg     *SavedGatewayAuth
 	cachedAuthPath    string
 	cachedAuthMtime   time.Time
+	cachedAuthStatAt  time.Time
 	asyncFlushPending bool
 
 	oauthHTTPClient = &http.Client{
@@ -66,8 +68,14 @@ var (
 		Timeout:   8 * time.Second,
 	}
 
-	rrMu       sync.Mutex
-	rrCounters = make(map[ProviderID]uint64)
+	accountSelectMu  sync.Mutex
+	rrAntigravitySeq atomic.Uint64
+	rrClaudeCodeSeq  atomic.Uint64
+	rrAlibabaSeq     atomic.Uint64
+	rrOtherSeqs      sync.Map // map[ProviderID]*atomic.Uint64
+
+	accountModelRLMu       sync.RWMutex
+	accountModelRateLimits = make(map[string]time.Time) // "email|normalized_model" -> expiresAt
 )
 
 // ConnectedAccount represents an account configured for one of the supported upstream providers.
@@ -168,11 +176,16 @@ func cloneAuthConfig(src SavedGatewayAuth) SavedGatewayAuth {
 
 func loadSavedAuthConfigLocked() SavedGatewayAuth {
 	path := GatewayConfigFilePath()
-	if cachedAuthCfg != nil && cachedAuthPath == path && asyncFlushPending {
+	if cachedAuthPath != "" && cachedAuthPath != path {
+		ClearAccountModelRateLimits("")
+	}
+	if cachedAuthCfg != nil && cachedAuthPath == path && (asyncFlushPending || time.Since(cachedAuthStatAt) < 500*time.Millisecond) {
 		return cloneAuthConfig(*cachedAuthCfg)
 	}
+	nowStat := time.Now()
 	info, statErr := os.Stat(path)
 	if statErr == nil && cachedAuthCfg != nil && cachedAuthPath == path && info.ModTime().Equal(cachedAuthMtime) {
+		cachedAuthStatAt = nowStat
 		return cloneAuthConfig(*cachedAuthCfg)
 	}
 
@@ -221,6 +234,7 @@ func loadSavedAuthConfigLocked() SavedGatewayAuth {
 	cloned := cloneAuthConfig(cfg)
 	cachedAuthCfg = &cloned
 	cachedAuthPath = path
+	cachedAuthStatAt = nowStat
 	if statErr == nil {
 		cachedAuthMtime = info.ModTime()
 	}
@@ -243,6 +257,8 @@ func saveAuthConfigLocked(cfg SavedGatewayAuth) error {
 	if err := os.WriteFile(path, data, 0600); err != nil {
 		return err
 	}
+	asyncFlushPending = false
+	cachedAuthStatAt = time.Now()
 	if info, statErr := os.Stat(path); statErr == nil {
 		cachedAuthMtime = info.ModTime()
 	}
@@ -845,9 +861,203 @@ func cryptoRandInt(max int) int {
 	return v % max
 }
 
+func nextProviderRRSeq(provider ProviderID) uint64 {
+	switch provider {
+	case "", ProviderAntigravity:
+		return rrAntigravitySeq.Add(1) - 1
+	case ProviderClaudeCode:
+		return rrClaudeCodeSeq.Add(1) - 1
+	case ProviderAlibaba:
+		return rrAlibabaSeq.Add(1) - 1
+	default:
+		if v, ok := rrOtherSeqs.Load(provider); ok {
+			return v.(*atomic.Uint64).Add(1) - 1
+		}
+		actual, _ := rrOtherSeqs.LoadOrStore(provider, &atomic.Uint64{})
+		return actual.(*atomic.Uint64).Add(1) - 1
+	}
+}
+
+func normalizeRateLimitModelID(model string) string {
+	m := strings.ToLower(strings.TrimSpace(model))
+	if m == "" {
+		return ""
+	}
+	if aliased, ok := defaultBuiltinAliases[m]; ok {
+		m = strings.ToLower(strings.TrimSpace(aliased))
+	}
+	for _, pfx := range []string{"antigravity/", "claude-code/", "alibaba/"} {
+		if strings.HasPrefix(m, pfx) {
+			m = strings.TrimSpace(strings.TrimPrefix(m, pfx))
+			break
+		}
+	}
+	return m
+}
+
+func rateLimitProbeKeysForHint(modelHint string) []string {
+	m := normalizeRateLimitModelID(modelHint)
+	if m == "" {
+		return nil
+	}
+	keys := []string{m}
+	addUnique := func(extra string) {
+		if extra != "" && extra != m {
+			keys = append(keys, extra)
+		}
+	}
+	switch {
+	case m == "gemini-4-carbon-high" || m == "gemini-4-carbon" ||
+		m == "gemini-4-argon-high" || m == "gemini-4-argon" ||
+		strings.HasPrefix(m, "gemini-3.1-pro") ||
+		strings.HasPrefix(m, "claude-opus"):
+		addUnique("claude-opus-4-6-thinking")
+	case m == "gemini-4-carbon-medium" || m == "gemini-4-argon-medium" ||
+		strings.HasPrefix(m, "claude-sonnet"):
+		addUnique("claude-sonnet-4-6")
+	case m == "gemini-4-carbon-low" || m == "gemini-4-argon-low" ||
+		strings.HasPrefix(m, "gemini-3.8-flash"):
+		addUnique("gemini-3-flash")
+	}
+	return keys
+}
+
+// RecordAccountModelRateLimit marks a specific model (or CCPA backend model tier) as rate-limited (HTTP 429)
+// on a single account for ttl without globally disabling the account for unrelated model families.
+func RecordAccountModelRateLimit(email, model string, ttl time.Duration) {
+	normEmail := strings.ToLower(strings.TrimSpace(email))
+	normModel := normalizeRateLimitModelID(model)
+	if normEmail == "" || normModel == "" {
+		return
+	}
+	if ttl <= 0 {
+		ttl = 2 * time.Minute
+	}
+	exp := time.Now().Add(ttl)
+	accountModelRLMu.Lock()
+	accountModelRateLimits[normEmail+"|"+normModel] = exp
+	accountModelRLMu.Unlock()
+}
+
+// IsAccountModelRateLimited reports whether email is currently in per-account HTTP 429 cooldown
+// for model (including underlying Claude Opus / Sonnet tiers for Carbon/Argon High/Medium).
+func IsAccountModelRateLimited(email, model string) bool {
+	normEmail := strings.ToLower(strings.TrimSpace(email))
+	if normEmail == "" {
+		return false
+	}
+	probes := rateLimitProbeKeysForHint(model)
+	if len(probes) == 0 {
+		return false
+	}
+	now := time.Now()
+
+	accountModelRLMu.RLock()
+	var expiredKeys []string
+	limited := false
+	for _, p := range probes {
+		key := normEmail + "|" + p
+		if exp, ok := accountModelRateLimits[key]; ok {
+			if now.Before(exp) {
+				limited = true
+				break
+			}
+			expiredKeys = append(expiredKeys, key)
+		}
+	}
+	accountModelRLMu.RUnlock()
+
+	if len(expiredKeys) > 0 {
+		accountModelRLMu.Lock()
+		for _, k := range expiredKeys {
+			if exp, ok := accountModelRateLimits[k]; ok && !now.Before(exp) {
+				delete(accountModelRateLimits, k)
+			}
+		}
+		accountModelRLMu.Unlock()
+	}
+	if limited {
+		return true
+	}
+
+	for _, p := range probes {
+		if isAccountDeadCCPAModel(DefaultCCPAEndpoint, normEmail, p, now) {
+			return true
+		}
+	}
+	return false
+}
+
+// ClearAccountModelRateLimits clears per-account model 429 cooldown entries for email (or all accounts if empty/"all").
+func ClearAccountModelRateLimits(email string) {
+	normEmail := strings.ToLower(strings.TrimSpace(email))
+	accountModelRLMu.Lock()
+	defer accountModelRLMu.Unlock()
+	if normEmail == "" || normEmail == "all" {
+		accountModelRateLimits = make(map[string]time.Time)
+		return
+	}
+	prefix := normEmail + "|"
+	for k := range accountModelRateLimits {
+		if strings.HasPrefix(k, prefix) {
+			delete(accountModelRateLimits, k)
+		}
+	}
+}
+
+func clearSingleAccountModelRateLimit(email, model string) {
+	normEmail := strings.ToLower(strings.TrimSpace(email))
+	normModel := normalizeRateLimitModelID(model)
+	if normEmail == "" || normModel == "" {
+		return
+	}
+	accountModelRLMu.Lock()
+	delete(accountModelRateLimits, normEmail+"|"+normModel)
+	accountModelRLMu.Unlock()
+}
+
+func buildInFlightReleaseFn(email string) func() {
+	if strings.TrimSpace(email) == "" {
+		return func() {}
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			ReleaseAccountInFlight(email)
+		})
+	}
+}
+
 // SelectProviderAccount selects an account for provider using the configured RoutingStrategy,
 // skipping cooled down accounts (unless all are in cooldown) and refreshing expired Antigravity OAuth tokens.
 func SelectProviderAccount(ctx context.Context, provider ProviderID) (*ConnectedAccount, error) {
+	return SelectProviderAccountForModel(ctx, provider, "")
+}
+
+// SelectProviderAccountForModel selects an optimal healthy account for provider and modelHint,
+// deprioritizing accounts whose modelHint (or underlying Claude Opus/Sonnet tier) is in per-account 429 cooldown
+// and spreading simultaneous microsecond bursts deterministically across least-busy candidates via atomic round-robin.
+func SelectProviderAccountForModel(ctx context.Context, provider ProviderID, modelHint string) (*ConnectedAccount, error) {
+	acc, _, err := selectProviderAccountCore(ctx, provider, modelHint, "")
+	return acc, err
+}
+
+// AcquireProviderAccountForModel atomically selects an optimal account for (provider, modelHint) and increments
+// its in-flight counter inside the same critical section, eliminating TOCTOU burst pile-up across goroutines.
+func AcquireProviderAccountForModel(ctx context.Context, provider ProviderID, modelHint string, role string) (*ConnectedAccount, func(), error) {
+	if strings.TrimSpace(role) == "" {
+		role = modelHint
+	}
+	if strings.TrimSpace(role) == "" {
+		role = string(provider)
+	}
+	return selectProviderAccountCore(ctx, provider, modelHint, role)
+}
+
+func selectProviderAccountCore(ctx context.Context, provider ProviderID, modelHint string, acquireRole string) (*ConnectedAccount, func(), error) {
+	if provider == "" {
+		provider = ProviderAntigravity
+	}
 	auth := LoadSavedAuthConfig()
 
 	var matching []ConnectedAccount
@@ -865,7 +1075,7 @@ func SelectProviderAccount(ctx context.Context, provider ProviderID) (*Connected
 	}
 
 	if len(matching) == 0 {
-		return nil, fmt.Errorf("no account configured for provider %s", provider)
+		return nil, func() {}, fmt.Errorf("no account configured for provider %s", provider)
 	}
 
 	now := time.Now().Unix()
@@ -876,22 +1086,47 @@ func SelectProviderAccount(ctx context.Context, provider ProviderID) (*Connected
 		}
 	}
 
-	candidates := active
-	if len(candidates) == 0 {
-		candidates = matching
+	baseCandidates := active
+	if len(baseCandidates) == 0 {
+		baseCandidates = matching
 	}
 
 	// 1. Check if this Sub-Agent / Request explicitly pinned a specific account (1-to-1 Sub-Agent slot binding)
 	if pinnedEmail := PinnedAccountFromContext(ctx); pinnedEmail != "" {
-		for _, c := range candidates {
+		for _, c := range baseCandidates {
 			if strings.EqualFold(c.Email, pinnedEmail) || strings.EqualFold(c.ID, pinnedEmail) {
+				acquiredEmail := ""
+				if acquireRole != "" && c.Email != "" {
+					accountSelectMu.Lock()
+					AcquireAccountInFlightWithRole(c.Email, acquireRole)
+					acquiredEmail = c.Email
+					accountSelectMu.Unlock()
+				}
 				c = EnsureAccountTokenFresh(ctx, c, nil)
-				return &c, nil
+				return &c, buildInFlightReleaseFn(acquiredEmail), nil
 			}
 		}
 	}
 
-	// 2. Filter to least in-flight accounts first so 50 concurrent Sub-Agents never collide on the same account
+	accountSelectMu.Lock()
+	candidates := make([]ConnectedAccount, len(baseCandidates))
+	copy(candidates, baseCandidates)
+
+	// 2. Model-Quota Aware Filter: for Antigravity, deprioritize accounts where modelHint
+	// (or underlying Claude Opus / Sonnet tier for Carbon/Argon High/Medium) is in per-account 429 cooldown.
+	if provider == ProviderAntigravity && len(candidates) > 1 && strings.TrimSpace(modelHint) != "" {
+		modelFresh := make([]ConnectedAccount, 0, len(candidates))
+		for _, c := range candidates {
+			if !IsAccountModelRateLimited(c.Email, modelHint) {
+				modelFresh = append(modelFresh, c)
+			}
+		}
+		if len(modelFresh) > 0 {
+			candidates = modelFresh
+		}
+	}
+
+	// 3. Filter to least in-flight accounts so concurrent Sub-Agents / requests never collide on the same account
 	if len(candidates) > 1 {
 		minInFlight := GetAccountInFlight(candidates[0].Email)
 		for _, c := range candidates[1:] {
@@ -899,7 +1134,7 @@ func SelectProviderAccount(ctx context.Context, provider ProviderID) (*Connected
 				minInFlight = inf
 			}
 		}
-		var leastBusy []ConnectedAccount
+		leastBusy := make([]ConnectedAccount, 0, len(candidates))
 		for _, c := range candidates {
 			if GetAccountInFlight(c.Email) == minInFlight {
 				leastBusy = append(leastBusy, c)
@@ -910,10 +1145,10 @@ func SelectProviderAccount(ctx context.Context, provider ProviderID) (*Connected
 		}
 	}
 
-	// 3. Smart Low-Latency Filter: if multiple idle accounts exist and some are fast (< 5000ms or fresh 0ms),
-	// automatically bypass accounts that had a heavy/slow average latency (> 8000ms) so latency stays low!
+	// 4. Smart Low-Latency Filter: if multiple idle accounts exist and some are fast (<= 6000ms or fresh 0ms),
+	// automatically bypass accounts that had a heavy/slow average latency so latency stays low.
 	if len(candidates) > 1 {
-		var fastCandidates []ConnectedAccount
+		fastCandidates := make([]ConnectedAccount, 0, len(candidates))
 		for _, c := range candidates {
 			if c.AvgLatencyMs == 0 || c.AvgLatencyMs <= 6000 {
 				fastCandidates = append(fastCandidates, c)
@@ -935,17 +1170,30 @@ func SelectProviderAccount(ctx context.Context, provider ProviderID) (*Connected
 		sort.SliceStable(candidates, func(i, j int) bool {
 			return candidates[i].Priority > candidates[j].Priority
 		})
-		selected = candidates[0]
+		topPriority := candidates[0].Priority
+		tied := candidates[:1]
+		for k := 1; k < len(candidates); k++ {
+			if candidates[k].Priority == topPriority {
+				tied = candidates[:k+1]
+			} else {
+				break
+			}
+		}
+		if len(tied) == 1 {
+			selected = tied[0]
+		} else {
+			seq := nextProviderRRSeq(provider)
+			selected = tied[int(seq%uint64(len(tied)))]
+		}
 
 	case StrategyP2C:
 		if len(candidates) == 1 {
 			selected = candidates[0]
 		} else {
-			i := cryptoRandInt(len(candidates))
-			j := cryptoRandInt(len(candidates) - 1)
-			if j >= i {
-				j++
-			}
+			seq := nextProviderRRSeq(provider)
+			n := uint64(len(candidates))
+			i := int(seq % n)
+			j := int((seq + 1 + (seq/n)%(n-1)) % n)
 			c1, c2 := candidates[i], candidates[j]
 			if c1.FailureCount < c2.FailureCount {
 				selected = c1
@@ -971,22 +1219,53 @@ func SelectProviderAccount(ctx context.Context, provider ProviderID) (*Connected
 			}
 			return candidates[i].TotalTokens < candidates[j].TotalTokens
 		})
-		selected = candidates[0]
+		topTokens := candidates[0].TotalTokens
+		topSuccess := candidates[0].SuccessCount
+		tied := candidates[:1]
+		for k := 1; k < len(candidates); k++ {
+			if candidates[k].TotalTokens == topTokens && candidates[k].SuccessCount == topSuccess {
+				tied = candidates[:k+1]
+			} else {
+				break
+			}
+		}
+		if len(tied) == 1 {
+			selected = tied[0]
+		} else {
+			seq := nextProviderRRSeq(provider)
+			selected = tied[int(seq%uint64(len(tied)))]
+		}
 
 	case StrategyRoundRobin:
 		fallthrough
 	default:
-		rrMu.Lock()
-		c := rrCounters[provider]
-		rrCounters[provider] = c + 1
-		rrMu.Unlock()
-		selected = candidates[int(c%uint64(len(candidates)))]
+		seq := nextProviderRRSeq(provider)
+		selected = candidates[int(seq%uint64(len(candidates)))]
 	}
 
-	// Auto-refresh Antigravity and Claude Code OAuth tokens if expired or expiring within 60s
-	selected = EnsureAccountTokenFresh(ctx, selected, candidates)
+	acquiredEmail := ""
+	if acquireRole != "" && selected.Email != "" {
+		AcquireAccountInFlightWithRole(selected.Email, acquireRole)
+		acquiredEmail = selected.Email
+	}
+	fallbackPool := make([]ConnectedAccount, len(candidates))
+	copy(fallbackPool, candidates)
+	accountSelectMu.Unlock()
 
-	return &selected, nil
+	// Auto-refresh Antigravity and Claude Code OAuth tokens if expired or expiring within 60s
+	selected = EnsureAccountTokenFresh(ctx, selected, fallbackPool)
+	if acquireRole != "" && !strings.EqualFold(acquiredEmail, selected.Email) {
+		if acquiredEmail != "" {
+			ReleaseAccountInFlight(acquiredEmail)
+		}
+		acquiredEmail = ""
+		if selected.Email != "" {
+			AcquireAccountInFlightWithRole(selected.Email, acquireRole)
+			acquiredEmail = selected.Email
+		}
+	}
+
+	return &selected, buildInFlightReleaseFn(acquiredEmail), nil
 }
 
 // RecordAccountResult records token usage, latency, and failure/cooldown state for an account.
@@ -996,8 +1275,8 @@ func RecordAccountResult(emailOrID string, provider ProviderID, success bool, la
 
 // RecordAccountModelResult records token usage, latency, model ID, and failure/cooldown state for an account.
 func RecordAccountModelResult(emailOrID string, provider ProviderID, modelID string, success bool, latencyMs int64, tokens int, statusCode int) {
+	var matchedEmail string
 	configMu.Lock()
-	defer configMu.Unlock()
 	cfg := loadSavedAuthConfigLocked()
 
 	found := false
@@ -1012,6 +1291,7 @@ func RecordAccountModelResult(emailOrID string, provider ProviderID, modelID str
 		}
 		if acc.ID == emailOrID || strings.EqualFold(acc.Email, emailOrID) {
 			found = true
+			matchedEmail = acc.Email
 			acc.TotalTokens += int64(tokens)
 			if strings.TrimSpace(modelID) != "" {
 				acc.LastModel = strings.TrimSpace(modelID)
@@ -1055,29 +1335,59 @@ func RecordAccountModelResult(emailOrID string, provider ProviderID, modelID str
 		cfg.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 		saveAuthConfigAsyncLocked(cfg)
 	}
+	configMu.Unlock()
+
+	targetEmail := matchedEmail
+	if targetEmail == "" {
+		targetEmail = emailOrID
+	}
+	if strings.TrimSpace(modelID) != "" && strings.TrimSpace(targetEmail) != "" {
+		if !success && (statusCode == http.StatusTooManyRequests || statusCode == 429) {
+			RecordAccountModelRateLimit(targetEmail, modelID, 2*time.Minute)
+		} else if success {
+			clearSingleAccountModelRateLimit(targetEmail, modelID)
+		}
+	}
 }
 
 // ResetAccountLatencyStats clears historical latency spikes across all accounts (or a specific account).
 func ResetAccountLatencyStats(accountID string) error {
 	configMu.Lock()
-	defer configMu.Unlock()
 	cfg := loadSavedAuthConfigLocked()
+	var clearedEmails []string
 	for i := range cfg.Accounts {
 		if accountID == "" || accountID == "all" || cfg.Accounts[i].ID == accountID || strings.EqualFold(cfg.Accounts[i].Email, accountID) {
 			cfg.Accounts[i].AvgLatencyMs = 0
 			cfg.Accounts[i].LastLatencyMs = 0
 			cfg.Accounts[i].CooldownUntil = 0
 			cfg.Accounts[i].FailureCount = 0
+			clearedEmails = append(clearedEmails, cfg.Accounts[i].Email)
 		}
 	}
 	cfg.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	return saveAuthConfigLocked(cfg)
+	err := saveAuthConfigLocked(cfg)
+	configMu.Unlock()
+
+	if accountID == "" || accountID == "all" {
+		ClearAccountModelRateLimits("")
+	} else {
+		for _, em := range clearedEmails {
+			ClearAccountModelRateLimits(em)
+		}
+	}
+	return err
 }
 
 // GetValidAccountToken returns a valid OAuth access token, project ID, and email for Antigravity,
 // preferring an active connected account and falling back to saved single-account settings.
 func GetValidAccountToken(ctx context.Context) (string, string, string, error) {
-	acc, err := SelectProviderAccount(ctx, ProviderAntigravity)
+	return GetValidAccountTokenForModel(ctx, "")
+}
+
+// GetValidAccountTokenForModel returns a valid OAuth access token, project ID, and email for Antigravity
+// while taking modelHint into account to bypass per-account model 429 cooldowns.
+func GetValidAccountTokenForModel(ctx context.Context, modelHint string) (string, string, string, error) {
+	acc, err := SelectProviderAccountForModel(ctx, ProviderAntigravity, modelHint)
 	if err == nil && acc != nil && acc.AccessToken != "" {
 		return acc.AccessToken, acc.ProjectID, acc.Email, nil
 	}

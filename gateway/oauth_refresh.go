@@ -280,22 +280,34 @@ func ExecuteClaudeWithReactiveRefresh(
 	cleanAuth string,
 	startMs int64,
 ) error {
-	acc, err := SelectProviderAccount(ctx, ProviderClaudeCode)
+	acc, releaseInFlight, err := AcquireProviderAccountForModel(ctx, ProviderClaudeCode, target.CanonicalID, target.CanonicalID)
 	if err != nil && strings.HasPrefix(cleanAuth, "sk-ant-") {
 		acc = &ConnectedAccount{Provider: ProviderClaudeCode, Email: "header-token", AccessToken: cleanAuth}
+		AcquireAccountInFlightWithRole(acc.Email, target.CanonicalID)
+		releaseInFlight = buildInFlightReleaseFn(acc.Email)
 	}
 	if acc == nil {
+		if releaseInFlight != nil {
+			releaseInFlight()
+		}
 		return fmt.Errorf("no Claude Code account configured")
 	}
 
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
 		if ctx.Err() != nil {
+			if releaseInFlight != nil {
+				releaseInFlight()
+			}
 			return ctx.Err()
 		}
-		AcquireAccountInFlightWithRole(acc.Email, target.CanonicalID)
+		if releaseInFlight == nil {
+			AcquireAccountInFlightWithRole(acc.Email, target.CanonicalID)
+			releaseInFlight = buildInFlightReleaseFn(acc.Email)
+		}
 		err = u.handleClaudeCodeProvider(ctx, w, req, target, *acc)
-		ReleaseAccountInFlight(acc.Email)
+		releaseInFlight()
+		releaseInFlight = nil
 		lat := time.Now().UnixMilli() - startMs
 
 		if err == nil {
@@ -354,9 +366,14 @@ func ExecuteClaudeWithReactiveRefresh(
 		RecordLogEntry(errEntry)
 
 		if attempt == 0 && (failCode == http.StatusUnauthorized || failCode == http.StatusTooManyRequests) {
-			if nextAcc, nextErr := SelectProviderAccount(ctx, ProviderClaudeCode); nextErr == nil && nextAcc != nil && !strings.EqualFold(nextAcc.Email, acc.Email) {
+			nextAcc, nextRel, nextErr := AcquireProviderAccountForModel(ctx, ProviderClaudeCode, target.CanonicalID, target.CanonicalID)
+			if nextErr == nil && nextAcc != nil && !strings.EqualFold(nextAcc.Email, acc.Email) {
 				acc = nextAcc
+				releaseInFlight = nextRel
 				continue
+			}
+			if nextRel != nil {
+				nextRel()
 			}
 		}
 
@@ -364,11 +381,14 @@ func ExecuteClaudeWithReactiveRefresh(
 		return err
 	}
 
+	if releaseInFlight != nil {
+		releaseInFlight()
+	}
 	return lastErr
 }
 
 // ExecuteAntigravityWithReactiveRefresh executes an Antigravity CCPA target with reactive HTTP 401
-// OAuth token refresh and multi-account failover.
+// OAuth token refresh, atomic in-flight reservation, and model-quota-aware multi-account failover.
 func ExecuteAntigravityWithReactiveRefresh(
 	ctx context.Context,
 	u *GatewayUpstream,
@@ -400,11 +420,20 @@ func ExecuteAntigravityWithReactiveRefresh(
 		maxAttempts = 6
 	}
 
+	modelHint := strings.TrimSpace(target.CanonicalID)
+	if modelHint == "" {
+		modelHint = strings.TrimSpace(target.CCPAModelID)
+	}
+	if modelHint == "" {
+		modelHint = strings.TrimSpace(target.RequestedID)
+	}
+
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		var agyToken, projectID, accountEmail string
+		var releaseInFlight func()
 		if forcedAcc != nil {
 			agyToken = strings.TrimSpace(forcedAcc.AccessToken)
 			projectID = strings.TrimSpace(forcedAcc.ProjectID)
@@ -413,17 +442,40 @@ func ExecuteAntigravityWithReactiveRefresh(
 			}
 			accountEmail = forcedAcc.Email
 			forcedAcc = nil
+			if accountEmail != "" {
+				AcquireAccountInFlightWithRole(accountEmail, target.CanonicalID)
+				releaseInFlight = buildInFlightReleaseFn(accountEmail)
+			}
 		} else {
-			if tok, proj, email, err := GetValidAccountToken(ctx); err == nil && tok != "" {
-				agyToken = tok
-				projectID = proj
+			if acc, rel, err := AcquireProviderAccountForModel(ctx, ProviderAntigravity, modelHint, target.CanonicalID); err == nil && acc != nil && strings.TrimSpace(acc.AccessToken) != "" {
+				agyToken = strings.TrimSpace(acc.AccessToken)
+				projectID = strings.TrimSpace(acc.ProjectID)
 				if projectID == "" {
 					projectID = strings.TrimSpace(u.cfg.AgyProjectID)
 				}
-				accountEmail = email
-			} else if !HasConfiguredProviderAccount(ProviderAntigravity) {
-				agyToken = strings.TrimSpace(u.cfg.AgyOAuthToken)
-				projectID = strings.TrimSpace(u.cfg.AgyProjectID)
+				accountEmail = acc.Email
+				releaseInFlight = rel
+			} else {
+				if rel != nil {
+					rel()
+				}
+				if !HasConfiguredProviderAccount(ProviderAntigravity) {
+					saved := LoadSavedAuthConfig()
+					if strings.TrimSpace(saved.AgyOAuthToken) != "" {
+						agyToken = strings.TrimSpace(saved.AgyOAuthToken)
+						projectID = strings.TrimSpace(saved.AgyProjectID)
+						accountEmail = "legacy-default"
+						if len(saved.Accounts) > 0 && saved.Accounts[0].Email != "" {
+							accountEmail = saved.Accounts[0].Email
+						}
+					} else {
+						agyToken = strings.TrimSpace(u.cfg.AgyOAuthToken)
+						projectID = strings.TrimSpace(u.cfg.AgyProjectID)
+					}
+					if projectID == "" {
+						projectID = strings.TrimSpace(u.cfg.AgyProjectID)
+					}
+				}
 			}
 		}
 
@@ -431,19 +483,34 @@ func ExecuteAntigravityWithReactiveRefresh(
 			agyToken = cleanAuth
 		}
 		if agyToken == "" {
+			if releaseInFlight != nil {
+				releaseInFlight()
+			}
 			return fmt.Errorf("no Antigravity OAuth token configured")
 		}
 
 		if accountEmail != "" {
 			w.Header().Set("X-Omni-Gateway-Account", accountEmail)
-			AcquireAccountInFlightWithRole(accountEmail, target.CanonicalID)
+			if releaseInFlight == nil {
+				AcquireAccountInFlightWithRole(accountEmail, target.CanonicalID)
+				releaseInFlight = buildInFlightReleaseFn(accountEmail)
+			}
 		}
 		w.Header().Set("X-Omni-Gateway-Provider", "antigravity")
 		err := u.handleDirectCCPA(ctx, w, req, target, agyToken, projectID)
-		if accountEmail != "" {
-			ReleaseAccountInFlight(accountEmail)
+		if releaseInFlight != nil {
+			releaseInFlight()
 		}
 		lat := time.Now().UnixMilli() - startMs
+
+		if accountEmail != "" {
+			nowCheck := time.Now()
+			for _, bm := range []string{"claude-opus-4-6-thinking", "claude-sonnet-4-6", "gemini-3-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"} {
+				if isAccountDeadCCPAModel(u.cfg.CCPAEndpoint, accountEmail, bm, nowCheck) {
+					RecordAccountModelRateLimit(accountEmail, bm, 2*time.Minute)
+				}
+			}
+		}
 
 		if err == nil {
 			usedTokens := parseRecordedTokens(w.Header().Get("X-Omni-Gateway-Tokens"), req)
@@ -489,6 +556,9 @@ func ExecuteAntigravityWithReactiveRefresh(
 		}
 
 		if accountEmail != "" {
+			if failCode == http.StatusTooManyRequests && modelHint != "" {
+				RecordAccountModelRateLimit(accountEmail, modelHint, 2*time.Minute)
+			}
 			RecordAccountModelResult(accountEmail, ProviderAntigravity, target.CanonicalID, false, lat, 0, failCode)
 		}
 		errEntry := GatewayLogEntry{

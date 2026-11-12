@@ -8,8 +8,23 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 )
+
+var apiKeyPgSyncPending atomic.Bool
+
+// scheduleDebouncedAPIKeyPostgresSync coalesces high-concurrency API key usage updates
+// so background PostgreSQL syncs run at most once every 2 seconds.
+func scheduleDebouncedAPIKeyPostgresSync() {
+	if !apiKeyPgSyncPending.CompareAndSwap(false, true) {
+		return
+	}
+	time.AfterFunc(2*time.Second, func() {
+		apiKeyPgSyncPending.Store(false)
+		SyncAPIKeysToPostgresAsync()
+	})
+}
 
 // ComputeAPIKeyHash returns the lowercase hex SHA-256 digest of the trimmed rawKey.
 func ComputeAPIKeyHash(rawKey string) string {
@@ -186,7 +201,8 @@ func ValidateAPIKey(authHeader string) (bool, *GatewayAPIKey) {
 	return false, nil
 }
 
-// RecordAPIKeyUsage increments the request and token usage statistics for an API key.
+// RecordAPIKeyUsage increments the request and token usage statistics for an API key
+// in memory and flushes asynchronously to disk & PostgreSQL without blocking concurrent requests.
 func RecordAPIKeyUsage(keyStr string, tokens int) {
 	keyStr = strings.TrimSpace(keyStr)
 	if keyStr == "" {
@@ -197,33 +213,57 @@ func RecordAPIKeyUsage(keyStr string, tokens int) {
 	} else if len(keyStr) >= 6 && strings.EqualFold(keyStr[:6], "bearer") {
 		keyStr = strings.TrimSpace(keyStr[6:])
 	}
-
-	configMu.Lock()
-	defer configMu.Unlock()
-	cfg := loadSavedAuthConfigLocked()
-
-	now := time.Now().UTC().Format(time.RFC3339)
-	updated := false
-	keyBytes := []byte(keyStr)
-	for i := range cfg.APIKeys {
-		keyMatch := cfg.APIKeys[i].Key != "" && subtle.ConstantTimeCompare([]byte(cfg.APIKeys[i].Key), keyBytes) == 1
-		if keyMatch || cfg.APIKeys[i].ID == keyStr {
-			cfg.APIKeys[i].TotalRequests++
-			if tokens > 0 {
-				cfg.APIKeys[i].TotalTokens += int64(tokens)
-			}
-			cfg.APIKeys[i].LastUsedAt = now
-			if cfg.APIKeys[i].KeyHash == "" && cfg.APIKeys[i].Key != "" {
-				cfg.APIKeys[i].KeyHash = ComputeAPIKeyHash(cfg.APIKeys[i].Key)
-			}
-			updated = true
-			break
-		}
+	if keyStr == "" {
+		return
 	}
 
+	now := time.Now().UTC().Format(time.RFC3339)
+	keyBytes := []byte(keyStr)
+	updated := false
+
+	configMu.Lock()
+	if cachedAuthCfg != nil && cachedAuthPath == GatewayConfigFilePath() && asyncFlushPending {
+		for i := range cachedAuthCfg.APIKeys {
+			keyMatch := cachedAuthCfg.APIKeys[i].Key != "" && subtle.ConstantTimeCompare([]byte(cachedAuthCfg.APIKeys[i].Key), keyBytes) == 1
+			if keyMatch || cachedAuthCfg.APIKeys[i].ID == keyStr {
+				cachedAuthCfg.APIKeys[i].TotalRequests++
+				if tokens > 0 {
+					cachedAuthCfg.APIKeys[i].TotalTokens += int64(tokens)
+				}
+				cachedAuthCfg.APIKeys[i].LastUsedAt = now
+				if cachedAuthCfg.APIKeys[i].KeyHash == "" && cachedAuthCfg.APIKeys[i].Key != "" {
+					cachedAuthCfg.APIKeys[i].KeyHash = ComputeAPIKeyHash(cachedAuthCfg.APIKeys[i].Key)
+				}
+				cachedAuthCfg.UpdatedAt = now
+				updated = true
+				break
+			}
+		}
+	} else {
+		cfg := loadSavedAuthConfigLocked()
+		for i := range cfg.APIKeys {
+			keyMatch := cfg.APIKeys[i].Key != "" && subtle.ConstantTimeCompare([]byte(cfg.APIKeys[i].Key), keyBytes) == 1
+			if keyMatch || cfg.APIKeys[i].ID == keyStr {
+				cfg.APIKeys[i].TotalRequests++
+				if tokens > 0 {
+					cfg.APIKeys[i].TotalTokens += int64(tokens)
+				}
+				cfg.APIKeys[i].LastUsedAt = now
+				if cfg.APIKeys[i].KeyHash == "" && cfg.APIKeys[i].Key != "" {
+					cfg.APIKeys[i].KeyHash = ComputeAPIKeyHash(cfg.APIKeys[i].Key)
+				}
+				updated = true
+				break
+			}
+		}
+		if updated {
+			cfg.UpdatedAt = now
+			saveAuthConfigAsyncLocked(cfg)
+		}
+	}
+	configMu.Unlock()
+
 	if updated {
-		cfg.UpdatedAt = now
-		_ = saveAuthConfigLocked(cfg)
-		SyncAPIKeysToPostgresAsync()
+		scheduleDebouncedAPIKeyPostgresSync()
 	}
 }
