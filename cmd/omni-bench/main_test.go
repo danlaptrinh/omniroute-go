@@ -862,6 +862,7 @@ func TestPeakGatesModeEndToEndAllFiveGatesPass(t *testing.T) {
 			bodyBytes, _ := io.ReadAll(r.Body)
 			var chatReq struct {
 				Model       string   `json:"model"`
+				MaxTokens   int      `json:"max_tokens"`
 				Temperature *float64 `json:"temperature"`
 				Stream      bool     `json:"stream"`
 				Messages    []struct {
@@ -872,6 +873,10 @@ func TestPeakGatesModeEndToEndAllFiveGatesPass(t *testing.T) {
 			rawPrompt := ""
 			if len(chatReq.Messages) > 0 {
 				rawPrompt = chatReq.Messages[0].Content
+			}
+			if strings.Contains(rawPrompt, "-pg2-cache-") && chatReq.MaxTokens != 128 {
+				http.Error(w, fmt.Sprintf(`{"error":{"message":"expected Gate 2 max_tokens=128, got %d"}}`, chatReq.MaxTokens), http.StatusBadRequest)
+				return
 			}
 			normCacheKey := strings.ToLower(strings.TrimSpace(chatReq.Model)) + "|" + strings.TrimSpace(rawPrompt)
 			isDeterministic := chatReq.Temperature != nil && *chatReq.Temperature <= 0.3
@@ -952,6 +957,79 @@ func TestPeakGatesModeEndToEndAllFiveGatesPass(t *testing.T) {
 				},
 			})
 
+		case "/v1/messages":
+			bodyBytes, _ := io.ReadAll(r.Body)
+			var antReq struct {
+				Model       string   `json:"model"`
+				MaxTokens   int      `json:"max_tokens"`
+				Temperature *float64 `json:"temperature"`
+				Stream      bool     `json:"stream"`
+				Messages    []struct {
+					Content string `json:"content"`
+				} `json:"messages"`
+			}
+			_ = json.Unmarshal(bodyBytes, &antReq)
+			if antReq.MaxTokens != 128 {
+				http.Error(w, fmt.Sprintf(`{"error":{"message":"expected /v1/messages max_tokens=128, got %d"}}`, antReq.MaxTokens), http.StatusBadRequest)
+				return
+			}
+			rawPrompt := ""
+			if len(antReq.Messages) > 0 {
+				rawPrompt = antReq.Messages[0].Content
+			}
+			normCacheKey := strings.ToLower(strings.TrimSpace(antReq.Model)) + "|" + strings.TrimSpace(rawPrompt)
+			isDeterministic := antReq.Temperature == nil || *antReq.Temperature <= 0.3
+
+			mu.Lock()
+			cachedText, isCacheHit := cacheEntries[normCacheKey]
+			if !isDeterministic {
+				isCacheHit = false
+			}
+			if isDeterministic && !isCacheHit {
+				cachedText = "OK"
+				cacheEntries[normCacheKey] = cachedText
+			}
+			cacheHdr := "MISS"
+			accHdr := proAccounts[0]
+			upHdr := "gemini-3-flash"
+			if isCacheHit {
+				cacheHdr = "HIT"
+				accHdr = "in-memory-cache"
+				upHdr = "cache-hit"
+			}
+			mu.Unlock()
+
+			w.Header().Set("X-Omni-Gateway-Account", accHdr)
+			w.Header().Set("X-Omni-Gateway-Resolved-Model", "gemini-3-flash")
+			w.Header().Set("X-Omni-Gateway-Upstream-Model-Version", upHdr)
+			w.Header().Set("X-Omni-Gateway-Cache", cacheHdr)
+
+			if antReq.Stream {
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.Header().Set("Cache-Control", "no-cache")
+				_, _ = fmt.Fprint(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\"}}\n\n")
+				_, _ = fmt.Fprint(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
+				_, _ = fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":%q}}\n\n", cachedText)
+				_, _ = fmt.Fprint(w, "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n")
+				_, _ = fmt.Fprint(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n")
+				_, _ = fmt.Fprint(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+				if fl, ok := w.(http.Flusher); ok {
+					fl.Flush()
+				}
+				return
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id":    "msg_1",
+				"type":  "message",
+				"role":  "assistant",
+				"model": "gemini-3-flash",
+				"content": []map[string]string{
+					{"type": "text", "text": cachedText},
+				},
+			})
+
 		case "/ui/api/logs":
 			mu.Lock()
 			out := make([]map[string]any, 0, len(recordedLogs))
@@ -1014,15 +1092,41 @@ func TestPeakGatesScorecardFailureDetectors(t *testing.T) {
 		t.Errorf("expected Gate 1 failure on Pro '-n' hardware & slow p50, got %+v", g1Fail)
 	}
 
-	// Gate 2: detect missing [DONE], >30ms WAN cache HIT, missing cross-mode HIT, and low burst RPS
+	// Gate 2: detect missing [DONE], >30ms WAN cache HIT, missing cross-mode HIT, /v1/messages OpenAI leak on MISS, and low burst RPS
 	g2Fail := evaluatePeakGate2(
 		APIRequestSample{HTTPStatus: 200, CacheHeader: "MISS", ResponseContent: "OK", TotalWallMs: 500},
 		APIRequestSample{HTTPStatus: 200, CacheHeader: "HIT", ResponseContent: "OK", SawStreamDone: false, TotalWallMs: 45},
 		APIRequestSample{HTTPStatus: 200, CacheHeader: "MISS", ResponseContent: "OK", TotalWallMs: 500},
+		AnthropicMessageSample{HTTPStatus: 200, CacheHeader: "MISS", SawOpenAIChunkLeak: true, ResponseContent: "OK", TotalWallMs: 400},
+		AnthropicMessageSample{HTTPStatus: 200, CacheHeader: "HIT", SawMessageStart: true, SawMessageStop: true, ResponseContent: "OK", TotalWallMs: 42},
+		AnthropicMessageSample{HTTPStatus: 200, CacheHeader: "MISS", MessageType: "chat.completion", SawOpenAIChunkLeak: true, ResponseContent: "OK"},
 		summarizeConcurrencyStep(36, 500, 72.0, []APIRequestSample{{HTTPStatus: 200, CacheHeader: "HIT"}}),
 	)
-	if g2Fail.Passed || len(g2Fail.Failures) < 3 {
-		t.Errorf("expected Gate 2 multiple failures, got %+v", g2Fail)
+	if g2Fail.Passed || len(g2Fail.Failures) < 6 {
+		t.Errorf("expected Gate 2 multiple failures (including /v1/messages wire leak), got %+v", g2Fail)
+	}
+
+	// Verify -allow-cache defaults temperature to 0.0 when opts.Temperature == nil
+	var gotTemp float64 = -1
+	tempCheckSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Temperature *float64 `json:"temperature"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&payload)
+		if payload.Temperature != nil {
+			gotTemp = *payload.Temperature
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{"message": map[string]string{"content": "OK"}}},
+		})
+	}))
+	defer tempCheckSrv.Close()
+
+	allowCacheCfg := BenchConfig{BaseURL: tempCheckSrv.URL, MaxTokens: 64, Timeout: 5 * time.Second, AllowCache: true}
+	_ = sendTracedChatRequest(context.Background(), newBenchHTTPClient(allowCacheCfg), allowCacheCfg, "antigravity/gemini-3-flash", "", "Prompt", "", "api")
+	if gotTemp != 0.0 {
+		t.Errorf("expected AllowCache=true to default temperature=0.0, got %v", gotTemp)
 	}
 
 	// Gate 3: detect HTTP 429 leakage under N=63
