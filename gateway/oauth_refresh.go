@@ -895,21 +895,30 @@ func ExecuteAntigravityWithReactiveRefresh(
 
 		isFlagshipFailover := strings.Contains(errMsg, "[flagship-failover]")
 		failCode := http.StatusBadGateway
-		if strings.Contains(errMsg, "HTTP 401") {
+		switch {
+		case strings.Contains(errMsg, "HTTP 401"):
 			failCode = http.StatusUnauthorized
-		} else if strings.Contains(errMsg, "HTTP 403") {
+		case strings.Contains(errMsg, "HTTP 403"):
 			failCode = http.StatusForbidden
-		} else if strings.Contains(errMsg, "HTTP 429") || isFlagshipFailover {
+		case strings.Contains(errMsg, "HTTP 429"):
 			failCode = http.StatusTooManyRequests
+		case strings.Contains(errMsg, "HTTP 503"):
+			failCode = http.StatusServiceUnavailable
+		case strings.Contains(errMsg, "HTTP 504") || strings.Contains(errMsg, "timed out"):
+			failCode = http.StatusGatewayTimeout
 		}
 
-		isCarbonArgon := IsCarbonOrArgonHighOrMedium(target.CanonicalID) || IsCarbonOrArgonHighOrMedium(req.Model)
+		isCarbonArgon := IsCarbonOrArgonHighOrMedium(target.CanonicalID)
 
 		if accountEmail != "" {
 			if isCarbonArgon || failCode == http.StatusTooManyRequests || isFlagshipFailover {
-				RecordAccountModelRateLimit(accountEmail, target.CanonicalID, 2*time.Minute)
+				rlTTL := 2 * time.Minute
+				if isFlagshipFailover && failCode != http.StatusTooManyRequests {
+					rlTTL = 90 * time.Second
+				}
+				RecordAccountModelRateLimit(accountEmail, target.CanonicalID, rlTTL)
 				if modelHint != "" {
-					RecordAccountModelRateLimit(accountEmail, modelHint, 2*time.Minute)
+					RecordAccountModelRateLimit(accountEmail, modelHint, rlTTL)
 				}
 			}
 			RecordAccountModelResult(accountEmail, ProviderAntigravity, target.CanonicalID, false, lat, 0, failCode)

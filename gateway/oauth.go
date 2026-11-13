@@ -105,6 +105,7 @@ type ConnectedAccount struct {
 	AvgLatencyMs        int64      `json:"avg_latency_ms,omitempty"`
 	LastLatencyMs       int64      `json:"last_latency_ms,omitempty"`
 	LastModel           string     `json:"last_model,omitempty"`
+	LastUsedAt          string     `json:"last_used_at,omitempty"`
 	QuotaUsedPercent    *float64   `json:"quota_used_percent,omitempty"`
 	QuotaResetTime      string     `json:"quota_reset_time,omitempty"`
 	WeeklyGeminiPercent *int       `json:"weekly_gemini_percent,omitempty"`
@@ -420,6 +421,15 @@ func UpsertConnectedAccount(acc ConnectedAccount) (SavedGatewayAuth, error) {
 			}
 			if acc.WeeklyClaudePercent == nil && existing.WeeklyClaudePercent != nil {
 				acc.WeeklyClaudePercent = existing.WeeklyClaudePercent
+			}
+			if acc.LastModel == "" && existing.LastModel != "" {
+				acc.LastModel = existing.LastModel
+			}
+			if acc.LastLatencyMs == 0 && existing.LastLatencyMs > 0 {
+				acc.LastLatencyMs = existing.LastLatencyMs
+			}
+			if acc.LastUsedAt == "" && existing.LastUsedAt != "" {
+				acc.LastUsedAt = existing.LastUsedAt
 			}
 			cfg.Accounts[i] = acc
 			found = true
@@ -2000,7 +2010,7 @@ func selectProviderAccountCore(ctx context.Context, provider ProviderID, modelHi
 						candidates = nonUltraCands
 					}
 				}
-			} else if len(ultraCands) > 0 {
+				} else if len(ultraCands) > 0 {
 				ultraLowLoad := make([]ConnectedAccount, 0, len(ultraCands))
 				for _, c := range ultraCands {
 					if GetAccountInFlight(c.Email) <= 2 {
@@ -2234,7 +2244,12 @@ func RecordAccountModelResult(emailOrID string, provider ProviderID, modelID str
 				acc.CooldownUntil = 0
 			} else {
 				acc.FailureCount++
-				if statusCode == http.StatusTooManyRequests || statusCode == http.StatusServiceUnavailable || statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden || statusCode == 429 || statusCode == 503 || statusCode == 401 || statusCode == 403 {
+				// Apply account-wide CooldownUntil for account-level auth/ban (401/403), or when no model scope is specified.
+				// Model-specific 429/503/flagship-failover must stay isolated per model/account without globally disabling other healthy models.
+				accountLevelCooldown := statusCode == http.StatusUnauthorized || statusCode == 401 ||
+					statusCode == http.StatusForbidden || statusCode == 403 ||
+					(strings.TrimSpace(modelID) == "" && (statusCode == http.StatusTooManyRequests || statusCode == 429 || statusCode == http.StatusServiceUnavailable || statusCode == 503))
+				if accountLevelCooldown {
 					mult := acc.FailureCount
 					if mult > 6 {
 						mult = 6
@@ -2251,7 +2266,9 @@ func RecordAccountModelResult(emailOrID string, provider ProviderID, modelID str
 					acc.CooldownUntil = time.Now().Unix() + backoffSec
 				}
 			}
-			acc.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+			nowRFC3339 := time.Now().UTC().Format(time.RFC3339)
+			acc.LastUsedAt = nowRFC3339
+			acc.UpdatedAt = nowRFC3339
 			break
 		}
 	}

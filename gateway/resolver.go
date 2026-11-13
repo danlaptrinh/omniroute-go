@@ -16,6 +16,14 @@ var defaultFallbackModels = []string{
 	"alibaba/qwen3.8-flash",
 }
 
+// defaultAlibabaFallbacks defines intra-provider fallback models for explicit Alibaba Token Plan requests
+// so an invalid/failing Alibaba API key never silently fails over onto Google Antigravity or Claude accounts.
+var defaultAlibabaFallbacks = []string{
+	"alibaba/qwen3.8-max",
+	"alibaba/deepseek-v4-pro",
+	"alibaba/qwen3.8-flash",
+}
+
 // DefaultCombos returns the built-in OmniRoute-Go multi-provider combo stacks and collaborative multi-model pipelines.
 func DefaultCombos() []ComboModel {
 	seoModels := []string{
@@ -285,6 +293,29 @@ func buildFallbackChain(candidates []string, defaultFallbacks []string) []string
 	return chain
 }
 
+func isAlibabaModelSlug(slug string) bool {
+	return strings.HasPrefix(slug, "qwen") ||
+		strings.HasPrefix(slug, "qwq") ||
+		strings.HasPrefix(slug, "deepseek-") ||
+		strings.HasPrefix(slug, "glm-") ||
+		strings.HasPrefix(slug, "wan") ||
+		strings.HasPrefix(slug, "happyhorse-")
+}
+
+func filterAlibabaFallbacks(defaultFallbacks []string) []string {
+	var scoped []string
+	for _, fb := range defaultFallbacks {
+		provHint, norm := detectProviderAndSlug(ResolveModelAlias(strings.TrimSpace(fb)))
+		if provHint == ProviderAlibaba || (provHint == "" && isAlibabaModelSlug(norm)) {
+			scoped = append(scoped, fb)
+		}
+	}
+	if len(scoped) == 0 {
+		return defaultAlibabaFallbacks
+	}
+	return scoped
+}
+
 // Resolve translates an incoming model ID into its canonical representation across the 3 providers.
 func (r *DefaultResolver) Resolve(modelID string, defaultFallbacks []string) ResolvedModel {
 	trimmed := strings.TrimSpace(modelID)
@@ -331,13 +362,7 @@ func (r *DefaultResolver) Resolve(modelID string, defaultFallbacks []string) Res
 	}
 
 	// 2. Provider: Alibaba Token Plan (Bailian / DashScope Coding Plan)
-	if provHint == ProviderAlibaba ||
-		strings.HasPrefix(norm, "qwen") ||
-		strings.HasPrefix(norm, "qwq") ||
-		strings.HasPrefix(norm, "deepseek-") ||
-		strings.HasPrefix(norm, "glm-") ||
-		strings.HasPrefix(norm, "wan") ||
-		strings.HasPrefix(norm, "happyhorse-") {
+	if provHint == ProviderAlibaba || isAlibabaModelSlug(norm) {
 		res.Provider = ProviderAlibaba
 		switch norm {
 		case "auto":
@@ -438,7 +463,7 @@ func (r *DefaultResolver) Resolve(modelID string, defaultFallbacks []string) Res
 		}
 		res.CCPAModelID = res.UpstreamModelID
 		res.OmniBaseModelID = res.CanonicalID
-		res.FallbackChain = buildFallbackChain([]string{res.CanonicalID, res.UpstreamModelID}, defaultFallbacks)
+		res.FallbackChain = buildFallbackChain([]string{res.CanonicalID, res.UpstreamModelID}, filterAlibabaFallbacks(defaultFallbacks))
 		return res
 	}
 

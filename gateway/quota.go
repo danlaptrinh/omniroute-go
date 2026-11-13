@@ -369,7 +369,7 @@ func overlayLiveAccountStats(summary *QuotaSummary) *QuotaSummary {
 				out.Accounts[i].ActiveModel = GetAccountActiveRole(acc.Email)
 				out.Accounts[i].QuotaUsedPercent = acc.QuotaUsedPercent
 				out.Accounts[i].WeeklyGeminiPercent = acc.WeeklyGeminiPercent
-				out.Accounts[i].LastUsedAt = formatAccountLastUsed(acc.UpdatedAt)
+				out.Accounts[i].LastUsedAt = formatAccountLastUsed(acc.LastUsedAt)
 				out.Accounts[i].EstimatedValueUSD = EstimateAccountValueUSD(acc)
 				break
 			}
@@ -451,7 +451,7 @@ func buildInstantQuotaSummary(auth SavedGatewayAuth) *QuotaSummary {
 			LastModel:           acc.LastModel,
 			InFlight:            GetAccountInFlight(email),
 			ActiveModel:         GetAccountActiveRole(email),
-			LastUsedAt:          formatAccountLastUsed(acc.UpdatedAt),
+			LastUsedAt:          formatAccountLastUsed(acc.LastUsedAt),
 			WeeklyGeminiPercent: acc.WeeklyGeminiPercent,
 			ResetTimeText:       resetText,
 			LastCheckedAt:       time.Now().Format("15:04:05"),
@@ -633,7 +633,7 @@ func inspectSingleAccountQuota(ctx context.Context, acc ConnectedAccount, resetT
 		LastModel:           acc.LastModel,
 		InFlight:            GetAccountInFlight(email),
 		ActiveModel:         GetAccountActiveRole(email),
-		LastUsedAt:          formatAccountLastUsed(acc.UpdatedAt),
+		LastUsedAt:          formatAccountLastUsed(acc.LastUsedAt),
 		WeeklyGeminiPercent: acc.WeeklyGeminiPercent,
 		ResetTimeText:       resetText,
 		LastCheckedAt:       time.Now().Format("15:04:05"),

@@ -641,6 +641,9 @@ func (u *GatewayUpstream) HandleChatCompletion(
 				}
 				fbResolved := resolver.Resolve(fbModelID, nil)
 				fbResolved.RequestedID = resolved.RequestedID
+				if !resolved.IsCombo && resolved.Provider == ProviderAlibaba && fbResolved.Provider != ProviderAlibaba {
+					continue
+				}
 				targets = append(targets, fbResolved)
 			}
 		}
@@ -728,6 +731,9 @@ func (u *GatewayUpstream) HandleChatCompletion(
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		if idx > 0 && !resolved.IsCombo && resolved.Provider == ProviderAlibaba && target.Provider != ProviderAlibaba {
+			continue
+		}
 		if idx > 0 && standaloneMode && !u.isProviderConfigured(target.Provider, cleanAuth) {
 			continue
 		}
@@ -741,6 +747,11 @@ func (u *GatewayUpstream) HandleChatCompletion(
 			if firstUpstreamErr == nil && !isMissingAccountErr(err) {
 				firstUpstreamErr = err
 			}
+			if !resolved.IsCombo && resolved.Provider == ProviderAlibaba &&
+				(strings.Contains(err.Error(), "HTTP 401") || strings.Contains(err.Error(), "HTTP 403")) {
+				// Authentication/API key failures affect the credential itself; do not cascade to other models on the same key.
+				break
+			}
 		}
 	}
 
@@ -753,7 +764,20 @@ func (u *GatewayUpstream) HandleChatCompletion(
 	}
 
 	if firstUpstreamErr != nil {
-		writeOpenAIError(w, http.StatusBadGateway, fmt.Sprintf("direct Antigravity CCPA error for model %q (%s): %v", resolved.RequestedID, resolved.CCPAModelID, firstUpstreamErr), "upstream_error")
+		errStatus := http.StatusBadGateway
+		errType := "upstream_error"
+		errMsg := fmt.Sprintf("direct Antigravity CCPA error for model %q (%s): %v", resolved.RequestedID, resolved.CCPAModelID, firstUpstreamErr)
+		if resolved.Provider == ProviderAlibaba {
+			errMsg = fmt.Sprintf("Alibaba upstream error for model %q (%s): %v", resolved.RequestedID, resolved.UpstreamModelID, firstUpstreamErr)
+			if strings.Contains(firstUpstreamErr.Error(), "HTTP 401") {
+				errStatus = http.StatusUnauthorized
+				errType = "invalid_api_key"
+			} else if strings.Contains(firstUpstreamErr.Error(), "HTTP 403") {
+				errStatus = http.StatusForbidden
+				errType = "upstream_auth_error"
+			}
+		}
+		writeOpenAIError(w, errStatus, errMsg, errType)
 		return firstUpstreamErr
 	}
 	_ = lastErr
@@ -880,21 +904,33 @@ func (u *GatewayUpstream) tryTarget(
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		RecordAccountModelResult(acc.Email, ProviderAlibaba, target.CanonicalID, false, lat, 0, http.StatusBadGateway)
+		failCode := http.StatusBadGateway
+		errStr := err.Error()
+		switch {
+		case strings.Contains(errStr, "alibaba HTTP 401"):
+			failCode = http.StatusUnauthorized
+		case strings.Contains(errStr, "alibaba HTTP 403"):
+			failCode = http.StatusForbidden
+		case strings.Contains(errStr, "alibaba HTTP 429"):
+			failCode = http.StatusTooManyRequests
+		case strings.Contains(errStr, "alibaba HTTP 503"):
+			failCode = http.StatusServiceUnavailable
+		}
+		RecordAccountModelResult(acc.Email, ProviderAlibaba, target.CanonicalID, false, lat, 0, failCode)
 		errEntry := GatewayLogEntry{
 			Provider:       ProviderAlibaba,
 			Account:        acc.Email,
 			RequestedModel: req.Model,
 			ResolvedModel:  target.CanonicalID,
-			StatusCode:     http.StatusBadGateway,
+			StatusCode:     failCode,
 			LatencyMs:      lat,
 			IsError:        true,
-			ErrorMessage:   err.Error(),
+			ErrorMessage:   errStr,
 			FallbackChain:  target.FallbackChain,
 		}
 		EnrichLogEntryFromContext(ctx, &errEntry, req)
 		RecordLogEntry(errEntry)
-		log.Printf("[omniroute-go] alibaba target %q failed: %v; trying next provider in chain", target.CanonicalID, err)
+		log.Printf("[omniroute-go] alibaba target %q failed (HTTP %d): %v", target.CanonicalID, failCode, err)
 		return err
 
 	case ProviderAntigravity:
@@ -1110,7 +1146,7 @@ func primaryFlagshipTierForModel(endpoint string, isConnected bool, resolved Res
 			}
 			return []string{"gemini-4-argon-high", "gemini-4-argon", "gemini-4-carbon-high", "gemini-3.8-flash-high"}
 		case strings.HasPrefix(ccpaID, "gemini-3.1-pro") || strings.Contains(canon, "gemini-3.1-pro"):
-			return []string{"gemini-3.1-pro-high", "gemini-3.8-flash-high"}
+			return []string{"gemini-3.8-flash-high"}
 		case strings.HasPrefix(ccpaID, "gemini-3.8-flash") || strings.Contains(canon, "gemini-3.8-flash"):
 			if strings.Contains(canon, "tiered") {
 				return []string{"gemini-3.8-flash-tiered", "gemini-3.8-flash-high"}
@@ -1926,6 +1962,10 @@ func (u *GatewayUpstream) openCCPAStreamWithFirstChunk(
 ) (*ccpaOpenedAttempt, error) {
 	releaseScopeInFlight := acquireCCPAScopeInFlight(accScope, oauthToken)
 	ccpaCandidates := buildCCPACandidatesWithCache(endpoint, accScope, resolved, noThinking)
+	if len(ccpaCandidates) == 0 {
+		releaseScopeInFlight()
+		return nil, fmt.Errorf("CCPA candidate skipped (all candidates unavailable on %s)", accScope)
+	}
 	_, isConnectedScope := lookupConnectedAntigravityAccountFast(accScope)
 	flagshipTier := primaryFlagshipTierForModel(endpoint, isConnectedScope, resolved)
 	isDefaultProdEndpoint := strings.EqualFold(strings.TrimSpace(endpoint), DefaultCCPAEndpoint)
@@ -2413,12 +2453,14 @@ func buildCCPACandidatesWithCache(endpoint, accScope string, resolved ResolvedMo
 		cand := strings.TrimSpace(resolved.CCPAModelID)
 		deadOnAcc := strings.Contains(scope, "@") && isAccountDeadCCPAModel(endpoint, scope, cand, time.Now())
 		rateMasked := isDefaultProdEndpoint && strings.Contains(scope, "@") && IsAccountModelRateLimited(scope, cand)
-		if !deadOnAcc && !rateMasked {
-			return []string{cand}
+		if deadOnAcc || rateMasked {
+			return nil
 		}
+		return []string{cand}
 	}
 	_, isConnected := lookupConnectedAntigravityAccountFast(scope)
 	claudeExhausted := isAccountClaudeQuotaExhaustedFast(scope)
+	flagshipTier := primaryFlagshipTierForModel(endpoint, isConnected, resolved)
 
 	var raw []string
 	var cachedWinner string
@@ -2430,6 +2472,9 @@ func buildCCPACandidatesWithCache(endpoint, accScope string, resolved ResolvedMo
 				sLower := strings.ToLower(sTrim)
 				isGeminiReq := strings.Contains(resolved.CanonicalID, "gemini") || resolved.IsCarbonFamily || resolved.IsArgonFamily
 				if isGeminiReq && strings.HasPrefix(sLower, "claude-") {
+					workingCCPAModelCache.Delete(endpoint + "|acc:" + scope + "|" + resolved.CanonicalID)
+				} else if len(flagshipTier) > 0 && !stringSliceContains(flagshipTier, sTrim) {
+					// Never let a previously degraded non-flagship cache winner jump ahead of flagship tier recovery.
 					workingCCPAModelCache.Delete(endpoint + "|acc:" + scope + "|" + resolved.CanonicalID)
 				} else {
 					rateMasked := isDefaultProdEndpoint && strings.Contains(scope, "@") && IsAccountModelRateLimited(scope, sTrim)
