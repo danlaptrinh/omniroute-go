@@ -58,6 +58,9 @@ func main() {
 	resolver := gateway.NewResolver()
 	upstream := gateway.NewUpstream(cfg)
 	gatewaySrv := gateway.NewServer(cfg, resolver, upstream)
+	pdcaWatchdogCtx, stopPDCAWatchdog := context.WithCancel(context.Background())
+	defer stopPDCAWatchdog()
+	gatewaySrv.StartPDCAWatchdog(pdcaWatchdogCtx)
 	handler := gatewaySrv.Handler()
 
 	// Start automatic OAuth callback listener on 127.0.0.1:20128 in the background

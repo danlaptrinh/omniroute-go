@@ -434,8 +434,12 @@ func RunPDCACycle(now time.Time) PDCACycleReport {
 	// -------------------------------------------------------------
 	// 2. Plan-Do-Check-Act: Dead/Rate-Limited Model Cache Pruner & Flagship Recovery
 	// -------------------------------------------------------------
+	type flagshipEvictionTarget struct {
+		accScope string
+		canon    string
+	}
 	var deadKeysToDelete []any
-	var flagshipEvictionCanons []string
+	var flagshipEvictions []flagshipEvictionTarget
 
 	deadCCPAModelCache.Range(func(k, v any) bool {
 		entry, ok := v.(deadCCPAEntry)
@@ -476,8 +480,18 @@ func RunPDCACycle(now time.Time) PDCACycleReport {
 		if ks, ok := k.(string); ok {
 			parts := strings.Split(ks, "|")
 			candidate := parts[len(parts)-1]
+			accScope := ""
+			for _, seg := range parts {
+				if strings.HasPrefix(strings.ToLower(seg), "acc:") {
+					accScope = strings.ToLower(strings.TrimSpace(seg[4:]))
+					break
+				}
+			}
 			if isFlagshipCCPAModel(candidate) {
-				flagshipEvictionCanons = append(flagshipEvictionCanons, candidate)
+				flagshipEvictions = append(flagshipEvictions, flagshipEvictionTarget{
+					accScope: accScope,
+					canon:    candidate,
+				})
 			}
 		}
 	}
@@ -494,19 +508,26 @@ func RunPDCACycle(now time.Time) PDCACycleReport {
 		report.PrunedAccountRateLimitEntries++
 		parts := strings.Split(k, "|")
 		if len(parts) >= 2 && isFlagshipCCPAModel(parts[1]) {
-			flagshipEvictionCanons = append(flagshipEvictionCanons, parts[1])
+			flagshipEvictions = append(flagshipEvictions, flagshipEvictionTarget{
+				accScope: strings.ToLower(strings.TrimSpace(parts[0])),
+				canon:    parts[1],
+			})
 		}
 	}
 	accountModelRLMu.Unlock()
 
-	// Evict degraded non-flagship fallbacks pinned in workingCCPAModelCache for healed flagship models
-	if len(flagshipEvictionCanons) > 0 {
+	// Evict degraded non-flagship fallbacks pinned in workingCCPAModelCache for healed flagship models (scoped per account)
+	if len(flagshipEvictions) > 0 {
 		workingCCPAModelCache.Range(func(k, v any) bool {
 			ks, okK := k.(string)
 			vs, okV := v.(string)
 			if okK && okV {
-				for _, fs := range flagshipEvictionCanons {
-					if !isFlagshipCCPAModel(vs) && strings.Contains(strings.ToLower(ks), strings.ToLower(fs)) {
+				ksLower := strings.ToLower(ks)
+				for _, ev := range flagshipEvictions {
+					if ev.accScope != "" && !strings.Contains(ksLower, "|acc:"+ev.accScope+"|") {
+						continue
+					}
+					if !isFlagshipCCPAModel(vs) && strings.Contains(ksLower, strings.ToLower(ev.canon)) {
 						workingCCPAModelCache.Delete(k)
 						break
 					}
@@ -716,11 +737,25 @@ func RunPDCACycle(now time.Time) PDCACycleReport {
 		if acc.Disabled || acc.CooldownUntil <= nowUnix {
 			continue
 		}
+		if (acc.CooldownUntil - nowUnix) > 12*3600 {
+			continue
+		}
+		emailNorm := strings.ToLower(strings.TrimSpace(acc.Email))
+		idNorm := strings.ToLower(strings.TrimSpace(acc.ID))
+		if emailNorm != "" {
+			if _, ok := validationIsolatedAccounts.Load(emailNorm); ok {
+				continue
+			}
+		}
+		if idNorm != "" {
+			if _, ok := validationIsolatedAccounts.Load(idNorm); ok {
+				continue
+			}
+		}
 		provP2 := acc.Provider
 		if provP2 == "" {
 			provP2 = ProviderAntigravity
 		}
-		emailNorm := strings.ToLower(strings.TrimSpace(acc.Email))
 
 		p2HasErrors := false
 		p1HasSpike := false

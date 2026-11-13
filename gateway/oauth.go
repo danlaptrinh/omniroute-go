@@ -1252,6 +1252,11 @@ func IsDeepReasoningGeminiModel(modelID string) bool {
 	return false
 }
 
+// IsClaudeAntigravityModel reports whether modelID targets a Claude model family on Antigravity CCPA.
+func IsClaudeAntigravityModel(modelID string) bool {
+	return strings.HasPrefix(stripKnownModelPrefixes(strings.ToLower(strings.TrimSpace(modelID))), "claude-")
+}
+
 // HasConfiguredUltraAccount reports whether the saved auth config has at least one active Antigravity account with Tier == "Ultra".
 func HasConfiguredUltraAccount() bool {
 	accounts := readAuthAccountsSnapshotFast()
@@ -1259,6 +1264,36 @@ func HasConfiguredUltraAccount() bool {
 		if !a.Disabled && strings.EqualFold(strings.TrimSpace(a.Tier), "Ultra") {
 			return true
 		}
+	}
+	return false
+}
+
+// HasHealthyNonUltraAntigravityAccount reports whether at least one enabled, non-cooldown, non-Ultra
+// Antigravity account is available and not rate-limited for modelHint.
+func HasHealthyNonUltraAntigravityAccount(modelHint string) bool {
+	accounts := readAuthAccountsSnapshotFast()
+	nowUnix := time.Now().Unix()
+	for _, a := range accounts {
+		if a.Disabled {
+			continue
+		}
+		p := a.Provider
+		if p == "" {
+			p = ProviderAntigravity
+		}
+		if p != ProviderAntigravity {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(a.Tier), "Ultra") {
+			continue
+		}
+		if a.CooldownUntil > nowUnix {
+			continue
+		}
+		if strings.TrimSpace(modelHint) != "" && strings.TrimSpace(a.Email) != "" && IsAccountModelRateLimited(a.Email, modelHint) {
+			continue
+		}
+		return true
 	}
 	return false
 }
@@ -1465,13 +1500,7 @@ func rateLimitProbeKeysForHint(modelHint string) []string {
 }
 
 func isClaudePrimaryModelID(normModel string) bool {
-	return strings.HasPrefix(normModel, "claude-") ||
-		normModel == "gemini-4-carbon-high" ||
-		normModel == "gemini-4-carbon" ||
-		normModel == "gemini-4-carbon-medium" ||
-		normModel == "gemini-4-argon-high" ||
-		normModel == "gemini-4-argon" ||
-		normModel == "gemini-4-argon-medium"
+	return strings.HasPrefix(normModel, "claude-")
 }
 
 func mirroredRateLimitModelKeys(normModel string) []string {
@@ -1729,7 +1758,7 @@ func isAccountClaudeQuotaExhaustedFast(emailOrID string) bool {
 	if !ok || acc.WeeklyClaudePercent == nil {
 		return false
 	}
-	return *acc.WeeklyClaudePercent >= 100 || *acc.WeeklyClaudePercent <= 0
+	return *acc.WeeklyClaudePercent <= 0
 }
 
 func hasAlternateFlagshipAccount(endpoint, currentEmail, modelHint string, flagshipCandidates []string) bool {
@@ -1777,7 +1806,7 @@ func hasAlternateFlagshipAccount(endpoint, currentEmail, modelHint string, flags
 			if cand == "" {
 				continue
 			}
-			if strings.HasPrefix(cand, "claude-") && (isAccountClaudeQuotaExhaustedFast(otherEmail) || (a.WeeklyClaudePercent != nil && (*a.WeeklyClaudePercent >= 100 || *a.WeeklyClaudePercent <= 0))) {
+			if strings.HasPrefix(cand, "claude-") && (isAccountClaudeQuotaExhaustedFast(otherEmail) || (a.WeeklyClaudePercent != nil && *a.WeeklyClaudePercent <= 0)) {
 				continue
 			}
 			if !isDeadCCPAModel(endpoint, cand, nowTime) && !isAccountDeadCCPAModel(endpoint, otherEmail, cand, nowTime) {
@@ -1900,102 +1929,63 @@ func selectProviderAccountCore(ctx context.Context, provider ProviderID, modelHi
 
 	hasAnyTier := false
 	if provider == ProviderAntigravity {
-		for _, c := range candidates {
-			if strings.TrimSpace(c.Tier) != "" {
+		for _, a := range matching {
+			if strings.TrimSpace(a.Tier) != "" {
 				hasAnyTier = true
 				break
 			}
 		}
 	}
 
-	// 2. Model-Quota Aware Filter: for Antigravity, deprioritize accounts where modelHint
-	// (or underlying Claude Opus / Sonnet tier for Carbon/Argon High/Medium) is in per-account 429 cooldown.
-	if provider == ProviderAntigravity && len(candidates) > 1 && strings.TrimSpace(modelHint) != "" {
-		if hasAnyTier && HasConfiguredUltraAccount() && IsCarbonOrArgonHighOrMedium(modelHint) {
-			// Carbon 4 / Argon 4 High requests must strictly route to Antigravity Ultra accounts without touching Pro accounts.
-			ultraFresh := make([]ConnectedAccount, 0, len(candidates))
+	// 2. Strict 3-Bucket Tier-Aware & Model-Quota Aware Scheduler for Antigravity
+	if provider == ProviderAntigravity && hasAnyTier {
+		trimmedHint := strings.TrimSpace(modelHint)
+		switch {
+		case IsCarbonOrArgonHighOrMedium(trimmedHint):
+			// Bucket A: Carbon 4 / Argon 4 High & Medium -> strictly Ultra while ANY Ultra account has Gemini quota > 0%.
+			ultraCands := make([]ConnectedAccount, 0, len(candidates))
+			nonUltraCands := make([]ConnectedAccount, 0, len(candidates))
+			nonUltraAll := make([]ConnectedAccount, 0, len(candidates))
 			for _, c := range candidates {
-				if strings.EqualFold(strings.TrimSpace(c.Tier), "Ultra") &&
-					!isDirectGeminiTierRateLimited(c.Email, modelHint) &&
-					!IsAccountModelRateLimited(c.Email, modelHint) {
-					ultraFresh = append(ultraFresh, c)
-				}
-			}
-			if len(ultraFresh) > 0 {
-				// Healthy Ultra accounts available: restrict candidates ONLY to Ultra accounts (Pro accounts NEVER touched)
-				candidates = ultraFresh
-			} else {
-				// All Ultra accounts exhausted for Carbon/Argon: fall back to Pro accounts for Gemini 3.1 Pro High coding
-				proFresh := make([]ConnectedAccount, 0, len(candidates))
-				for _, c := range candidates {
-					if !strings.EqualFold(strings.TrimSpace(c.Tier), "Ultra") &&
-						!IsAccountModelRateLimited(c.Email, "gemini-3.1-pro-high") {
-						proFresh = append(proFresh, c)
+				geminiExhausted := c.WeeklyGeminiPercent != nil && *c.WeeklyGeminiPercent <= 0
+				if strings.EqualFold(strings.TrimSpace(c.Tier), "Ultra") {
+					if !geminiExhausted &&
+						!isDirectGeminiTierRateLimited(c.Email, trimmedHint) &&
+						!IsAccountModelRateLimited(c.Email, trimmedHint) {
+						ultraCands = append(ultraCands, c)
+					}
+				} else {
+					nonUltraAll = append(nonUltraAll, c)
+					if !geminiExhausted && !IsAccountModelRateLimited(c.Email, "gemini-3.1-pro-high") {
+						nonUltraCands = append(nonUltraCands, c)
 					}
 				}
-				if len(proFresh) > 0 {
-					candidates = proFresh
-				}
 			}
-		} else {
-			modelFresh := make([]ConnectedAccount, 0, len(candidates))
-			useDirectGeminiFilter := hasAnyTier && isGeminiPrimaryDeepReasoningModel(modelHint)
-			for _, c := range candidates {
-				limited := false
-				if useDirectGeminiFilter {
-					limited = isDirectGeminiTierRateLimited(c.Email, modelHint)
-				} else {
-					limited = IsAccountModelRateLimited(c.Email, modelHint)
-				}
-				if !limited {
-					modelFresh = append(modelFresh, c)
-				}
-			}
-			if len(modelFresh) > 0 {
-				candidates = modelFresh
-			} else if isHedgePickFromContext(ctx) {
-				accountSelectMu.Unlock()
-				return nil, func() {}, fmt.Errorf("no rate-limit-free alternate account for %s", modelHint)
-			}
-		}
-	}
-
-	// 2.5 Tier-Aware Scheduler (Ultra vs Pro): preserve 100% legacy behavior when no candidate has Tier set.
-	if provider == ProviderAntigravity && hasAnyTier && len(candidates) > 1 {
-		ultraCands := make([]ConnectedAccount, 0, len(candidates))
-		nonUltraCands := make([]ConnectedAccount, 0, len(candidates))
-		minOverallInFlight := -1
-		minUltraInFlight := -1
-		minProInFlight := -1
-
-		for _, c := range candidates {
-			inf := GetAccountInFlight(c.Email)
-			if minOverallInFlight < 0 || inf < minOverallInFlight {
-				minOverallInFlight = inf
-			}
-			if strings.EqualFold(strings.TrimSpace(c.Tier), "Ultra") {
-				ultraCands = append(ultraCands, c)
-				if minUltraInFlight < 0 || inf < minUltraInFlight {
-					minUltraInFlight = inf
-				}
-			} else {
-				nonUltraCands = append(nonUltraCands, c)
-				if minProInFlight < 0 || inf < minProInFlight {
-					minProInFlight = inf
-				}
-			}
-		}
-
-		if HasConfiguredUltraAccount() && IsCarbonOrArgonHighOrMedium(modelHint) {
-			// Carbon 4 / Argon 4 strictly routes to Ultra accounts unless ALL Ultra accounts are exhausted
 			if len(ultraCands) > 0 {
-				candidates = ultraCands
+				if isHedgePickFromContext(ctx) {
+					ultraLowLoad := make([]ConnectedAccount, 0, len(ultraCands))
+					ultraMidLoad := make([]ConnectedAccount, 0, len(ultraCands))
+					for _, c := range ultraCands {
+						inf := GetAccountInFlight(c.Email)
+						if inf <= 2 {
+							ultraLowLoad = append(ultraLowLoad, c)
+						}
+						if inf < 4 {
+							ultraMidLoad = append(ultraMidLoad, c)
+						}
+					}
+					if len(ultraLowLoad) > 0 {
+						candidates = ultraLowLoad
+					} else if len(ultraMidLoad) > 0 {
+						candidates = ultraMidLoad
+					} else {
+						candidates = ultraCands
+					}
+				} else {
+					candidates = ultraCands
+				}
 			} else if len(nonUltraCands) > 0 {
-				candidates = nonUltraCands
-			}
-		} else if isHedgePickFromContext(ctx) {
-			if IsFastSpeedGeminiModel(modelHint) {
-				if len(nonUltraCands) > 0 {
+				if isHedgePickFromContext(ctx) {
 					proLowLoad := make([]ConnectedAccount, 0, len(nonUltraCands))
 					for _, c := range nonUltraCands {
 						if GetAccountInFlight(c.Email) <= 3 {
@@ -2004,42 +1994,154 @@ func selectProviderAccountCore(ctx context.Context, provider ProviderID, modelHi
 					}
 					if len(proLowLoad) > 0 {
 						candidates = proLowLoad
-					} else if len(ultraCands) > 0 && minProInFlight > 3 {
-						candidates = ultraCands
 					} else {
 						candidates = nonUltraCands
 					}
+				} else {
+					candidates = nonUltraCands
 				}
-				} else if len(ultraCands) > 0 {
-				ultraLowLoad := make([]ConnectedAccount, 0, len(ultraCands))
-				for _, c := range ultraCands {
-					if GetAccountInFlight(c.Email) <= 2 {
-						ultraLowLoad = append(ultraLowLoad, c)
+			} else if isHedgePickFromContext(ctx) {
+				accountSelectMu.Unlock()
+				return nil, func() {}, fmt.Errorf("no rate-limit-free alternate account for %s", trimmedHint)
+			} else if len(nonUltraAll) > 0 {
+				candidates = nonUltraAll
+			}
+
+		case IsClaudeAntigravityModel(trimmedHint):
+			// Bucket B: Claude Antigravity models -> require Claude quota > 0%; prioritize Ultra first, then Pro.
+			// If ALL accounts have 0% Claude quota, route fallback strictly to nonUltraCands (NEVER 0%-Claude Ultra!).
+			ultraClaudeCands := make([]ConnectedAccount, 0, len(candidates))
+			proClaudeCands := make([]ConnectedAccount, 0, len(candidates))
+			nonUltraFallback := make([]ConnectedAccount, 0, len(candidates))
+			nonUltraAll := make([]ConnectedAccount, 0, len(candidates))
+			for _, c := range candidates {
+				claudeHealthy := !isAccountClaudeQuotaExhaustedFast(c.Email) && !IsAccountModelRateLimited(c.Email, trimmedHint)
+				if strings.EqualFold(strings.TrimSpace(c.Tier), "Ultra") {
+					if claudeHealthy {
+						ultraClaudeCands = append(ultraClaudeCands, c)
+					}
+				} else {
+					nonUltraAll = append(nonUltraAll, c)
+					if !IsAccountModelRateLimited(c.Email, "gemini-3.8-flash-tiered") {
+						nonUltraFallback = append(nonUltraFallback, c)
+					}
+					if claudeHealthy {
+						proClaudeCands = append(proClaudeCands, c)
 					}
 				}
-				if len(ultraLowLoad) > 0 {
-					candidates = ultraLowLoad
-				} else if minUltraInFlight < 4 {
-					candidates = ultraCands
+			}
+			if len(ultraClaudeCands) > 0 {
+				if isHedgePickFromContext(ctx) {
+					ultraLowLoad := make([]ConnectedAccount, 0, len(ultraClaudeCands))
+					ultraMidLoad := make([]ConnectedAccount, 0, len(ultraClaudeCands))
+					for _, c := range ultraClaudeCands {
+						inf := GetAccountInFlight(c.Email)
+						if inf <= 2 {
+							ultraLowLoad = append(ultraLowLoad, c)
+						}
+						if inf < 4 {
+							ultraMidLoad = append(ultraMidLoad, c)
+						}
+					}
+					if len(ultraLowLoad) > 0 {
+						candidates = ultraLowLoad
+					} else if len(ultraMidLoad) > 0 {
+						candidates = ultraMidLoad
+					} else {
+						candidates = ultraClaudeCands
+					}
+				} else {
+					candidates = ultraClaudeCands
+				}
+			} else if len(proClaudeCands) > 0 {
+				if isHedgePickFromContext(ctx) {
+					proLowLoad := make([]ConnectedAccount, 0, len(proClaudeCands))
+					for _, c := range proClaudeCands {
+						if GetAccountInFlight(c.Email) <= 3 {
+							proLowLoad = append(proLowLoad, c)
+						}
+					}
+					if len(proLowLoad) > 0 {
+						candidates = proLowLoad
+					} else {
+						candidates = proClaudeCands
+					}
+				} else {
+					candidates = proClaudeCands
+				}
+			} else if isHedgePickFromContext(ctx) {
+				accountSelectMu.Unlock()
+				return nil, func() {}, fmt.Errorf("no Claude-quota-healthy alternate account for %s", trimmedHint)
+			} else if len(nonUltraFallback) > 0 {
+				candidates = nonUltraFallback
+			} else if len(nonUltraAll) > 0 {
+				candidates = nonUltraAll
+			}
+
+		default:
+			// Bucket C: ALL other models (gemini-3.1-pro*, gemini-3.8-flash*, gemini-3-flash*, auto/fast, *-low, "").
+			// Unconditional Pro Shield: 100% nonUltraCands whenever len(nonUltraCands) > 0 (zero inFlight spillover onto Ultra; abort hedge if 0 Pro).
+			nonUltraCands := make([]ConnectedAccount, 0, len(candidates))
+			nonUltraAll := make([]ConnectedAccount, 0, len(candidates))
+			ultraFresh := make([]ConnectedAccount, 0, len(candidates))
+			useDirectGeminiFilter := trimmedHint != "" && isGeminiPrimaryDeepReasoningModel(trimmedHint)
+			for _, c := range candidates {
+				limited := false
+				if trimmedHint != "" {
+					if useDirectGeminiFilter {
+						limited = isDirectGeminiTierRateLimited(c.Email, trimmedHint)
+					} else {
+						limited = IsAccountModelRateLimited(c.Email, trimmedHint)
+					}
+				}
+				if strings.EqualFold(strings.TrimSpace(c.Tier), "Ultra") {
+					if !limited {
+						ultraFresh = append(ultraFresh, c)
+					}
+				} else {
+					nonUltraAll = append(nonUltraAll, c)
+					if !limited {
+						nonUltraCands = append(nonUltraCands, c)
+					}
 				}
 			}
-		} else if len(ultraCands) > 0 && len(nonUltraCands) > 0 {
-			if strings.HasPrefix(stripKnownModelPrefixes(strings.ToLower(modelHint)), "gemini-3.1-pro") {
-				// Gemini 3.1 Pro High prioritizes Pro accounts to preserve Ultra accounts for Carbon & Argon
-				if minProInFlight <= minOverallInFlight+3 {
+			if isHedgePickFromContext(ctx) {
+				if len(nonUltraCands) == 0 {
+					accountSelectMu.Unlock()
+					return nil, func() {}, fmt.Errorf("no healthy non-Ultra alternate account for %s", trimmedHint)
+				}
+				proLowLoad := make([]ConnectedAccount, 0, len(nonUltraCands))
+				for _, c := range nonUltraCands {
+					if GetAccountInFlight(c.Email) <= 3 {
+						proLowLoad = append(proLowLoad, c)
+					}
+				}
+				if len(proLowLoad) > 0 {
+					candidates = proLowLoad
+				} else {
 					candidates = nonUltraCands
 				}
-			} else if IsDeepReasoningGeminiModel(modelHint) {
-				if minUltraInFlight <= minOverallInFlight+2 && minUltraInFlight < 4 {
-					candidates = ultraCands
-				} else if minProInFlight <= minUltraInFlight {
-					candidates = nonUltraCands
-				}
-			} else if IsFastSpeedGeminiModel(modelHint) {
-				if minProInFlight <= minOverallInFlight+1 {
-					candidates = nonUltraCands
-				}
+			} else if len(nonUltraCands) > 0 {
+				candidates = nonUltraCands
+			} else if len(ultraFresh) > 0 {
+				candidates = ultraFresh
+			} else if len(nonUltraAll) > 0 {
+				candidates = nonUltraAll
 			}
+		}
+	} else if provider == ProviderAntigravity && len(candidates) > 1 && strings.TrimSpace(modelHint) != "" {
+		// Legacy untiered fallback when zero accounts have Tier configured
+		modelFresh := make([]ConnectedAccount, 0, len(candidates))
+		for _, c := range candidates {
+			if !IsAccountModelRateLimited(c.Email, modelHint) {
+				modelFresh = append(modelFresh, c)
+			}
+		}
+		if len(modelFresh) > 0 {
+			candidates = modelFresh
+		} else if isHedgePickFromContext(ctx) {
+			accountSelectMu.Unlock()
+			return nil, func() {}, fmt.Errorf("no rate-limit-free alternate account for %s", modelHint)
 		}
 	}
 
@@ -2227,7 +2329,7 @@ func RecordAccountModelResult(emailOrID string, provider ProviderID, modelID str
 			found = true
 			matchedEmail = acc.Email
 			acc.TotalTokens += int64(tokens)
-			if strings.TrimSpace(modelID) != "" {
+			if success && strings.TrimSpace(modelID) != "" {
 				acc.LastModel = strings.TrimSpace(modelID)
 			}
 			if success && latencyMs > 0 {
@@ -2287,6 +2389,75 @@ func RecordAccountModelResult(emailOrID string, provider ProviderID, modelID str
 			RecordAccountModelRateLimit(targetEmail, modelID, 2*time.Minute)
 		} else if success && !isAccountDeadCCPAModel(DefaultCCPAEndpoint, targetEmail, normalizeRateLimitModelID(modelID), time.Now()) {
 			clearSingleAccountModelRateLimit(targetEmail, modelID)
+		}
+	}
+}
+
+// ApplyAntigravityForbiddenCooldown sets an account-level cooldown following an Antigravity HTTP 403 error.
+// If errBody indicates VALIDATION_REQUIRED, it sets a 2-hour (7200s) cooldown and marks validationIsolatedAccounts;
+// otherwise (TOS_VIOLATION / PERMISSION_DENIED / suspended), it sets a 24-hour (86400s) cooldown.
+func ApplyAntigravityForbiddenCooldown(email, errBody string) {
+	cleanEmail := strings.TrimSpace(email)
+	if cleanEmail == "" {
+		return
+	}
+	upperErr := strings.ToUpper(errBody)
+	isValidation := strings.Contains(upperErr, "VALIDATION_REQUIRED") || strings.Contains(upperErr, "VALIDATION_URL")
+	cooldownSec := int64(86400)
+	if isValidation {
+		cooldownSec = 7200
+	}
+	targetUntil := time.Now().Unix() + cooldownSec
+	var matchedID, matchedEmail string
+
+	configMu.Lock()
+	cfg := loadSavedAuthConfigLocked()
+	changed := false
+	for i := range cfg.Accounts {
+		acc := &cfg.Accounts[i]
+		accProv := acc.Provider
+		if accProv == "" {
+			accProv = ProviderAntigravity
+		}
+		if accProv != ProviderAntigravity {
+			continue
+		}
+		if acc.ID == cleanEmail || strings.EqualFold(acc.Email, cleanEmail) {
+			acc.CooldownUntil = targetUntil
+			if acc.FailureCount < 1 {
+				acc.FailureCount = 1
+			}
+			nowRFC := time.Now().UTC().Format(time.RFC3339)
+			acc.UpdatedAt = nowRFC
+			matchedID = acc.ID
+			matchedEmail = acc.Email
+			changed = true
+			break
+		}
+	}
+	if changed {
+		cfg.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+		saveAuthConfigAsyncLocked(cfg)
+	}
+	configMu.Unlock()
+
+	normKey := strings.ToLower(cleanEmail)
+	if matchedEmail != "" {
+		normKey = strings.ToLower(strings.TrimSpace(matchedEmail))
+	}
+	if isValidation {
+		if normKey != "" {
+			validationIsolatedAccounts.Store(normKey, true)
+		}
+		if matchedID != "" {
+			validationIsolatedAccounts.Store(strings.ToLower(strings.TrimSpace(matchedID)), true)
+		}
+	} else {
+		if normKey != "" {
+			validationIsolatedAccounts.Delete(normKey)
+		}
+		if matchedID != "" {
+			validationIsolatedAccounts.Delete(strings.ToLower(strings.TrimSpace(matchedID)))
 		}
 	}
 }

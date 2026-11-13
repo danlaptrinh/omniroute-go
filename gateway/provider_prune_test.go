@@ -599,7 +599,7 @@ func TestCCPAModelVersionHeaderLiveActiveRoleHonestLogsAndMultiAccountFlagshipFa
 	})
 
 	t.Run("Live_DefaultCCPAEndpoint_ConnectedAccount_ModelTruthMapping", func(t *testing.T) {
-		exhaustedClaude := 100
+		exhaustedClaude := 0
 		freshClaude := 15
 		if _, err := UpsertConnectedAccount(ConnectedAccount{
 			Provider:            ProviderAntigravity,

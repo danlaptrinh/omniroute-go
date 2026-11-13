@@ -340,12 +340,14 @@ func selectSEOProjectManagerChain(preferredManager string, forceNight bool) ([]s
 	return chain, night
 }
 
-// listActiveAccountPool returns all enabled, non-cooldown Antigravity Pro accounts first for Worker Sub-Agents.
+// listActiveAccountPool returns all enabled, non-cooldown Antigravity Pro accounts first for Worker Sub-Agents,
+// falling back to Ultra accounts only when zero non-Ultra accounts are available.
 func listActiveAccountPool() []ConnectedAccount {
 	saved := LoadSavedAuthConfig()
 	now := time.Now().Unix()
 
-	var agyReady []ConnectedAccount
+	var proReady []ConnectedAccount
+	var ultraReady []ConnectedAccount
 	var agyCooldown []ConnectedAccount
 	var otherReady []ConnectedAccount
 
@@ -359,7 +361,11 @@ func listActiveAccountPool() []ConnectedAccount {
 		}
 		if prov == ProviderAntigravity {
 			if a.CooldownUntil <= now {
-				agyReady = append(agyReady, a)
+				if strings.EqualFold(strings.TrimSpace(a.Tier), "Ultra") {
+					ultraReady = append(ultraReady, a)
+				} else {
+					proReady = append(proReady, a)
+				}
 			} else {
 				agyCooldown = append(agyCooldown, a)
 			}
@@ -368,8 +374,11 @@ func listActiveAccountPool() []ConnectedAccount {
 		}
 	}
 
-	if len(agyReady) > 0 {
-		return agyReady
+	if len(proReady) > 0 {
+		return proReady
+	}
+	if len(ultraReady) > 0 {
+		return ultraReady
 	}
 	if len(otherReady) > 0 {
 		return otherReady

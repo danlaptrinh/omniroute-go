@@ -839,9 +839,22 @@ func ExecuteAntigravityWithReactiveRefresh(
 			if upstreamVer != "" && !strings.EqualFold(upstreamVer, resolvedHdr) && !strings.EqualFold("antigravity/"+upstreamVer, loggedModel) {
 				loggedModel = fmt.Sprintf("%s [%s]", loggedModel, upstreamVer)
 			}
+			cardModel := loggedModel
+			reqModelLabel := strings.TrimSpace(req.Model)
+			if reqModelLabel == "" {
+				reqModelLabel = strings.TrimSpace(target.CanonicalID)
+			}
+			if reqModelLabel != "" && loggedModel != "" &&
+				!strings.Contains(loggedModel, "➔") &&
+				!strings.EqualFold(stripKnownModelPrefixes(reqModelLabel), stripKnownModelPrefixes(actualModel)) {
+				if !strings.Contains(reqModelLabel, "/") {
+					reqModelLabel = "antigravity/" + reqModelLabel
+				}
+				cardModel = fmt.Sprintf("%s ➔ %s", reqModelLabel, loggedModel)
+			}
 
 			if accountEmail != "" {
-				RecordAccountModelResult(accountEmail, ProviderAntigravity, loggedModel, true, lat, usedTokens, http.StatusOK)
+				RecordAccountModelResult(accountEmail, ProviderAntigravity, cardModel, true, lat, usedTokens, http.StatusOK)
 				nowCheck := time.Now()
 				for _, bm := range []string{
 					"gemini-4-carbon-high",
@@ -922,6 +935,9 @@ func ExecuteAntigravityWithReactiveRefresh(
 				}
 			}
 			RecordAccountModelResult(accountEmail, ProviderAntigravity, target.CanonicalID, false, lat, 0, failCode)
+			if failCode == http.StatusForbidden {
+				ApplyAntigravityForbiddenCooldown(accountEmail, errMsg)
+			}
 		}
 
 		errEntry := GatewayLogEntry{
@@ -943,7 +959,10 @@ func ExecuteAntigravityWithReactiveRefresh(
 		// 1. Carbon 4 / Argon 4 High: if stuck, failed, or rate-limited on Ultra account,
 		// check if another healthy Ultra account exists. If not, IMMEDIATELY step down to Gemini 3.1 Pro High on Pro accounts!
 		if isCarbonArgon && accountEmail != "" {
-			flagshipCands := []string{"gemini-4-carbon-high", "gemini-4-carbon", "gemini-4-argon-high", "gemini-4-argon"}
+			flagshipCands := []string{"gemini-4-carbon-high", "gemini-4-argon-high", "gemini-3.8-flash-high"}
+			if target.ThinkingLevel == ThinkingLevelMedium {
+				flagshipCands = []string{"gemini-4-carbon-medium", "gemini-4-argon-medium", "gemini-3.8-flash-medium", "gemini-3.8-flash-high"}
+			}
 			hasOtherUltra := hasAlternateFlagshipAccount(u.cfg.CCPAEndpoint, accountEmail, target.CanonicalID, flagshipCands)
 			if hasOtherUltra && attempt+1 < maxAttempts {
 				log.Printf("[omniroute-go] Carbon/Argon stuck or exhausted on Ultra account %s (%v); failing over to alternate Ultra account (attempt %d/%d)",
@@ -963,6 +982,31 @@ func ExecuteAntigravityWithReactiveRefresh(
 				maxAttempts = attempt + 2
 			}
 			continue
+		}
+
+		// 1.5. Claude Antigravity Flagship: if Claude quota is exhausted across accounts, step down cleanly to Pro Gemini!
+		if isFlagshipFailover && IsClaudeAntigravityModel(target.CanonicalID) && accountEmail != "" {
+			claudeFlagshipCands := []string{"claude-opus-4-6-thinking", "claude-sonnet-4-6"}
+			if strings.Contains(strings.ToLower(target.CanonicalID), "opus") {
+				claudeFlagshipCands = []string{"claude-opus-4-6-thinking"}
+			}
+			if hasAlternateFlagshipAccount(u.cfg.CCPAEndpoint, accountEmail, target.CanonicalID, claudeFlagshipCands) && attempt+1 < maxAttempts {
+				log.Printf("[omniroute-go] Claude flagship quota exhausted on %s; failing over to alternate Claude-healthy account (attempt %d/%d)",
+					accountEmail, attempt+1, maxAttempts)
+				forcedAcc = nil
+				continue
+			}
+			if HasHealthyNonUltraAntigravityAccount("gemini-3.1-pro-high") {
+				log.Printf("[omniroute-go] Claude flagship quota exhausted across Antigravity accounts (%v); stepping down to antigravity/gemini-3.1-pro-high on Pro accounts", err)
+				target = ResolveModel("antigravity/gemini-3.1-pro-high", nil)
+				modelHint = target.CanonicalID
+				w.Header().Set("X-Omni-Gateway-Tier-Stepdown", "gemini-3.1-pro-high")
+				forcedAcc = nil
+				if attempt+1 >= maxAttempts {
+					maxAttempts = attempt + 2
+				}
+				continue
+			}
 		}
 
 		// 2. Generic flagship failover across accounts

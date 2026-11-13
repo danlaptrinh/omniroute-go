@@ -186,90 +186,61 @@ func TestTierHedger_UltraVsProRoutingAndSpillover(t *testing.T) {
 		t.Fatalf("SaveAuthConfig: %v", err)
 	}
 
-	// 1. N=12 concurrent deep-reasoning requests MUST route 100% to the 4 Ultra accounts (3 each).
+	// 1. Flagship Carbon/Argon requests MUST route 100% to the 4 Ultra accounts regardless of in-flight load.
 	var releases []func()
-	for i := 0; i < 12; i++ {
-		acc, rel, err := AcquireProviderAccountForModel(context.Background(), ProviderAntigravity, "antigravity/gemini-3.8-flash-high", "flash-high")
+	for i := 0; i < 20; i++ {
+		mod := "antigravity/gemini-4-carbon-high"
+		if i%2 == 1 {
+			mod = "antigravity/gemini-4-argon-high"
+		}
+		acc, rel, err := AcquireProviderAccountForModel(context.Background(), ProviderAntigravity, mod, mod)
 		if err != nil {
-			t.Fatalf("acquire #%d failed: %v", i+1, err)
+			t.Fatalf("flagship acquire #%d failed: %v", i+1, err)
 		}
 		releases = append(releases, rel)
 		if !strings.HasPrefix(acc.Email, "ultra") {
-			t.Fatalf("request #%d (<=12) routed to non-Ultra account %q (tier=%q)", i+1, acc.Email, acc.Tier)
+			t.Fatalf("flagship request #%d (%s) leaked to non-Ultra account %q (tier=%q)", i+1, mod, acc.Email, acc.Tier)
 		}
 	}
-
-	// 2. Request #13 has minUltraInFlight=3 > minOverallInFlight(0)+2, so it MUST spill to Pro!
-	spillAcc, spillRel, err := AcquireProviderAccountForModel(context.Background(), ProviderAntigravity, "antigravity/gemini-3.8-flash-high", "flash-high")
-	if err != nil {
-		t.Fatalf("spillover acquire failed: %v", err)
-	}
-	releases = append(releases, spillRel)
-	if !strings.HasPrefix(spillAcc.Email, "pro") {
-		t.Fatalf("expected request #13 to spill over to Pro when Ultra has 3 in-flight vs Pro 0, got %q", spillAcc.Email)
-	}
-
-	// Fill remaining 4 Pro accounts to 1 in-flight so minOverallInFlight becomes 1;
-	// then Ultra can take 1 more slot each (up to inFlight == 4), and at >=4 MUST spill to Pro again.
-	for i := 0; i < 4; i++ {
-		acc, rel, err := AcquireProviderAccountForModel(context.Background(), ProviderAntigravity, "antigravity/gemini-3.8-flash-high", "flash-high")
-		if err != nil {
-			t.Fatalf("pro balance acquire failed: %v", err)
-		}
-		releases = append(releases, rel)
-		if !strings.HasPrefix(acc.Email, "pro") {
-			t.Fatalf("expected remaining idle Pro slot to fill to 1, got %q", acc.Email)
-		}
-	}
-	// Now Ultra=3, Pro=1 (minOverall=1 -> 3 <= 1+2 && 3 < 4), next 4 go to Ultra (reaching 4 in-flight each).
-	for i := 0; i < 4; i++ {
-		acc, rel, err := AcquireProviderAccountForModel(context.Background(), ProviderAntigravity, "antigravity/gemini-3.8-flash-high", "flash-high")
-		if err != nil {
-			t.Fatalf("ultra 4th slot acquire failed: %v", err)
-		}
-		releases = append(releases, rel)
-		if !strings.HasPrefix(acc.Email, "ultra") {
-			t.Fatalf("expected 4th Ultra slot before cap=4, got %q", acc.Email)
-		}
-	}
-	// Now all 4 Ultra accounts have inFlight == 4 (>= 4 cap): next request MUST spill to Pro!
-	capSpillAcc, capSpillRel, err := AcquireProviderAccountForModel(context.Background(), ProviderAntigravity, "antigravity/gemini-3.8-flash-high", "flash-high")
-	if err != nil {
-		t.Fatalf("cap>=4 spillover failed: %v", err)
-	}
-	releases = append(releases, capSpillRel)
-	if !strings.HasPrefix(capSpillAcc.Email, "pro") {
-		t.Fatalf("expected spillover to Pro when all Ultra accounts have >=4 in-flight, got %q", capSpillAcc.Email)
-	}
-
 	for _, rel := range releases {
 		rel()
 	}
 	releases = nil
 
-	// 3. Fast-speed models (auto/fast, gemini-3-flash, *-low) route preferentially to the 5 Pro accounts
-	// while minProInFlight <= minOverallInFlight + 1 (i.e. up to 10 concurrent requests at 2 each on Pro, 0 on Ultra).
-	fastModels := []string{"auto/fast", "antigravity/gemini-3-flash", "antigravity/gemini-4-carbon-low"}
-	for i := 0; i < 10; i++ {
-		m := fastModels[i%len(fastModels)]
+	// 2. Non-flagship models (gemini-3.8-flash-high, gemini-3.1-pro-high, auto/fast, gemini-3-flash, *-low)
+	// MUST route 100% to the 5 Pro accounts with ZERO spillover onto idle Ultra accounts even at high load.
+	proShieldModels := []string{
+		"antigravity/gemini-3.8-flash-high",
+		"antigravity/gemini-3.1-pro-high",
+		"auto/fast",
+		"antigravity/gemini-3-flash",
+		"antigravity/gemini-4-carbon-low",
+	}
+	for i := 0; i < 25; i++ {
+		m := proShieldModels[i%len(proShieldModels)]
 		acc, rel, err := AcquireProviderAccountForModel(context.Background(), ProviderAntigravity, m, m)
 		if err != nil {
-			t.Fatalf("fast acquire #%d failed: %v", i+1, err)
+			t.Fatalf("pro-shield acquire #%d (%s) failed: %v", i+1, m, err)
 		}
 		releases = append(releases, rel)
 		if !strings.HasPrefix(acc.Email, "pro") {
-			t.Fatalf("fast request #%d (%s) consumed Ultra account %q instead of Pro", i+1, m, acc.Email)
+			t.Fatalf("non-flagship request #%d (%s) leaked onto Ultra account %q instead of Pro", i+1, m, acc.Email)
 		}
 	}
-	// 11th concurrent fast request (minPro=2 > minOverall(0)+1) spills cleanly to idle Ultra.
-	fastSpill, fastSpillRel, err := AcquireProviderAccountForModel(context.Background(), ProviderAntigravity, "auto/fast", "auto/fast")
+
+	// 3. Fallback to Ultra occurs ONLY when 100% of Pro accounts are unavailable (rate-limited).
+	for i := 1; i <= 5; i++ {
+		RecordAccountModelRateLimit(fmt.Sprintf("pro%d@gmail.com", i), "auto/fast", 2*time.Minute)
+	}
+	allProDownAcc, allProDownRel, err := AcquireProviderAccountForModel(context.Background(), ProviderAntigravity, "auto/fast", "auto/fast")
 	if err != nil {
-		t.Fatalf("fast spillover acquire failed: %v", err)
+		t.Fatalf("fallback acquire when all Pro rate-limited failed: %v", err)
 	}
-	releases = append(releases, fastSpillRel)
-	if !strings.HasPrefix(fastSpill.Email, "ultra") {
-		t.Fatalf("expected 11th fast request (Pro=2 vs Ultra=0) to spill to Ultra, got %q", fastSpill.Email)
+	releases = append(releases, allProDownRel)
+	if !strings.HasPrefix(allProDownAcc.Email, "ultra") {
+		t.Fatalf("expected fallback to Ultra only when 100%% of Pro accounts are unavailable, got %q", allProDownAcc.Email)
 	}
+	ClearAccountModelRateLimits("")
 
 	// 4. Explicit PinAccountContextKey MUST always be honored regardless of Tier.
 	pinnedCtx := WithPinnedAccount(context.Background(), "pro3@gmail.com")
@@ -659,45 +630,18 @@ func TestTierHedger_PreFirstTokenTTFTHedging_WinnerAndLoserCleanup(t *testing.T)
 		}
 	})
 
-	// Pro primary uses CCPAHedgeDelayPro and hedge picker prefers healthy Ultra (inFlight <= 2) over idle Pro.
-	t.Run("pro_primary_hedges_onto_ultra_with_low_inflight", func(t *testing.T) {
+	// Non-flagship Pro primary hedges strictly onto pro-alt (never hijacking Ultra), while flagship Ultra Carbon hedges onto ultra-alt.
+	t.Run("pro_and_ultra_hedge_strictly_within_own_tier", func(t *testing.T) {
 		CCPAHedgeDelayPro = 35 * time.Millisecond
-		CCPAHedgeDelayUltra = 500 * time.Millisecond
-		// Start with ultra-alt temporarily in 1s cooldown so primary acquires pro-slow@gmail.com;
-		// once primary starts, clear cooldown on ultra-alt (with 1 inFlight <= 2) alongside idle pro-alt (0 inFlight),
-		// proving hedge fires at Pro delay (35ms << 500ms) and prefers Ultra with inFlight <= 2!
+		CCPAHedgeDelayUltra = 40 * time.Millisecond
+
+		// Part A: Non-flagship gemini-3.1-pro-high on pro-slow hedges onto pro-alt@gmail.com (NEVER ultra-alt@gmail.com)
 		if err := saveTestGatewayAuth(SavedGatewayAuth{
 			RoutingStrategy: StrategyRoundRobin,
 			Accounts: []ConnectedAccount{
-				{
-					ID:          "p-slow",
-					Provider:    ProviderAntigravity,
-					Tier:        "Pro",
-					Email:       "pro-slow@gmail.com",
-					AccessToken: "ya29.pro-slow",
-					ProjectID:   "proj-p1",
-					ExpiresAt:   exp,
-				},
-				{
-					ID:            "p-alt",
-					Provider:      ProviderAntigravity,
-					Tier:          "Pro",
-					Email:         "pro-alt@gmail.com",
-					AccessToken:   "ya29.pro-alt",
-					ProjectID:     "proj-p2",
-					CooldownUntil: time.Now().Unix() + 60,
-					ExpiresAt:     exp,
-				},
-				{
-					ID:            "u-alt",
-					Provider:      ProviderAntigravity,
-					Tier:          "Ultra",
-					Email:         "ultra-alt@gmail.com",
-					AccessToken:   "ya29.ultra-alt",
-					ProjectID:     "proj-u3",
-					CooldownUntil: time.Now().Unix() + 60,
-					ExpiresAt:     exp,
-				},
+				{ID: "p-slow", Provider: ProviderAntigravity, Tier: "Pro", Email: "pro-slow@gmail.com", AccessToken: "ya29.pro-slow", ProjectID: "proj-p1", ExpiresAt: exp},
+				{ID: "p-alt", Provider: ProviderAntigravity, Tier: "Pro", Email: "pro-alt@gmail.com", AccessToken: "ya29.pro-alt", ProjectID: "proj-p2", CooldownUntil: time.Now().Unix() + 60, ExpiresAt: exp},
+				{ID: "u-alt", Provider: ProviderAntigravity, Tier: "Ultra", Email: "ultra-alt@gmail.com", AccessToken: "ya29.ultra-alt", ProjectID: "proj-u3", ExpiresAt: exp},
 			},
 		}); err != nil {
 			t.Fatalf("SaveAuthConfig: %v", err)
@@ -705,7 +649,6 @@ func TestTierHedger_PreFirstTokenTTFTHedging_WinnerAndLoserCleanup(t *testing.T)
 		resetTestAccountInFlight("pro-slow@gmail.com")
 		resetTestAccountInFlight("pro-alt@gmail.com")
 		resetTestAccountInFlight("ultra-alt@gmail.com")
-		AcquireAccountInFlightWithRole("ultra-alt@gmail.com", "bg-task") // inFlight = 1 (<= 2)
 		defer func() {
 			resetTestAccountInFlight("pro-slow@gmail.com")
 			resetTestAccountInFlight("pro-alt@gmail.com")
@@ -717,7 +660,7 @@ func TestTierHedger_PreFirstTokenTTFTHedging_WinnerAndLoserCleanup(t *testing.T)
 			Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
 				authHdr := r.Header.Get("Authorization")
 				if strings.Contains(authHdr, "ya29.pro-slow") {
-					// Unlock both pro-alt (0 inFlight) and ultra-alt (1 inFlight <= 2) before 35ms hedge timer fires
+					// Unlock pro-alt while ultra-alt is completely idle (0 inFlight); Bucket C hedge MUST pick pro-alt!
 					_ = saveTestGatewayAuth(SavedGatewayAuth{
 						RoutingStrategy: StrategyRoundRobin,
 						Accounts: []ConnectedAccount{
@@ -732,7 +675,7 @@ func TestTierHedger_PreFirstTokenTTFTHedging_WinnerAndLoserCleanup(t *testing.T)
 						Body:       &stalledTrackingBody{ctx: r.Context()},
 					}, nil
 				}
-				sse := "data: {\"response\":{\"modelVersion\":\"gemini-3.8-flash\",\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ultra-preferred-hedge\"}]},\"finishReason\":\"STOP\"}]}}\n\ndata: [DONE]\n\n"
+				sse := "data: {\"response\":{\"modelVersion\":\"gemini-3.8-flash-tiered\",\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"pro-isolated-hedge\"}]},\"finishReason\":\"STOP\"}]}}\n\ndata: [DONE]\n\n"
 				return &http.Response{
 					StatusCode: http.StatusOK,
 					Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
@@ -743,20 +686,75 @@ func TestTierHedger_PreFirstTokenTTFTHedging_WinnerAndLoserCleanup(t *testing.T)
 
 		start := time.Now()
 		rec := httptest.NewRecorder()
-		resolved := NewResolver().Resolve("antigravity/gemini-4-carbon-high", nil)
+		resolved := NewResolver().Resolve("antigravity/gemini-3.1-pro-high", nil)
 		req := OpenAIChatRequest{
-			Model:    "antigravity/gemini-4-carbon-high",
+			Model:    "antigravity/gemini-3.1-pro-high",
 			Messages: []OpenAIChatMessage{{Role: "user", Content: json.RawMessage(`"pro hedge test"`)}},
 		}
 		if err := upstream.HandleChatCompletion(context.Background(), rec, req, resolved, ""); err != nil {
 			t.Fatalf("pro hedge HandleChatCompletion failed: %v", err)
 		}
-		elapsed := time.Since(start)
-		if elapsed >= 300*time.Millisecond {
-			t.Fatalf("expected Pro hedge delay (~35ms, not Ultra 500ms), took %v", elapsed)
+		if elapsed := time.Since(start); elapsed >= 300*time.Millisecond {
+			t.Fatalf("expected Pro hedge delay (~35ms), took %v", elapsed)
 		}
-		if gotAcc := rec.Header().Get("X-Omni-Gateway-Account"); gotAcc != "ultra-alt@gmail.com" {
-			t.Fatalf("expected hedge to prefer ultra-alt@gmail.com (inFlight=1<=2) over pro-alt@gmail.com, got %q", gotAcc)
+		if gotAcc := rec.Header().Get("X-Omni-Gateway-Account"); gotAcc != "pro-alt@gmail.com" {
+			t.Fatalf("expected non-flagship hedge to pick pro-alt@gmail.com (never ultra-alt@gmail.com), got %q", gotAcc)
+		}
+
+		// Part B: Flagship gemini-4-carbon-high on ultra-slow hedges onto ultra-alt@gmail.com (NEVER pro-alt@gmail.com)
+		if err := saveTestGatewayAuth(SavedGatewayAuth{
+			RoutingStrategy: StrategyRoundRobin,
+			Accounts: []ConnectedAccount{
+				{ID: "u-slow", Provider: ProviderAntigravity, Tier: "Ultra", Email: "ultra-slow@gmail.com", AccessToken: "ya29.ultra-slow", ProjectID: "proj-u1", ExpiresAt: exp},
+				{ID: "u-alt", Provider: ProviderAntigravity, Tier: "Ultra", Email: "ultra-alt@gmail.com", AccessToken: "ya29.ultra-alt", ProjectID: "proj-u3", CooldownUntil: time.Now().Unix() + 60, ExpiresAt: exp},
+				{ID: "p-alt", Provider: ProviderAntigravity, Tier: "Pro", Email: "pro-alt@gmail.com", AccessToken: "ya29.pro-alt", ProjectID: "proj-p2", ExpiresAt: exp},
+			},
+		}); err != nil {
+			t.Fatalf("SaveAuthConfig: %v", err)
+		}
+		resetTestAccountInFlight("ultra-slow@gmail.com")
+		resetTestAccountInFlight("ultra-alt@gmail.com")
+		defer resetTestAccountInFlight("ultra-slow@gmail.com")
+
+		upstreamUltra := NewUpstream(GatewayConfig{CCPAEndpoint: DefaultCCPAEndpoint})
+		upstreamUltra.client = &http.Client{
+			Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+				authHdr := r.Header.Get("Authorization")
+				if strings.Contains(authHdr, "ya29.ultra-slow") {
+					_ = saveTestGatewayAuth(SavedGatewayAuth{
+						RoutingStrategy: StrategyRoundRobin,
+						Accounts: []ConnectedAccount{
+							{ID: "u-slow", Provider: ProviderAntigravity, Tier: "Ultra", Email: "ultra-slow@gmail.com", AccessToken: "ya29.ultra-slow", ProjectID: "proj-u1", ExpiresAt: exp},
+							{ID: "u-alt", Provider: ProviderAntigravity, Tier: "Ultra", Email: "ultra-alt@gmail.com", AccessToken: "ya29.ultra-alt", ProjectID: "proj-u3", ExpiresAt: exp},
+							{ID: "p-alt", Provider: ProviderAntigravity, Tier: "Pro", Email: "pro-alt@gmail.com", AccessToken: "ya29.pro-alt", ProjectID: "proj-p2", ExpiresAt: exp},
+						},
+					})
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+						Body:       &stalledTrackingBody{ctx: r.Context()},
+					}, nil
+				}
+				sse := "data: {\"response\":{\"modelVersion\":\"gemini-3.8-flash\",\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ultra-isolated-hedge\"}]},\"finishReason\":\"STOP\"}]}}\n\ndata: [DONE]\n\n"
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+					Body:       io.NopCloser(strings.NewReader(sse)),
+				}, nil
+			}),
+		}
+
+		recUltra := httptest.NewRecorder()
+		resCarbon := NewResolver().Resolve("antigravity/gemini-4-carbon-high", nil)
+		reqCarbon := OpenAIChatRequest{
+			Model:    "antigravity/gemini-4-carbon-high",
+			Messages: []OpenAIChatMessage{{Role: "user", Content: json.RawMessage(`"ultra hedge test"`)}},
+		}
+		if err := upstreamUltra.HandleChatCompletion(context.Background(), recUltra, reqCarbon, resCarbon, ""); err != nil {
+			t.Fatalf("ultra hedge HandleChatCompletion failed: %v", err)
+		}
+		if gotAcc := recUltra.Header().Get("X-Omni-Gateway-Account"); gotAcc != "ultra-alt@gmail.com" {
+			t.Fatalf("expected flagship Carbon hedge to pick ultra-alt@gmail.com, got %q", gotAcc)
 		}
 	})
 }

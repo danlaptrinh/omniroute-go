@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"html"
@@ -91,6 +92,21 @@ func (s *Server) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// StartPDCAWatchdog launches the background 60-second PDCA self-healing watchdog loop bound to ctx.
+func (s *Server) StartPDCAWatchdog(ctx context.Context) {
+	StartPDCAWatchdog(ctx, 60*time.Second)
+}
+
+func (s *Server) handlePDCAStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost || r.URL.Query().Get("run") == "true" || r.URL.Query().Get("refresh") == "true" {
+		if !isAdminAuthorized(r) {
+			writeOpenAIError(w, http.StatusUnauthorized, "admin authentication required for on-demand PDCA cycle trigger", "unauthorized")
+			return
+		}
+	}
+	HandlePDCAStatus(w, r)
+}
+
 // Handler returns the root http.Handler with CORS and GZIP middleware applied.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -98,6 +114,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/health", s.handleRootOrHealth)
 	mux.HandleFunc("/healthz", s.handleRootOrHealth)
 	mux.HandleFunc("/v1/health", s.handleRootOrHealth)
+	mux.HandleFunc("/api/pdca/status", s.handlePDCAStatus)
+	mux.HandleFunc("/v1/pdca/status", s.handlePDCAStatus)
 	mux.HandleFunc("/ui", s.handleUI)
 	mux.HandleFunc("/dashboard", s.handleUI)
 	mux.HandleFunc("/dashboard/", s.handleUI)

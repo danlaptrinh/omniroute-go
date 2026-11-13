@@ -1352,10 +1352,9 @@ func inspectAntigravityAccount(ctx context.Context, acc *ConnectedAccount, detai
 		}
 	}
 	if !foundValidation && !foundPermanentBan && strings.TrimSpace(codeAssistBody.CurrentTier.ID) != "" {
-		nowSec := time.Now().Unix()
 		_, trackedVal := validationIsolatedAccounts.Load(acctKeyLower)
-		// Only auto-unlock <= 2h validation cooldowns (7200s); never wipe 24h (86400s) TOS_VIOLATION bans!
-		isValidationWindow := trackedVal || (acc.CooldownUntil > nowSec+600 && acc.CooldownUntil <= nowSec+7500)
+		// Only auto-unlock explicitly tracked VALIDATION_REQUIRED isolations; never wipe 24h (86400s) TOS_VIOLATION or streaming 403 bans!
+		isValidationWindow := trackedVal
 		if isValidationWindow {
 			validationIsolatedAccounts.Delete(acctKeyLower)
 			SyncAccountValidationState(acctKey, false)
@@ -1435,10 +1434,13 @@ func inspectAntigravityAccount(ctx context.Context, acc *ConnectedAccount, detai
 	if claudeWeeklyPercent <= 0 || (hasClaude5hFromSummary && claude5hPercent <= 0) {
 		RecordAccountModelRateLimit(acc.Email, "claude-opus-4-6-thinking", 6*24*time.Hour)
 		RecordAccountModelRateLimit(acc.Email, "claude-sonnet-4-6", 6*24*time.Hour)
-		used100 := 100
-		acc.WeeklyClaudePercent = &used100
+		zeroPct := 0
+		acc.WeeklyClaudePercent = &zeroPct
 	} else {
 		remPct := claudeWeeklyPercent
+		if hasClaude5hFromSummary && claude5hPercent < remPct {
+			remPct = claude5hPercent
+		}
 		acc.WeeklyClaudePercent = &remPct
 		ClearAccountModelRateLimit(acc.Email, "claude-opus-4-6-thinking")
 		ClearAccountModelRateLimit(acc.Email, "claude-sonnet-4-6")
