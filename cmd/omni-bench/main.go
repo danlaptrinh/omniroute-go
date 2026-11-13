@@ -43,7 +43,7 @@ var (
 		"antigravity/gemini-4-carbon-high",
 		"antigravity/gemini-4-carbon-low",
 		"antigravity/gemini-4-argon-high",
-		"antigravity/gemini-3.1-pro-high",
+		"antigravity/gemini-3.8-flash-medium",
 		"antigravity/gemini-3.8-flash-high",
 		"antigravity/gemini-3-flash",
 		"antigravity/gemini-3.5-flash-lite",

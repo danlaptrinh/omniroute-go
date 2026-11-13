@@ -284,7 +284,7 @@ func TestResolve(t *testing.T) {
 				"antigravity/gemini-4-carbon-high",
 				"antigravity/gemini-4-argon-high",
 				"alibaba/qwen3.8-max",
-				"antigravity/gemini-3.1-pro-high",
+				"antigravity/gemini-3.8-flash-high",
 			},
 		},
 		{

@@ -1956,7 +1956,7 @@ func selectProviderAccountCore(ctx context.Context, provider ProviderID, modelHi
 					}
 				} else {
 					nonUltraAll = append(nonUltraAll, c)
-					if !geminiExhausted && !IsAccountModelRateLimited(c.Email, "gemini-3.1-pro-high") {
+					if !geminiExhausted && !IsAccountModelRateLimited(c.Email, "gemini-3.8-flash-high") {
 						nonUltraCands = append(nonUltraCands, c)
 					}
 				}
@@ -2022,7 +2022,7 @@ func selectProviderAccountCore(ctx context.Context, provider ProviderID, modelHi
 					}
 				} else {
 					nonUltraAll = append(nonUltraAll, c)
-					if !IsAccountModelRateLimited(c.Email, "gemini-3.8-flash-tiered") {
+					if !IsAccountModelRateLimited(c.Email, "gemini-3.8-flash-high") {
 						nonUltraFallback = append(nonUltraFallback, c)
 					}
 					if claudeHealthy {

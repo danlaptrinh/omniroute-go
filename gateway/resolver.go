@@ -31,16 +31,16 @@ func DefaultCombos() []ComboModel {
 		"antigravity/gemini-4-argon-high",
 		"claude-code/claude-opus-5-5",
 		"alibaba/qwen3.8-max",
-		"antigravity/gemini-3.1-pro-high",
 		"antigravity/gemini-3.8-flash-high",
+		"antigravity/gemini-3.8-flash-medium",
 	}
 	seoRoles := []string{
 		"👑 Quản Lý Dự Án SEO (Ban ngày: Carbon 4 High)",
 		"👑 Quản Lý Dự Án SEO (Đồng quản lý: Argon 4 High)",
 		"👑 Quản Lý Dự Án SEO (Đồng quản lý: Claude Opus 5.5)",
 		"🌙 Quản Lý Dự Án SEO (Buổi tối: Qwen 3.8 Max ⚡ 40% Off)",
-		"✍️ Sub-Agent Viết Bài SEO (Antigravity Pro: Gemini 3.1 Pro High)",
-		"💻 Sub-Agent Code & Kỹ Thuật (Antigravity Pro: Gemini 3.8 Flash High)",
+		"✍️ Sub-Agent Viết Bài & Code SEO (Antigravity Pro: Gemini 3.8 Flash High)",
+		"⚡ Sub-Agent Tốc Độ Cao (Antigravity Pro: Gemini 3.8 Flash Medium)",
 	}
 	if isVietnamNightHours() {
 		seoModels = []string{
@@ -48,40 +48,40 @@ func DefaultCombos() []ComboModel {
 			"antigravity/gemini-4-carbon-high",
 			"antigravity/gemini-4-argon-high",
 			"claude-code/claude-opus-5-5",
-			"antigravity/gemini-3.1-pro-high",
 			"antigravity/gemini-3.8-flash-high",
+			"antigravity/gemini-3.8-flash-medium",
 		}
 		seoRoles = []string{
 			"🌙 Quản Lý Dự Án SEO Đang Bật (Buổi tối: Qwen 3.8 Max ⚡ 40% Off)",
 			"👑 Quản Lý Dự Án SEO Dự Phòng (Carbon 4 High)",
 			"👑 Quản Lý Dự Án SEO Dự Phòng (Argon 4 High)",
 			"👑 Quản Lý Dự Án SEO Dự Phòng (Claude Opus 5.5)",
-			"✍️ Sub-Agent Viết Bài SEO (Antigravity Pro: Gemini 3.1 Pro High)",
-			"💻 Sub-Agent Code & Kỹ Thuật (Antigravity Pro: Gemini 3.8 Flash High)",
+			"✍️ Sub-Agent Viết Bài & Code SEO (Antigravity Pro: Gemini 3.8 Flash High)",
+			"⚡ Sub-Agent Tốc Độ Cao (Antigravity Pro: Gemini 3.8 Flash Medium)",
 		}
 	}
 
 	return []ComboModel{
 		{
 			ID:          "auto/seo-master",
-			Name:        "👑 Quản Lý Dự Án SEO & Đàn Antigravity Pro (Carbon 4 / Argon 4 / Opus 5.5 / Tối Qwen 3.8 Max ➔ Gemini 3.1 Pro High Viết Bài & 3.8 Flash High Code)",
+			Name:        "👑 Quản Lý Dự Án SEO & Đàn Antigravity Pro (Carbon 4 / Argon 4 / Opus 5.5 / Tối Qwen 3.8 Max ➔ Gemini 3.8 Flash High Viết Bài & Code)",
 			Mode:        ComboModePipeline,
-			Description: "Phân tầng thông minh cho dàn 50 tài khoản Antigravity Pro: Quản lý dự án SEO bằng Gemini 4 Carbon High, Argon High & Claude Opus 5.5 (buổi tối tự chuyển sang Alibaba Qwen 3.8 Max ⚡ 40% Off Nights) ➔ Điều phối Gemini 3.1 Pro High viết bài chuẩn SEO và Gemini 3.8 Flash High viết code kỹ thuật.",
+			Description: "Phân tầng thông minh cho dàn 50 tài khoản Antigravity Pro: Quản lý dự án SEO bằng Gemini 4 Carbon High, Argon High & Claude Opus 5.5 (buổi tối tự chuyển sang Alibaba Qwen 3.8 Max ⚡ 40% Off Nights) ➔ Điều phối Gemini 3.8 Flash High viết bài chuẩn SEO và viết code kỹ thuật.",
 			Models:      seoModels,
 			Roles:       seoRoles,
-			HandoffPrompt: "Dựa trên Bản Kế Hoạch Quản Lý Dự Án SEO ở Bước 1, hãy triển khai bài viết chuẩn SEO chuyên sâu (bằng Gemini 3.1 Pro High) hoặc mã nguồn kỹ thuật hoàn chỉnh (bằng Gemini 3.8 Flash High).",
+			HandoffPrompt: "Dựa trên Bản Kế Hoạch Quản Lý Dự Án SEO ở Bước 1, hãy triển khai bài viết chuẩn SEO chuyên sâu hoặc mã nguồn kỹ thuật hoàn chỉnh (bằng Gemini 3.8 Flash High).",
 			BuiltIn:       true,
 		},
 		{
 			ID:          "auto/best-coding",
-			Name:        "Best Coding Failover (Gemini 4 Carbon & Argon High ➔ Alibaba Qwen 3.8 Max ➔ Gemini 3.1 Pro)",
+			Name:        "Best Coding Failover (Gemini 4 Carbon & Argon High ➔ Alibaba Qwen 3.8 Max ➔ Gemini 3.8 Flash High)",
 			Mode:        ComboModeFailover,
-			Description: "Ưu tiên Gemini 4 Carbon High & Argon High trên Antigravity Ultra, tự động failover sang Alibaba Token Plan Qwen 3.8 Max (⚡ 40% Off Nights) và Gemini 3.1 Pro High trên Antigravity Pro",
+			Description: "Ưu tiên Gemini 4 Carbon High & Argon High trên Antigravity Ultra, tự động failover sang Alibaba Token Plan Qwen 3.8 Max (⚡ 40% Off Nights) và Gemini 3.8 Flash High trên Antigravity Pro",
 			Models: []string{
 				"antigravity/gemini-4-carbon-high",
 				"antigravity/gemini-4-argon-high",
 				"alibaba/qwen3.8-max",
-				"antigravity/gemini-3.1-pro-high",
+				"antigravity/gemini-3.8-flash-high",
 				"claude-code/claude-opus-4-6-thinking",
 				"alibaba/qwen3-coder-plus",
 				"claude-code/claude-opus-5-5",
@@ -90,7 +90,7 @@ func DefaultCombos() []ComboModel {
 				"Primary Coder (Carbon 4 High)",
 				"Co-Primary Coder (Argon 4 High)",
 				"Evening & Coding Support (Alibaba Qwen 3.8 Max ⚡ 40% Off)",
-				"Pro Fallback Coder (Gemini 3.1 Pro High)",
+				"Pro Fallback Coder (Gemini 3.8 Flash High)",
 				"Secondary Fallback (Claude Code Opus Thinking)",
 				"Synthesizer Coder (Alibaba Qwen3 Coder)",
 				"Extended Fallback (Claude Opus 5.5)",

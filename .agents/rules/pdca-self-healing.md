@@ -29,7 +29,7 @@ All agents and workers operating within `omni-parallel-mcp` must adhere to this 
 
 1. **Strict Tier Isolation (Ultra vs. Pro)**:
    - **Antigravity Ultra Accounts**: Strictly reserved for flagship requests (`gemini-4-carbon*`, `gemini-4-argon*`, and `claude-opus*` / `claude-sonnet*` when Claude quota `> 0%`; `gemini-3.8-flash-high`/`-medium` on Ultra is permitted solely as the unthrottled backend for explicit `Carbon/Argon` requests). Ultra accounts must never serve direct `gemini-3.1-pro*`, direct `gemini-3.8-flash*`, `gemini-3-flash*`, sub-agent workers, or non-flagship hedges when healthy Pro slots exist.
-   - **Antigravity Pro Accounts**: Absorb `gemini-3.1-pro*`, direct `gemini-3.8-flash*` (preferring unthrottled `gemini-3.8-flash-tiered`), `gemini-3-flash*`, `gemini-3.5-flash-lite`, and `auto/fast` requests whenever Pro Gemini weekly quota is healthy (`> 10%`).
+   - **Antigravity Pro Accounts**: Absorb direct `gemini-3.8-flash*` (prioritizing `gemini-3.8-flash-high` first, with `gemini-3.8-flash-tiered` as fallback; `gemini-3.1-pro*` is discontinued on Pro and aliases to `gemini-3.8-flash-high`), Ultra stepdowns (`X-Omni-Gateway-Tier-Stepdown: gemini-3.8-flash-high`), `gemini-3-flash*`, `gemini-3.5-flash-lite`, and `auto/fast` requests whenever Pro Gemini weekly quota is healthy (`> 10%`).
 2. **Strict Cross-Provider & Transport Isolation**:
    - Upstream providers (`antigravity`, `claude-code`, `alibaba`) must maintain isolated credential storage, distinct HTTP/2 client session pools (`AccountHTTPTransport`), and independent cooldown states.
    - Rate limits (HTTP 429) on one provider or account must never contaminate other providers, accounts, or unrelated model families in `accountModelRateLimits` or `deadCCPAModelCache`.

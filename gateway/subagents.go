@@ -387,7 +387,7 @@ func listActiveAccountPool() []ConnectedAccount {
 }
 
 // buildDefaultSubAgentTasks decomposes a master goal into N specialized parallel Sub-Agent tasks:
-// - SEO Article & Content Writers use "antigravity/gemini-3.1-pro-high" (Gemini 3.1 Pro High)
+// - SEO Article & Content Writers use "antigravity/gemini-3.8-flash-high" (Gemini 3.8 Flash High)
 // - Coding & Technical SEO Workers use "antigravity/gemini-3.8-flash-high" (Gemini 3.8 Flash High)
 func buildDefaultSubAgentTasks(goal string, count int, mode string, managerPlan string) []SubAgentTask {
 	if count <= 0 {
@@ -398,7 +398,7 @@ func buildDefaultSubAgentTasks(goal string, count int, mode string, managerPlan 
 	}
 
 	const (
-		seoWriterModel = "antigravity/gemini-3.1-pro-high"
+		seoWriterModel = "antigravity/gemini-3.8-flash-high"
 		codeFlashModel = "antigravity/gemini-3.8-flash-high"
 	)
 
@@ -413,12 +413,12 @@ func buildDefaultSubAgentTasks(goal string, count int, mode string, managerPlan 
 		prefix string
 	}{
 		{
-			"Sub-Agent #1 • Viết Bài Pillar Chuẩn SEO (Gemini 3.1 Pro High)",
+			"Sub-Agent #1 • Viết Bài Pillar Chuẩn SEO (Gemini 3.8 Flash High)",
 			seoWriterModel,
 			"Viết bài Pillar Content chuẩn SEO chuyên sâu (tối ưu Title, Meta Description, Heading H1-H3, từ khóa LSI, E-E-A-T) cho chủ đề/dự án: ",
 		},
 		{
-			"Sub-Agent #2 • Viết Bài Cluster & Landing Page SEO (Gemini 3.1 Pro High)",
+			"Sub-Agent #2 • Viết Bài Cluster & Landing Page SEO (Gemini 3.8 Flash High)",
 			seoWriterModel,
 			"Viết bài vệ tinh Cluster Content & nội dung chuyển đổi Landing Page chuẩn SEO hấp dẫn người đọc cho chủ đề/dự án: ",
 		},
@@ -433,7 +433,7 @@ func buildDefaultSubAgentTasks(goal string, count int, mode string, managerPlan 
 			"Viết mã nguồn Schema Markup (JSON-LD Article, FAQPage, Product, Organization), OpenGraph, Sitemap và cấu hình Technical SEO cho: ",
 		},
 		{
-			"Sub-Agent #5 • Viết Bài FAQ, So Sánh & Review Chuẩn SEO (Gemini 3.1 Pro High)",
+			"Sub-Agent #5 • Viết Bài FAQ, So Sánh & Review Chuẩn SEO (Gemini 3.8 Flash High)",
 			seoWriterModel,
 			"Viết bài phân tích chuyên sâu, câu hỏi thường gặp (FAQ Rich Snippets) và đánh giá chi tiết chuẩn SEO cho: ",
 		},
@@ -443,7 +443,7 @@ func buildDefaultSubAgentTasks(goal string, count int, mode string, managerPlan 
 			"Viết code backend/script tự động hóa liên kết nội bộ (Internal Linking), API hoặc công cụ hỗ trợ SEO cho: ",
 		},
 		{
-			"Sub-Agent #7 • Viết Bài Case Study & Hướng Dẫn Chi Tiết (Gemini 3.1 Pro High)",
+			"Sub-Agent #7 • Viết Bài Case Study & Hướng Dẫn Chi Tiết (Gemini 3.8 Flash High)",
 			seoWriterModel,
 			"Viết bài hướng dẫn từng bước (How-to Guide) và Case Study thực tế chuẩn SEO giữ chân người dùng (Time on Site) cho: ",
 		},
@@ -463,7 +463,7 @@ func buildDefaultSubAgentTasks(goal string, count int, mode string, managerPlan 
 			prompt = fmt.Sprintf("[Module Code #%d/%d] Viết code hoàn chỉnh, tối ưu hiệu năng cho yêu cầu: %s%s", i+1, count, goal, planContext)
 		} else if mode == "content-only" {
 			workerModel = seoWriterModel
-			role = fmt.Sprintf("Sub-Agent #%d • Viết Bài Chuẩn SEO #%d (Gemini 3.1 Pro High)", i+1, i+1)
+			role = fmt.Sprintf("Sub-Agent #%d • Viết Bài Chuẩn SEO #%d (Gemini 3.8 Flash High)", i+1, i+1)
 			prompt = fmt.Sprintf("[Bài viết chuẩn SEO #%d/%d] Viết bài chuẩn SEO chi tiết, độc đáo (Unique 100%%), đầy đủ H1-H3 cho chủ đề: %s%s", i+1, count, goal, planContext)
 		} else if i < len(seoAndCodeSpecialties) {
 			spec := seoAndCodeSpecialties[i]
@@ -471,10 +471,10 @@ func buildDefaultSubAgentTasks(goal string, count int, mode string, managerPlan 
 			workerModel = spec.model
 			prompt = spec.prefix + goal + planContext
 		} else {
-			// Alternate between Gemini 3.1 Pro High (Viết bài SEO) and Gemini 3.8 Flash High (Viết Code)
+			// Alternate between Viết bài SEO and Viết Code using Gemini 3.8 Flash High on Antigravity Pro
 			if i%2 == 0 {
 				workerModel = seoWriterModel
-				role = fmt.Sprintf("Sub-Agent #%d • Viết Bài SEO Chuyên Sâu (Gemini 3.1 Pro High)", i+1)
+				role = fmt.Sprintf("Sub-Agent #%d • Viết Bài SEO Chuyên Sâu (Gemini 3.8 Flash High)", i+1)
 				prompt = fmt.Sprintf("[Bài viết SEO mở rộng #%d/%d] Viết bài chuẩn SEO chuyên sâu triển khai khía cạnh số %d của dự án: %s%s", i+1, count, i+1, goal, planContext)
 			} else {
 				workerModel = codeFlashModel
@@ -494,7 +494,7 @@ func buildDefaultSubAgentTasks(goal string, count int, mode string, managerPlan 
 
 // ExecuteSubAgentSwarm runs a 2-tier Hierarchical Swarm:
 //   - Tier 1 (SEO & Project Manager): Uses Gemini 4 Argon High / Claude Opus 5.5 (Day) or Alibaba Qwen 3.8 Max ⚡40% Off (Night) to create the Master SEO & Technical Plan.
-//   - Tier 2 (50 Antigravity Pro Workers): Runs N Sub-Agents 100% simultaneously in parallel Goroutines using Gemini 3.1 Pro High (SEO Article Writing) & Gemini 3.8 Flash High (Coding).
+//   - Tier 2 (50 Antigravity Pro Workers): Runs N Sub-Agents 100% simultaneously in parallel Goroutines using Gemini 3.8 Flash High (SEO Article Writing & Coding).
 func (s *Server) ExecuteSubAgentSwarm(
 	ctx context.Context,
 	mode string,
@@ -515,7 +515,7 @@ func (s *Server) ExecuteSubAgentSwarm(
 	var managerTokens int
 
 	if strings.TrimSpace(masterGoal) != "" && len(customTasks) == 0 {
-		mgrSys := "Bạn là Quản Lý Dự Án SEO & Kiến Trúc Sư Trưởng (Lead SEO & Technical Project Manager). Hãy lập: (1) Dàn ý chiến lược SEO tổng thể (Từ khóa chính/LSI, Search Intent, định hướng cho đội Gemini 3.1 Pro High viết bài & đội Gemini 3.8 Flash High viết code), và (2) Sơ Đồ Liên Kết Nội Bộ Chéo (SHARED INTERNAL LINK MATRIX: danh sách 5-8 cặp Anchor Text ➔ URL Slug gợi ý để tất cả các bài viết của các Sub-Agents tự động chèn link chéo cho nhau không trùng lặp). Trình bày súc tích trong khoảng 180-280 từ."
+		mgrSys := "Bạn là Quản Lý Dự Án SEO & Kiến Trúc Sư Trưởng (Lead SEO & Technical Project Manager). Hãy lập: (1) Dàn ý chiến lược SEO tổng thể (Từ khóa chính/LSI, Search Intent, định hướng cho đội Gemini 3.8 Flash High viết bài chuẩn SEO & viết code kỹ thuật), và (2) Sơ Đồ Liên Kết Nội Bộ Chéo (SHARED INTERNAL LINK MATRIX: danh sách 5-8 cặp Anchor Text ➔ URL Slug gợi ý để tất cả các bài viết của các Sub-Agents tự động chèn link chéo cho nhau không trùng lặp). Trình bày súc tích trong khoảng 180-280 từ."
 		rawMgrSys, _ := json.Marshal(mgrSys)
 		rawMgrUser, _ := json.Marshal(masterGoal)
 
@@ -566,15 +566,15 @@ func (s *Server) ExecuteSubAgentSwarm(
 			if strings.TrimSpace(t.Role) == "" {
 				t.Role = fmt.Sprintf("Sub-Agent #%d", i+1)
 			}
-			// Auto-assign Gemini 3.8 Flash High for code tasks and Gemini 3.1 Pro High for SEO writing tasks
+			// Auto-assign Gemini 3.8 Flash High for both code tasks and SEO writing tasks on Antigravity Pro
 			if strings.TrimSpace(t.Model) == "" || t.Model == "auto-worker" {
 				lowerP := strings.ToLower(t.Prompt)
 				if strings.Contains(lowerP, "code") || strings.Contains(lowerP, "html") || strings.Contains(lowerP, "schema") || strings.Contains(lowerP, "api") || strings.Contains(lowerP, "script") {
 					t.Model = "antigravity/gemini-3.8-flash-high"
 					t.Role += " • Code (Gemini 3.8 Flash High)"
 				} else {
-					t.Model = "antigravity/gemini-3.1-pro-high"
-					t.Role += " • Viết Bài SEO (Gemini 3.1 Pro High)"
+					t.Model = "antigravity/gemini-3.8-flash-high"
+					t.Role += " • Viết Bài SEO (Gemini 3.8 Flash High)"
 				}
 			}
 			tasks = append(tasks, t)
@@ -753,7 +753,7 @@ func (s *Server) ExecuteSubAgentSwarm(
 		ManagerAccount:    managerAccountUsed,
 		ManagerPlan:       managerPlanText,
 		SharedLinkMatrix:  sharedLinkMatrix,
-		ContentModel:      "antigravity/gemini-3.1-pro-high",
+		ContentModel:      "antigravity/gemini-3.8-flash-high",
 		CodingModel:       "antigravity/gemini-3.8-flash-high",
 		IsNightMode:       isNight,
 		TotalSubAgents:    len(results),
@@ -1101,7 +1101,7 @@ func (s *Server) handleSubAgents(w http.ResponseWriter, r *http.Request) {
 			"is_night_mode":        isVietnamNightHours(),
 			"day_manager_models":   []string{"antigravity/gemini-4-carbon-high", "antigravity/gemini-4-argon-high", "claude-code/claude-opus-5-5"},
 			"night_manager_model":  "alibaba/qwen3.8-max",
-			"seo_writer_model":     "antigravity/gemini-3.1-pro-high",
+			"seo_writer_model":     "antigravity/gemini-3.8-flash-high",
 			"coding_worker_model":  "antigravity/gemini-3.8-flash-high",
 			"active_sub_agents":    atomic.LoadInt64(&activeSubAgentsNow),
 			"total_sub_agents_run": atomic.LoadInt64(&totalSubAgentsRun),

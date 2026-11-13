@@ -1187,13 +1187,13 @@ const gatewayUIHTML = `<!DOCTYPE html>
               <option value="gemini-4-carbon-medium">gemini-4-carbon-medium</option>
               <option value="gemini-4-argon-high">gemini-4-argon-high (Argon High Thinking)</option>
               <option value="gemini-4-argon-medium">gemini-4-argon-medium</option>
-              <option value="gemini-3.1-pro-high">gemini-3.1-pro-high (Gemini 3.1 Pro High)</option>
-              <option value="gemini-3.1-pro-low">gemini-3.1-pro-low (Gemini 3.1 Pro Low)</option>
-              <option value="gemini-3.8-flash-high">gemini-3.8-flash-high</option>
+              <option value="gemini-3.8-flash-high">gemini-3.8-flash-high (Gemini 3.8 Flash High - Pro)</option>
+              <option value="gemini-3.8-flash-medium">gemini-3.8-flash-medium (Gemini 3.8 Flash Medium)</option>
+              <option value="gemini-3-flash">gemini-3-flash (Gemini 3 Flash)</option>
               <option value="antigravity/claude-opus-4-6-thinking">antigravity/claude-opus-4-6-thinking</option>
             </optgroup>
             <optgroup label="🔗 Combo Đa Mô Hình (Pipeline, Hội Đồng MoA &amp; Night Discount)">
-              <option value="auto/seo-master">auto/seo-master (👑 Quản Lý SEO: Carbon 4 + Argon 4 + Opus 5.5 ➔ Gemini 3.1 Pro / 3.8 Flash)</option>
+              <option value="auto/seo-master">auto/seo-master (👑 Quản Lý SEO: Carbon 4 + Argon 4 + Opus 5.5 ➔ Gemini 3.8 Flash High)</option>
               <option value="auto/team-coding">auto/team-coding (🔗 Pipeline: Opus 5.5 Kiến trúc ➔ Carbon 4 / Argon 4 Code ➔ Qwen 3.8 Max)</option>
               <option value="auto/council-pro">auto/council-pro (🧠 Hội Đồng Song Song: Carbon 4 + Argon 4 + Opus 5.5 + Qwen 3.8 Max)</option>
               <option value="auto/night-coding">auto/night-coding (⚡ Night 40-50% Off: Qwen 3.8 Max ➔ DeepSeek V4 Pro ➔ Carbon 4 / Argon 4)</option>
@@ -1904,8 +1904,8 @@ docker compose up -d --build</pre>
         <div class="setting-card" style="padding:13px;border-left:3px solid #10b981;background:rgba(16,185,129,0.06);">
           <div style="font-weight:700;font-size:13px;color:#34d399;">✍️ Tầng 2A: Đội Sub-Agents Viết Bài Chuẩn SEO</div>
           <div style="font-size:11.5px;color:#e2e8f0;margin-top:5px;line-height:1.5;">
-            • <strong>Model chuyên trách:</strong> <code>antigravity/gemini-3.1-pro-high</code> (<strong>Gemini 3.1 Pro High</strong>)<br/>
-            • Chạy song song trên <strong>50 tài khoản Antigravity Pro</strong> để viết bài chuẩn SEO E-E-A-T, Content Pillar, Semantic Keywords mà không tốn hạn mức Argon/Opus.
+            • <strong>Model chuyên trách:</strong> <code>antigravity/gemini-3.8-flash-high</code> (<strong>Gemini 3.8 Flash High</strong>)<br/>
+            • Chạy song song trên <strong>50 tài khoản Antigravity Pro</strong> để viết bài chuẩn SEO E-E-A-T, Content Pillar, Semantic Keywords mà không tốn hạn mức Ultra Carbon/Argon.
           </div>
         </div>
         <div class="setting-card" style="padding:13px;border-left:3px solid #38bdf8;background:rgba(56,189,248,0.06);">
@@ -1937,7 +1937,7 @@ docker compose up -d --build</pre>
       <h2>🚀 Kích Hoạt Quản Lý Dự Án SEO &amp; Đàn Sub-Agents Chạy Cùng Lúc (50 Antigravity Pro Swarm)</h2>
       <div style="font-size:12.5px;color:var(--muted);margin-bottom:14px;">
         <strong>Bước 1:</strong> Model Quản Lý Dự Án SEO (Ban ngày: <code>antigravity/gemini-4-carbon-high</code>, <code>antigravity/gemini-4-argon-high</code> &amp; <code>claude-code/claude-opus-5-5</code> | Buổi tối: <code>alibaba/qwen3.8-max</code> ⚡40% Off) lập kế hoạch tổng thể.<br/>
-        <strong>Bước 2:</strong> Phóng đồng loạt <strong>N Sub-Agents chạy song song</strong> trên 50 tài khoản Antigravity Pro: <code>antigravity/gemini-3.1-pro-high</code> (<strong>Gemini 3.1 Pro High</strong>) viết bài chuẩn SEO &amp; <code>antigravity/gemini-3.8-flash-high</code> (<strong>Gemini 3.8 Flash High</strong>) viết code kỹ thuật.
+        <strong>Bước 2:</strong> Phóng đồng loạt <strong>N Sub-Agents chạy song song</strong> trên 50 tài khoản Antigravity Pro bằng <code>antigravity/gemini-3.8-flash-high</code> (<strong>Gemini 3.8 Flash High</strong>) cho cả viết bài chuẩn SEO &amp; viết code kỹ thuật.
       </div>
 
       <div class="grid-2">
@@ -1956,10 +1956,10 @@ docker compose up -d --build</pre>
         <div>
           <label class="form-label">Chế độ Phân Công Đội Sub-Agents (Viết Bài SEO &amp; Code)</label>
           <select id="saSwarmRoleModeSelect">
-            <option value="seo-and-code" selected>👑 Kết Hợp: Quản Lý SEO ➔ Viết Bài (Gemini 3.1 Pro High) + Code (Gemini 3.8 Flash High)</option>
-            <option value="content-only">✍️ Chuyên Viết Bài Hàng Loạt: Quản Lý SEO ➔ 100% Sub-Agents Gemini 3.1 Pro High</option>
+            <option value="seo-and-code" selected>👑 Kết Hợp: Quản Lý SEO ➔ Viết Bài + Code (Gemini 3.8 Flash High - Pro)</option>
+            <option value="content-only">✍️ Chuyên Viết Bài Hàng Loạt: Quản Lý SEO ➔ 100% Sub-Agents Gemini 3.8 Flash High</option>
             <option value="coding-only">💻 Chuyên Viết Code Hàng Loạt: Quản Lý SEO ➔ 100% Sub-Agents Gemini 3.8 Flash High</option>
-            <option value="night-seo">🌙 Chế Độ Đêm (⚡ 40% Off): Quản Lý SEO Qwen 3.8 Max ➔ Gemini 3.1 Pro High &amp; 3.8 Flash High</option>
+            <option value="night-seo">🌙 Chế Độ Đêm (⚡ 40% Off): Quản Lý SEO Qwen 3.8 Max ➔ Gemini 3.8 Flash High</option>
           </select>
         </div>
       </div>
@@ -4616,8 +4616,8 @@ docker compose up -d --build</pre>
           {id: 'antigravity/gemini-4-argon-high', name: 'antigravity/gemini-4-argon-high (Argon 4 High Thinking)'},
           {id: 'antigravity/gemini-4-argon-medium', name: 'antigravity/gemini-4-argon-medium'},
           {id: 'antigravity/gemini-4-argon-low', name: 'antigravity/gemini-4-argon-low'},
-          {id: 'antigravity/gemini-3.1-pro-high', name: 'antigravity/gemini-3.1-pro-high'},
-          {id: 'antigravity/gemini-3.8-flash-high', name: 'antigravity/gemini-3.8-flash-high'},
+          {id: 'antigravity/gemini-3.8-flash-high', name: 'antigravity/gemini-3.8-flash-high (Gemini 3.8 Flash High - Pro)'},
+          {id: 'antigravity/gemini-3.8-flash-medium', name: 'antigravity/gemini-3.8-flash-medium'},
           {id: 'antigravity/claude-opus-4-6-thinking', name: 'antigravity/claude-opus-4-6-thinking'}
         ]
       },
@@ -5176,7 +5176,7 @@ docker compose up -d --build</pre>
         mode = 'custom-tasks';
         const lines = goal.split('\n').map(l => l.trim()).filter(Boolean);
         let workerModel = 'auto-worker';
-        if (roleMode === 'content-only') workerModel = 'antigravity/gemini-3.1-pro-high';
+        if (roleMode === 'content-only') workerModel = 'antigravity/gemini-3.8-flash-high';
         else if (roleMode === 'coding-only') workerModel = 'antigravity/gemini-3.8-flash-high';
 
         customTasks = lines.map((line, i) => ({
@@ -5189,7 +5189,7 @@ docker compose up -d --build</pre>
 
       btn.disabled = true;
       btn.textContent = '⏳ Quản Lý SEO đang lập kế hoạch & chạy ' + (customTasks.length || count) + ' Sub-Agents...';
-      statusBox.innerHTML = '<span style="color:#38bdf8;">👑 Bước 1: Quản Lý Dự Án SEO (Argon 4 / Opus 5.5 / Tối Qwen 3.8 Max) lập kế hoạch ➔ Bước 2: Phóng ' + (customTasks.length || count) + ' Sub-Agents (Gemini 3.1 Pro High viết bài & Gemini 3.8 Flash High viết code)...</span>';
+      statusBox.innerHTML = '<span style="color:#38bdf8;">👑 Bước 1: Quản Lý Dự Án SEO (Carbon 4 / Argon 4 / Opus 5.5 / Tối Qwen 3.8 Max) lập kế hoạch ➔ Bước 2: Phóng ' + (customTasks.length || count) + ' Sub-Agents (Gemini 3.8 Flash High trên Pro)...</span>';
 
       if (saPollingTimer) clearInterval(saPollingTimer);
       saPollingTimer = setInterval(loadSubAgentsView, 900);
@@ -5236,7 +5236,7 @@ docker compose up -d --build</pre>
         managerCard = '<div style="background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.35);border-radius:9px;padding:12px;margin-bottom:14px;">' +
           '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;margin-bottom:6px;">' +
             '<div><strong style="color:#fbbf24;font-size:13px;">👑 Quản Lý Dự Án SEO (Lead Orchestrator): ' + htmlEscape(summary.manager_model || 'antigravity/gemini-4-argon-high') + '</strong>' + nightTag + '</div>' +
-            '<span style="font-size:11.5px;color:#cbd5e1;font-family:monospace;">Tài khoản Quản lý: <strong>' + htmlEscape(summary.manager_account || 'auto') + '</strong> | Viết bài: <code>gemini-3.1-pro-high</code> | Code: <code>gemini-3.8-flash-high</code></span>' +
+            '<span style="font-size:11.5px;color:#cbd5e1;font-family:monospace;">Tài khoản Quản lý: <strong>' + htmlEscape(summary.manager_account || 'auto') + '</strong> | Pro Sub-Agents: <code>gemini-3.8-flash-high</code></span>' +
           '</div>' +
           (summary.manager_plan ? '<pre style="max-height:190px;overflow-y:auto;font-size:11.5px;margin:0;background:#080b11;color:#fde68a;">' + htmlEscape(summary.manager_plan) + '</pre>' : '') +
         '</div>';

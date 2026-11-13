@@ -353,12 +353,12 @@ func (u *GatewayUpstream) executeComboPipeline(
 		if isCodeTask {
 			step2Candidates = []ResolvedModel{
 				ResolveModel("antigravity/gemini-3.8-flash-high", nil),
-				ResolveModel("antigravity/gemini-3.1-pro-high", nil),
+				ResolveModel("antigravity/gemini-3.8-flash-medium", nil),
 			}
 		} else {
 			step2Candidates = []ResolvedModel{
-				ResolveModel("antigravity/gemini-3.1-pro-high", nil),
 				ResolveModel("antigravity/gemini-3.8-flash-high", nil),
+				ResolveModel("antigravity/gemini-3.8-flash-medium", nil),
 			}
 		}
 	}

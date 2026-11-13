@@ -235,9 +235,10 @@ func TestWeeklyClaudePercentRemainingSemanticsAndBucketB(t *testing.T) {
 	}
 }
 
-// 3. Pro accounts on DefaultCCPAEndpoint prioritize unthrottled "gemini-3.8-flash-tiered" FIRST
-// ahead of throttled "gemini-3.8-flash-high" (-n).
-func TestProAccountPrioritizesGemini38FlashTieredFirst(t *testing.T) {
+// 3. Pro accounts on DefaultCCPAEndpoint prioritize "gemini-3.8-flash-high" FIRST
+// ahead of "gemini-3.8-flash-tiered" for gemini-3.8-flash-high and legacy gemini-3.1-pro-high,
+// and prioritize "gemini-3.8-flash-medium" FIRST for gemini-3.8-flash-medium.
+func TestProAccountPrioritizesGemini38FlashHighFirst(t *testing.T) {
 	setupUltraFlagshipPDCATestEnv(t)
 
 	exp := time.Now().Add(2 * time.Hour).Unix()
@@ -250,14 +251,35 @@ func TestProAccountPrioritizesGemini38FlashTieredFirst(t *testing.T) {
 	}
 
 	for _, mod := range []string{
-		"antigravity/gemini-3.1-pro-high",
 		"antigravity/gemini-3.8-flash-high",
-		"antigravity/gemini-3.8-flash-medium",
+		"antigravity/gemini-3.1-pro-high",
 	} {
 		cands := buildCCPACandidatesWithCache(DefaultCCPAEndpoint, "advietnam789@gmail.com", ResolveModel(mod, nil), false)
-		if len(cands) == 0 || cands[0] != "gemini-3.8-flash-tiered" {
-			t.Fatalf("expected Pro account candidates[0] for %s to be gemini-3.8-flash-tiered, got %v", mod, cands)
+		if len(cands) < 2 {
+			t.Fatalf("expected at least 2 candidates for %s on Pro account, got %v", mod, cands)
 		}
+		if cands[0] != "gemini-3.8-flash-high" {
+			t.Fatalf("expected Pro account cands[0] for %s to be gemini-3.8-flash-high, got %q (all: %v)", mod, cands[0], cands)
+		}
+		if cands[1] != "gemini-3.8-flash-tiered" {
+			t.Fatalf("expected Pro account cands[1] for %s to be gemini-3.8-flash-tiered, got %q (all: %v)", mod, cands[1], cands)
+		}
+		for _, c := range cands {
+			if strings.Contains(c, "gemini-3.1-pro") {
+				t.Fatalf("expected zero gemini-3.1-pro candidates for %s on discontinued Pro account, found %q (all: %v)", mod, c, cands)
+			}
+		}
+	}
+
+	candsMed := buildCCPACandidatesWithCache(DefaultCCPAEndpoint, "advietnam789@gmail.com", ResolveModel("antigravity/gemini-3.8-flash-medium", nil), false)
+	if len(candsMed) < 2 {
+		t.Fatalf("expected at least 2 candidates for antigravity/gemini-3.8-flash-medium on Pro account, got %v", candsMed)
+	}
+	if candsMed[0] != "gemini-3.8-flash-medium" {
+		t.Fatalf("expected Pro account cands[0] for gemini-3.8-flash-medium to be gemini-3.8-flash-medium, got %q (all: %v)", candsMed[0], candsMed)
+	}
+	if candsMed[1] != "gemini-3.8-flash-high" {
+		t.Fatalf("expected Pro account cands[1] for gemini-3.8-flash-medium to be gemini-3.8-flash-high, got %q (all: %v)", candsMed[1], candsMed)
 	}
 }
 

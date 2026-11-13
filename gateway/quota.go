@@ -489,8 +489,8 @@ func buildInstantQuotaSummary(auth SavedGatewayAuth) *QuotaSummary {
 				detail.SupportedModels = []string{
 					"antigravity/gemini-4-carbon-high",
 					"antigravity/gemini-4-argon-high",
-					"antigravity/gemini-3.1-pro-high",
 					"antigravity/gemini-3.8-flash-high",
+					"antigravity/gemini-3.8-flash-medium",
 					"antigravity/gemini-3-flash",
 					"antigravity/claude-opus-4-6-thinking",
 					"antigravity/claude-sonnet-4-6",
@@ -501,8 +501,8 @@ func buildInstantQuotaSummary(auth SavedGatewayAuth) *QuotaSummary {
 					{ModelID: "group-gemini-weekly", DisplayName: "Gemini Models (Giới hạn Tuần)", RemainingPercent: geminiWeekly, ResetTime: "⏱️ Đặt lại sau 5d", Status: getQuotaStatus(geminiWeekly)},
 					{ModelID: "antigravity/gemini-4-carbon-high", DisplayName: "Gemini 4 Carbon (High)", RemainingPercent: 98, ResetTime: resetText, Status: "good"},
 					{ModelID: "gemini-4-argon-high", DisplayName: "Gemini 4 Argon (High)", RemainingPercent: 98, ResetTime: resetText, Status: "good"},
-					{ModelID: "gemini-3.1-pro-high", DisplayName: "Gemini 3.1 Pro (High / Low)", RemainingPercent: 98, ResetTime: resetText, Status: "good"},
-					{ModelID: "gemini-3-flash", DisplayName: "Gemini 3 Flash / 3.8 Flash", RemainingPercent: 98, ResetTime: resetText, Status: "good"},
+					{ModelID: "gemini-3.8-flash-high", DisplayName: "Gemini 3.8 Flash (High)", RemainingPercent: 98, ResetTime: resetText, Status: "good"},
+					{ModelID: "gemini-3-flash", DisplayName: "Gemini 3 Flash", RemainingPercent: 98, ResetTime: resetText, Status: "good"},
 				}
 			}
 		}
@@ -1736,8 +1736,8 @@ func inspectAntigravityAccount(ctx context.Context, acc *ConnectedAccount, detai
 		"antigravity/gemini-4-carbon-high",
 		"antigravity/gemini-4-carbon-medium",
 		"antigravity/gemini-4-argon-high",
-		"antigravity/gemini-3.1-pro-high",
 		"antigravity/gemini-3.8-flash-high",
+		"antigravity/gemini-3.8-flash-medium",
 		"antigravity/gemini-3-flash",
 		"antigravity/gemini-3.1-flash-image",
 		"antigravity/claude-opus-4-6-thinking",
@@ -1809,15 +1809,15 @@ func inspectAntigravityAccount(ctx context.Context, acc *ConnectedAccount, detai
 			Status:           getQuotaStatus(geminiProPercent),
 		},
 		{
-			ModelID:          "gemini-3.1-pro-high",
-			DisplayName:      "Gemini 3.1 Pro (High / Low)",
-			RemainingPercent: geminiProPercent,
-			ResetTime:        geminiProReset,
-			Status:           getQuotaStatus(geminiProPercent),
+			ModelID:          "gemini-3.8-flash-high",
+			DisplayName:      "Gemini 3.8 Flash (High)",
+			RemainingPercent: geminiFlashPercent,
+			ResetTime:        geminiFlashReset,
+			Status:           getQuotaStatus(geminiFlashPercent),
 		},
 		{
 			ModelID:          "gemini-3-flash",
-			DisplayName:      "Gemini 3 Flash / 3.8 Flash",
+			DisplayName:      "Gemini 3 Flash",
 			RemainingPercent: geminiFlashPercent,
 			ResetTime:        geminiFlashReset,
 			Status:           getQuotaStatus(geminiFlashPercent),

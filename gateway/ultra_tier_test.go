@@ -323,15 +323,15 @@ func TestCarbonArgonStuckFailsOverToProGemini31ProHigh(t *testing.T) {
 			return
 		}
 
-		// Pro account succeeds on gemini-3.1-pro-high
-		if authHdr == "Bearer ya29.pro1" && (payload.Model == "gemini-3.1-pro-high" || strings.Contains(payload.Model, "gemini-3.1-pro")) {
+		// Pro account succeeds on gemini-3.8-flash-high (and variants)
+		if authHdr == "Bearer ya29.pro1" && strings.Contains(payload.Model, "gemini-3.8-flash") {
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.WriteHeader(http.StatusOK)
-			_, _ = fmt.Fprintf(w, "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"served-by-pro-gemini-3.1\"}]}}]}}\n\ndata: [DONE]\n\n")
+			_, _ = fmt.Fprintf(w, "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"served-by-pro-gemini-3.8-flash-high\"}]}}]}}\n\ndata: [DONE]\n\n")
 			return
 		}
 
-		// Fallback for flash
+		// Fallback for other flash
 		if strings.Contains(payload.Model, "flash") {
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.WriteHeader(http.StatusOK)
@@ -390,12 +390,12 @@ func TestCarbonArgonStuckFailsOverToProGemini31ProHigh(t *testing.T) {
 		t.Fatalf("expected stepdown to Pro account pro1@gmail.com, got %q", gotAcc)
 	}
 
-	if gotStepdown := rec.Header().Get("X-Omni-Gateway-Tier-Stepdown"); gotStepdown != "gemini-3.1-pro-high" {
-		t.Fatalf("expected X-Omni-Gateway-Tier-Stepdown = gemini-3.1-pro-high, got %q", gotStepdown)
+	if gotStepdown := rec.Header().Get("X-Omni-Gateway-Tier-Stepdown"); gotStepdown != "gemini-3.8-flash-high" {
+		t.Fatalf("expected X-Omni-Gateway-Tier-Stepdown = gemini-3.8-flash-high, got %q", gotStepdown)
 	}
 
-	if !strings.Contains(rec.Body.String(), "served-by-pro-gemini-3.1") {
-		t.Fatalf("expected response served by Pro gemini-3.1, got: %s", rec.Body.String())
+	if !strings.Contains(rec.Body.String(), "served-by-pro-gemini-3.8-flash-high") {
+		t.Fatalf("expected response served by Pro gemini-3.8-flash-high, got: %s", rec.Body.String())
 	}
 
 	// Verify Claude models were NEVER invoked

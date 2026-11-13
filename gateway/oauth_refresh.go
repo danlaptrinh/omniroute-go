@@ -739,14 +739,14 @@ func ExecuteAntigravityWithReactiveRefresh(
 				releaseInFlight = rel
 
 				// Tier-Aware Ultra fallback: If requested model is Carbon or Argon High, but an Ultra account was not used
-				// (because all Ultra accounts are exhausted), step down to Gemini 3.1 Pro High on the Pro account for coding continuity.
+				// (because all Ultra accounts are exhausted), step down to Gemini 3.8 Flash High on the Pro account for coding continuity.
 				if HasConfiguredUltraAccount() &&
 					IsCarbonOrArgonHighOrMedium(target.CanonicalID) &&
 					!strings.EqualFold(strings.TrimSpace(acc.Tier), "Ultra") {
-					target = ResolveModel("antigravity/gemini-3.1-pro-high", nil)
+					target = ResolveModel("antigravity/gemini-3.8-flash-high", nil)
 					modelHint = target.CanonicalID
-					w.Header().Set("X-Omni-Gateway-Tier-Stepdown", "gemini-3.1-pro-high")
-					log.Printf("[omniroute-go] Antigravity Ultra accounts exhausted for %q; stepping down to Gemini 3.1 Pro High on Pro account %s for coding continuity",
+					w.Header().Set("X-Omni-Gateway-Tier-Stepdown", "gemini-3.8-flash-high")
+					log.Printf("[omniroute-go] Antigravity Ultra accounts exhausted for %q; stepping down to Gemini 3.8 Flash High on Pro account %s for coding continuity",
 						req.Model, accountEmail)
 				}
 			} else {
@@ -972,11 +972,11 @@ func ExecuteAntigravityWithReactiveRefresh(
 			}
 
 			// All Ultra accounts are stuck/exhausted or this was the last Ultra account:
-			// Jump immediately to Gemini 3.1 Pro High on Pro accounts to avoid hanging!
-			log.Printf("[omniroute-go] Carbon/Argon stuck or exhausted on Ultra accounts (%v); immediately jumping to antigravity/gemini-3.1-pro-high on Pro accounts", err)
-			target = ResolveModel("antigravity/gemini-3.1-pro-high", nil)
+			// Jump immediately to Gemini 3.8 Flash High on Pro accounts to avoid hanging!
+			log.Printf("[omniroute-go] Carbon/Argon stuck or exhausted on Ultra accounts (%v); immediately jumping to antigravity/gemini-3.8-flash-high on Pro accounts", err)
+			target = ResolveModel("antigravity/gemini-3.8-flash-high", nil)
 			modelHint = target.CanonicalID
-			w.Header().Set("X-Omni-Gateway-Tier-Stepdown", "gemini-3.1-pro-high")
+			w.Header().Set("X-Omni-Gateway-Tier-Stepdown", "gemini-3.8-flash-high")
 			forcedAcc = nil
 			if attempt+1 >= maxAttempts {
 				maxAttempts = attempt + 2
@@ -996,11 +996,11 @@ func ExecuteAntigravityWithReactiveRefresh(
 				forcedAcc = nil
 				continue
 			}
-			if HasHealthyNonUltraAntigravityAccount("gemini-3.1-pro-high") {
-				log.Printf("[omniroute-go] Claude flagship quota exhausted across Antigravity accounts (%v); stepping down to antigravity/gemini-3.1-pro-high on Pro accounts", err)
-				target = ResolveModel("antigravity/gemini-3.1-pro-high", nil)
+			if HasHealthyNonUltraAntigravityAccount("gemini-3.8-flash-high") {
+				log.Printf("[omniroute-go] Claude flagship quota exhausted across Antigravity accounts (%v); stepping down to antigravity/gemini-3.8-flash-high on Pro accounts", err)
+				target = ResolveModel("antigravity/gemini-3.8-flash-high", nil)
 				modelHint = target.CanonicalID
-				w.Header().Set("X-Omni-Gateway-Tier-Stepdown", "gemini-3.1-pro-high")
+				w.Header().Set("X-Omni-Gateway-Tier-Stepdown", "gemini-3.8-flash-high")
 				forcedAcc = nil
 				if attempt+1 >= maxAttempts {
 					maxAttempts = attempt + 2

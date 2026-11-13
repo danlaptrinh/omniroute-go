@@ -185,7 +185,7 @@ func TestCarbonStepdownToProOnDefaultEndpointUsesGemini38FlashHighWithoutCooldow
 		t.Fatalf("saveTestGatewayAuth failed: %v", err)
 	}
 
-	workingCCPAModelCache.Store(DefaultCCPAEndpoint+"|acc:pro1@gmail.com|antigravity/gemini-3.1-pro-high", "gemini-3.8-flash-tiered")
+	workingCCPAModelCache.Store(DefaultCCPAEndpoint+"|acc:pro1@gmail.com|antigravity/gemini-3.8-flash-high", "gemini-3.5-flash-lite")
 
 	upstream := NewUpstream(GatewayConfig{CCPAEndpoint: DefaultCCPAEndpoint})
 	upstream.client = &http.Client{
@@ -246,8 +246,8 @@ func TestCarbonStepdownToProOnDefaultEndpointUsesGemini38FlashHighWithoutCooldow
 	}
 
 	stepdownHdr := rec.Header().Get("X-Omni-Gateway-Tier-Stepdown")
-	if stepdownHdr != "gemini-3.1-pro-high" {
-		t.Fatalf("expected X-Omni-Gateway-Tier-Stepdown == gemini-3.1-pro-high, got %q", stepdownHdr)
+	if stepdownHdr != "gemini-3.8-flash-high" {
+		t.Fatalf("expected X-Omni-Gateway-Tier-Stepdown == gemini-3.8-flash-high, got %q", stepdownHdr)
 	}
 
 	resolvedModelHdr := rec.Header().Get("X-Omni-Gateway-Resolved-Model")

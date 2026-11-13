@@ -1151,15 +1151,15 @@ func primaryFlagshipTierForModel(endpoint string, isConnected bool, resolved Res
 			}
 			return []string{"gemini-4-argon-high", "gemini-4-carbon-high", "gemini-3.8-flash-high"}
 		case strings.HasPrefix(ccpaID, "gemini-3.1-pro") || strings.Contains(canon, "gemini-3.1-pro"):
-			return []string{"gemini-3.8-flash-tiered", "gemini-3.8-flash-high"}
+			return []string{"gemini-3.8-flash-high", "gemini-3.8-flash-tiered"}
 		case strings.HasPrefix(ccpaID, "gemini-3.8-flash") || strings.Contains(canon, "gemini-3.8-flash"):
 			if strings.Contains(canon, "tiered") {
 				return []string{"gemini-3.8-flash-tiered", "gemini-3.8-flash-high"}
 			}
 			if resolved.ThinkingLevel == ThinkingLevelMedium {
-				return []string{"gemini-3.8-flash-tiered", "gemini-3.8-flash-medium", "gemini-3.8-flash-high"}
+				return []string{"gemini-3.8-flash-medium", "gemini-3.8-flash-high", "gemini-3.8-flash-tiered"}
 			}
-			return []string{"gemini-3.8-flash-tiered", "gemini-3.8-flash-high"}
+			return []string{"gemini-3.8-flash-high", "gemini-3.8-flash-tiered"}
 		case strings.HasPrefix(ccpaID, "claude-opus"):
 			return []string{"claude-opus-4-6-thinking"}
 		case strings.HasPrefix(ccpaID, "claude-sonnet"):
@@ -1173,12 +1173,12 @@ func primaryFlagshipTierForModel(endpoint string, isConnected bool, resolved Res
 		if resolved.ThinkingLevel == ThinkingLevelMedium {
 			return []string{"gemini-4-carbon-medium", "gemini-4-carbon", "gemini-4-argon-medium"}
 		}
-		return []string{"gemini-4-carbon-high", "gemini-4-carbon", "gemini-4-argon-high", "gemini-4-argon", "gemini-3.1-pro-high"}
+		return []string{"gemini-4-carbon-high", "gemini-4-carbon", "gemini-4-argon-high", "gemini-4-argon"}
 	case resolved.IsArgonFamily || strings.HasPrefix(ccpaID, "gemini-4-argon"):
 		if resolved.ThinkingLevel == ThinkingLevelMedium {
 			return []string{"gemini-4-argon-medium", "gemini-4-argon", "gemini-4-carbon-medium"}
 		}
-		return []string{"gemini-4-argon-high", "gemini-4-argon", "gemini-4-carbon-high", "gemini-4-carbon", "gemini-3.1-pro-high"}
+		return []string{"gemini-4-argon-high", "gemini-4-argon", "gemini-4-carbon-high", "gemini-4-carbon"}
 	case strings.HasPrefix(ccpaID, "gemini-3.1-pro") || strings.Contains(canon, "gemini-3.1-pro"):
 		return []string{"gemini-3.1-pro-high", "gemini-3.1-pro-preview"}
 	case strings.HasPrefix(ccpaID, "claude-opus"):
@@ -1992,10 +1992,10 @@ func (u *GatewayUpstream) openCCPAStreamWithFirstChunk(
 
 		// Multi-Account Flagship Protection: before downgrading to a lower model tier on the current account
 		// after a 429/404, check if another healthy Antigravity account still has flagship quota available.
-		// For Carbon 4 & Argon 4: never fall through to Flash on the Ultra account when flagship models fail or stall;
-		// signal [flagship-failover] immediately so the scheduler tries alternate Ultra accounts or jumps to Pro Gemini 3.1 Pro High!
+		// For Carbon 4 & Argon 4: never fall through to non-flagship tiers on the Ultra account when flagship models fail or stall;
+		// signal [flagship-failover] immediately so the scheduler tries alternate Ultra accounts or jumps to Pro Gemini 3.8 Flash High!
 		isCarbonArgon := IsCarbonOrArgonHighOrMedium(resolved.CanonicalID)
-		hasHealthyPro := (isCarbonArgon || IsClaudeAntigravityModel(resolved.CanonicalID)) && HasHealthyNonUltraAntigravityAccount("gemini-3.1-pro-high")
+		hasHealthyPro := (isCarbonArgon || IsClaudeAntigravityModel(resolved.CanonicalID)) && HasHealthyNonUltraAntigravityAccount("gemini-3.8-flash-high")
 		hasAltFlagship := hasAlternateFlagshipAccount(endpoint, accScope, resolved.CanonicalID, flagshipTier)
 		if (!saw5xxInAttempt || hasHealthyPro) &&
 			PinnedAccountFromContext(attemptCtx) == "" &&
@@ -2545,7 +2545,6 @@ func buildCCPACandidatesWithCache(endpoint, accScope string, resolved ResolvedMo
 					"gemini-4-carbon-medium",
 					"gemini-4-argon-medium",
 					"gemini-4-carbon",
-					"gemini-3.1-pro-high",
 					"gemini-3.8-flash-medium",
 					"gemini-3.8-flash-high",
 					"gemini-3.8-flash-tiered",
@@ -2556,7 +2555,6 @@ func buildCCPACandidatesWithCache(endpoint, accScope string, resolved ResolvedMo
 					"gemini-4-carbon-high",
 					"gemini-4-argon-high",
 					"gemini-4-carbon",
-					"gemini-3.1-pro-high",
 					"gemini-3.8-flash-high",
 					"gemini-3.8-flash-tiered",
 					"gemini-3-flash",
@@ -2585,7 +2583,6 @@ func buildCCPACandidatesWithCache(endpoint, accScope string, resolved ResolvedMo
 					"gemini-4-argon-medium",
 					"gemini-4-carbon-medium",
 					"gemini-4-argon",
-					"gemini-3.1-pro-high",
 					"gemini-3.8-flash-medium",
 					"gemini-3.8-flash-high",
 					"gemini-3.8-flash-tiered",
@@ -2596,7 +2593,6 @@ func buildCCPACandidatesWithCache(endpoint, accScope string, resolved ResolvedMo
 					"gemini-4-argon-high",
 					"gemini-4-carbon-high",
 					"gemini-4-argon",
-					"gemini-3.1-pro-high",
 					"gemini-3.8-flash-high",
 					"gemini-3.8-flash-tiered",
 					"gemini-3-flash",
@@ -2610,15 +2606,16 @@ func buildCCPACandidatesWithCache(endpoint, accScope string, resolved ResolvedMo
 					"gemini-3.8-flash-low",
 					"gemini-3.8-flash-tiered",
 				)
-			} else if isProTier {
+			} else if resolved.ThinkingLevel == ThinkingLevelMedium {
 				raw = append(raw,
-					"gemini-3.8-flash-tiered",
+					"gemini-3.8-flash-medium",
 					"gemini-3.8-flash-high",
+					"gemini-3.8-flash-tiered",
 					"gemini-3-flash",
 				)
 			} else {
+				_ = isProTier
 				raw = append(raw,
-					"gemini-3.1-pro-high",
 					"gemini-3.8-flash-high",
 					"gemini-3.8-flash-tiered",
 					"gemini-3-flash",
@@ -2639,25 +2636,10 @@ func buildCCPACandidatesWithCache(endpoint, accScope string, resolved ResolvedMo
 					"gemini-3.5-flash-lite",
 				)
 			} else if resolved.ThinkingLevel == ThinkingLevelMedium {
-				if isProTier {
-					raw = append(raw,
-						"gemini-3.8-flash-tiered",
-						"gemini-3.8-flash-medium",
-						"gemini-3.8-flash-high",
-						"gemini-3-flash",
-					)
-				} else {
-					raw = append(raw,
-						"gemini-3.8-flash-medium",
-						"gemini-3.8-flash-high",
-						"gemini-3.8-flash-tiered",
-						"gemini-3-flash",
-					)
-				}
-			} else if isProTier {
 				raw = append(raw,
-					"gemini-3.8-flash-tiered",
+					"gemini-3.8-flash-medium",
 					"gemini-3.8-flash-high",
+					"gemini-3.8-flash-tiered",
 					"gemini-3-flash",
 				)
 			} else {
@@ -2809,6 +2791,12 @@ func buildCCPACandidatesWithCache(endpoint, accScope string, resolved ResolvedMo
 					"gemini-3-flash",
 					"gemini-3.8-flash-low",
 					"gemini-3.5-flash-lite",
+					"gemini-3.8-flash-tiered",
+				)
+			} else if !isDefaultProdEndpoint {
+				raw = append(raw,
+					"gemini-3.8-flash-high",
+					"gemini-3-flash",
 					"gemini-3.8-flash-tiered",
 				)
 			} else {
