@@ -618,36 +618,8 @@ func (u *GatewayUpstream) HandleChatCompletion(
 	}
 	req = compressedReq
 
-	// Build ordered list of ResolvedModel targets to try (primary + cross-provider combo fallbacks)
-	var targets []ResolvedModel
-	if resolved.IsCombo && len(resolved.FallbackChain) > 0 {
-		resolver := NewResolver()
-		for _, fbModelID := range resolved.FallbackChain {
-			if strings.EqualFold(fbModelID, resolved.RequestedID) || strings.EqualFold(fbModelID, resolved.CanonicalID) {
-				continue
-			}
-			fbResolved := resolver.Resolve(fbModelID, nil)
-			fbResolved.RequestedID = resolved.RequestedID
-			targets = append(targets, fbResolved)
-		}
-	}
-	if len(targets) == 0 {
-		targets = append(targets, resolved)
-		if len(resolved.FallbackChain) > 0 {
-			resolver := NewResolver()
-			for _, fbModelID := range resolved.FallbackChain {
-				if strings.EqualFold(fbModelID, resolved.RequestedID) || strings.EqualFold(fbModelID, resolved.CanonicalID) {
-					continue
-				}
-				fbResolved := resolver.Resolve(fbModelID, nil)
-				fbResolved.RequestedID = resolved.RequestedID
-				if !resolved.IsCombo && resolved.Provider == ProviderAlibaba && fbResolved.Provider != ProviderAlibaba {
-					continue
-				}
-				targets = append(targets, fbResolved)
-			}
-		}
-	}
+	// Build ordered list of ResolvedModel targets to try (strictly single-target for direct models; multi-model only for combos)
+	targets := buildResolvedChatTargets(resolved)
 
 	// Execute Multi-Model Collaborative Pipeline or Mixture-of-Agents Consensus if configured on Combo
 	if resolved.IsCombo {
@@ -1127,66 +1099,7 @@ func stringSliceContains(items []string, target string) bool {
 }
 
 func primaryFlagshipTierForModel(endpoint string, isConnected bool, resolved ResolvedModel) []string {
-	canon := strings.ToLower(strings.TrimSpace(resolved.CanonicalID))
-	ccpaID := strings.ToLower(strings.TrimSpace(resolved.CCPAModelID))
-	if resolved.ThinkingLevel == ThinkingLevelLow ||
-		strings.Contains(canon, "lite") ||
-		strings.HasSuffix(canon, "-low") ||
-		ccpaID == "gemini-3-flash" ||
-		strings.Contains(ccpaID, "image") {
-		return nil
-	}
-
-	isDefaultProd := strings.EqualFold(strings.TrimSpace(endpoint), DefaultCCPAEndpoint)
-	if isDefaultProd && isConnected {
-		switch {
-		case resolved.IsCarbonFamily || strings.HasPrefix(ccpaID, "gemini-4-carbon"):
-			if resolved.ThinkingLevel == ThinkingLevelMedium {
-				return []string{"gemini-4-carbon-medium", "gemini-4-argon-medium", "gemini-3.8-flash-medium", "gemini-3.8-flash-high"}
-			}
-			return []string{"gemini-4-carbon-high", "gemini-4-argon-high", "gemini-3.8-flash-high"}
-		case resolved.IsArgonFamily || strings.HasPrefix(ccpaID, "gemini-4-argon"):
-			if resolved.ThinkingLevel == ThinkingLevelMedium {
-				return []string{"gemini-4-argon-medium", "gemini-4-carbon-medium", "gemini-3.8-flash-medium", "gemini-3.8-flash-high"}
-			}
-			return []string{"gemini-4-argon-high", "gemini-4-carbon-high", "gemini-3.8-flash-high"}
-		case strings.HasPrefix(ccpaID, "gemini-3.1-pro") || strings.Contains(canon, "gemini-3.1-pro"):
-			return []string{"gemini-3.8-flash-high", "gemini-3.8-flash-tiered"}
-		case strings.HasPrefix(ccpaID, "gemini-3.8-flash") || strings.Contains(canon, "gemini-3.8-flash"):
-			if strings.Contains(canon, "tiered") {
-				return []string{"gemini-3.8-flash-tiered", "gemini-3.8-flash-high"}
-			}
-			if resolved.ThinkingLevel == ThinkingLevelMedium {
-				return []string{"gemini-3.8-flash-medium", "gemini-3.8-flash-high", "gemini-3.8-flash-tiered"}
-			}
-			return []string{"gemini-3.8-flash-high", "gemini-3.8-flash-tiered"}
-		case strings.HasPrefix(ccpaID, "claude-opus"):
-			return []string{"claude-opus-4-6-thinking"}
-		case strings.HasPrefix(ccpaID, "claude-sonnet"):
-			return []string{"claude-sonnet-4-6", "claude-opus-4-6-thinking"}
-		}
-		return nil
-	}
-
-	switch {
-	case resolved.IsCarbonFamily || strings.HasPrefix(ccpaID, "gemini-4-carbon"):
-		if resolved.ThinkingLevel == ThinkingLevelMedium {
-			return []string{"gemini-4-carbon-medium", "gemini-4-carbon", "gemini-4-argon-medium"}
-		}
-		return []string{"gemini-4-carbon-high", "gemini-4-carbon", "gemini-4-argon-high", "gemini-4-argon"}
-	case resolved.IsArgonFamily || strings.HasPrefix(ccpaID, "gemini-4-argon"):
-		if resolved.ThinkingLevel == ThinkingLevelMedium {
-			return []string{"gemini-4-argon-medium", "gemini-4-argon", "gemini-4-carbon-medium"}
-		}
-		return []string{"gemini-4-argon-high", "gemini-4-argon", "gemini-4-carbon-high", "gemini-4-carbon"}
-	case strings.HasPrefix(ccpaID, "gemini-3.1-pro") || strings.Contains(canon, "gemini-3.1-pro"):
-		return []string{"gemini-3.1-pro-high", "gemini-3.1-pro-preview"}
-	case strings.HasPrefix(ccpaID, "claude-opus"):
-		return []string{"claude-opus-4-6-thinking", "claude-sonnet-4-6"}
-	case strings.HasPrefix(ccpaID, "claude-sonnet"):
-		return []string{"claude-sonnet-4-6", "claude-opus-4-6-thinking"}
-	}
-	return nil
+	return strictPrimaryFlagshipTierForModel(endpoint, isConnected, resolved)
 }
 
 func (u *GatewayUpstream) handleDirectCCPA(
@@ -1975,6 +1888,9 @@ func (u *GatewayUpstream) openCCPAStreamWithFirstChunk(
 	ccpaCandidates := buildCCPACandidatesWithCache(endpoint, accScope, resolved, noThinking)
 	if len(ccpaCandidates) == 0 {
 		releaseScopeInFlight()
+		if IsClaudeAntigravityModel(resolved.CanonicalID) || IsCarbonOrArgonHighOrMedium(resolved.CanonicalID) {
+			return nil, fmt.Errorf("[flagship-failover] CCPA candidate skipped (all candidates unavailable on %s)", accScope)
+		}
 		return nil, fmt.Errorf("CCPA candidate skipped (all candidates unavailable on %s)", accScope)
 	}
 	_, isConnectedScope := lookupConnectedAntigravityAccountFast(accScope)
@@ -1990,18 +1906,14 @@ func (u *GatewayUpstream) openCCPAStreamWithFirstChunk(
 			return nil, attemptCtx.Err()
 		}
 
-		// Multi-Account Flagship Protection: before downgrading to a lower model tier on the current account
-		// after a 429/404, check if another healthy Antigravity account still has flagship quota available.
-		// For Carbon 4 & Argon 4: never fall through to non-flagship tiers on the Ultra account when flagship models fail or stall;
-		// signal [flagship-failover] immediately so the scheduler tries alternate Ultra accounts or jumps to Pro Gemini 3.8 Flash High!
-		isCarbonArgon := IsCarbonOrArgonHighOrMedium(resolved.CanonicalID)
-		hasHealthyPro := (isCarbonArgon || IsClaudeAntigravityModel(resolved.CanonicalID)) && HasHealthyNonUltraAntigravityAccount("gemini-3.8-flash-high")
+		// Multi-Account Flagship Protection (Zero Stepdown Policy): never fall through to non-flagship tiers;
+		// signal [flagship-failover] immediately when another flagship-capable account is available.
 		hasAltFlagship := hasAlternateFlagshipAccount(endpoint, accScope, resolved.CanonicalID, flagshipTier)
-		if (!saw5xxInAttempt || hasHealthyPro) &&
+		if !saw5xxInAttempt &&
 			PinnedAccountFromContext(attemptCtx) == "" &&
 			len(flagshipTier) > 0 &&
 			!stringSliceContains(flagshipTier, candidate) &&
-			(hasAltFlagship || hasHealthyPro) {
+			hasAltFlagship {
 			if strings.Contains(accScope, "@") {
 				RecordAccountModelRateLimit(accScope, resolved.CanonicalID, 2*time.Minute)
 			}
@@ -2331,6 +2243,13 @@ func (u *GatewayUpstream) openCCPAStreamWithFirstChunk(
 	if attemptCtx.Err() != nil {
 		return nil, attemptCtx.Err()
 	}
+	if lastCCPAErr != nil &&
+		PinnedAccountFromContext(attemptCtx) == "" &&
+		len(flagshipTier) > 0 &&
+		!strings.Contains(lastCCPAErr.Error(), "[flagship-failover]") &&
+		hasAlternateFlagshipAccount(endpoint, accScope, resolved.CanonicalID, flagshipTier) {
+		lastCCPAErr = fmt.Errorf("[flagship-failover] %w", lastCCPAErr)
+	}
 	return nil, lastCCPAErr
 }
 
@@ -2455,455 +2374,7 @@ func isVirtualCCPAIDEAlias(candidate string) bool {
 }
 
 func buildCCPACandidatesWithCache(endpoint, accScope string, resolved ResolvedModel, noThinking bool) []string {
-	if endpoint == "" {
-		endpoint = DefaultCCPAEndpoint
-	}
-	isDefaultProdEndpoint := strings.EqualFold(strings.TrimSpace(endpoint), DefaultCCPAEndpoint)
-	isAutoFastExplicit := strings.EqualFold(strings.TrimSpace(resolved.RequestedID), "auto/fast") ||
-		strings.EqualFold(strings.TrimSpace(resolved.CanonicalID), "auto/fast")
-	scope := normalizeAccScope(accScope)
-	if resolved.ComboMode == ComboModeStriped && strings.TrimSpace(resolved.CCPAModelID) != "" && !isVirtualCCPAIDEAlias(resolved.CCPAModelID) {
-		cand := strings.TrimSpace(resolved.CCPAModelID)
-		deadOnAcc := strings.Contains(scope, "@") && isAccountDeadCCPAModel(endpoint, scope, cand, time.Now())
-		rateMasked := isDefaultProdEndpoint && strings.Contains(scope, "@") && IsAccountModelRateLimited(scope, cand)
-		if deadOnAcc || rateMasked {
-			return nil
-		}
-		return []string{cand}
-	}
-	acc, isConnected := lookupConnectedAntigravityAccountFast(scope)
-	isProTier := isConnected && strings.EqualFold(strings.TrimSpace(acc.Tier), "Pro")
-	claudeExhausted := isAccountClaudeQuotaExhaustedFast(scope)
-	flagshipTier := primaryFlagshipTierForModel(endpoint, isConnected, resolved)
-
-	var raw []string
-	var cachedWinner string
-	bypassWorkingCache := isDefaultProdEndpoint && (isAutoFastExplicit || resolved.CCPAModelID == "gemini-3.8-flash-low")
-	if !noThinking && !bypassWorkingCache && resolved.CanonicalID != "" {
-		if cached, ok := workingCCPAModelCache.Load(endpoint + "|acc:" + scope + "|" + resolved.CanonicalID); ok {
-			if s, ok := cached.(string); ok && s != "" {
-				sTrim := strings.TrimSpace(s)
-				sLower := strings.ToLower(sTrim)
-				isGeminiReq := strings.Contains(resolved.CanonicalID, "gemini") || resolved.IsCarbonFamily || resolved.IsArgonFamily
-				if isGeminiReq && strings.HasPrefix(sLower, "claude-") {
-					workingCCPAModelCache.Delete(endpoint + "|acc:" + scope + "|" + resolved.CanonicalID)
-				} else if len(flagshipTier) > 0 && !stringSliceContains(flagshipTier, sTrim) {
-					// Never let a previously degraded non-flagship cache winner jump ahead of flagship tier recovery.
-					workingCCPAModelCache.Delete(endpoint + "|acc:" + scope + "|" + resolved.CanonicalID)
-				} else {
-					rateMasked := isDefaultProdEndpoint && strings.Contains(scope, "@") && IsAccountModelRateLimited(scope, sTrim)
-					if !rateMasked && !(claudeExhausted && strings.HasPrefix(sLower, "claude-")) {
-						cachedWinner = sTrim
-						raw = append(raw, cachedWinner)
-					}
-				}
-			}
-		}
-	}
-
-	if isDefaultProdEndpoint && isConnected {
-		appendClaude := func(models ...string) {
-			if claudeExhausted || isAccountClaudeQuotaExhaustedFast(scope) {
-				return
-			}
-			for _, cm := range models {
-				if strings.Contains(scope, "@") && IsAccountModelRateLimited(scope, cm) {
-					continue
-				}
-				raw = append(raw, cm)
-			}
-		}
-		canonLower := strings.ToLower(strings.TrimSpace(resolved.CanonicalID))
-		reqLower := strings.ToLower(strings.TrimSpace(resolved.RequestedID))
-
-		switch {
-		case isAutoFastExplicit:
-			raw = append(raw,
-				"gemini-3-flash",
-				"gemini-3.8-flash-low",
-				"gemini-3.5-flash-lite",
-			)
-		case resolved.IsCarbonFamily || strings.HasPrefix(resolved.CCPAModelID, "gemini-4-carbon"):
-			switch resolved.ThinkingLevel {
-			case ThinkingLevelLow:
-				if isAutoFastExplicit {
-					raw = append(raw,
-						"gemini-3-flash",
-						"gemini-3.8-flash-low",
-						"gemini-3.5-flash-lite",
-					)
-				} else {
-					raw = append(raw,
-						"gemini-4-carbon-low",
-						"gemini-3-flash",
-						"gemini-3.8-flash-low",
-						"gemini-3.5-flash-lite",
-					)
-				}
-			case ThinkingLevelMedium:
-				raw = append(raw,
-					"gemini-4-carbon-medium",
-					"gemini-4-argon-medium",
-					"gemini-4-carbon",
-					"gemini-3.8-flash-medium",
-					"gemini-3.8-flash-high",
-					"gemini-3.8-flash-tiered",
-					"gemini-3-flash",
-				)
-			default:
-				raw = append(raw,
-					"gemini-4-carbon-high",
-					"gemini-4-argon-high",
-					"gemini-4-carbon",
-					"gemini-3.8-flash-high",
-					"gemini-3.8-flash-tiered",
-					"gemini-3-flash",
-				)
-			}
-
-		case resolved.IsArgonFamily || strings.HasPrefix(resolved.CCPAModelID, "gemini-4-argon"):
-			switch resolved.ThinkingLevel {
-			case ThinkingLevelLow:
-				if isAutoFastExplicit {
-					raw = append(raw,
-						"gemini-3-flash",
-						"gemini-3.8-flash-low",
-						"gemini-3.5-flash-lite",
-					)
-				} else {
-					raw = append(raw,
-						"gemini-4-argon-low",
-						"gemini-3-flash",
-						"gemini-3.8-flash-low",
-						"gemini-3.5-flash-lite",
-					)
-				}
-			case ThinkingLevelMedium:
-				raw = append(raw,
-					"gemini-4-argon-medium",
-					"gemini-4-carbon-medium",
-					"gemini-4-argon",
-					"gemini-3.8-flash-medium",
-					"gemini-3.8-flash-high",
-					"gemini-3.8-flash-tiered",
-					"gemini-3-flash",
-				)
-			default:
-				raw = append(raw,
-					"gemini-4-argon-high",
-					"gemini-4-carbon-high",
-					"gemini-4-argon",
-					"gemini-3.8-flash-high",
-					"gemini-3.8-flash-tiered",
-					"gemini-3-flash",
-				)
-			}
-
-		case strings.HasPrefix(resolved.CCPAModelID, "gemini-3.1-pro") || strings.Contains(canonLower, "gemini-3.1-pro"):
-			if resolved.ThinkingLevel == ThinkingLevelLow {
-				raw = append(raw,
-					"gemini-3-flash",
-					"gemini-3.8-flash-low",
-					"gemini-3.8-flash-tiered",
-				)
-			} else if resolved.ThinkingLevel == ThinkingLevelMedium {
-				raw = append(raw,
-					"gemini-3.8-flash-medium",
-					"gemini-3.8-flash-high",
-					"gemini-3.8-flash-tiered",
-					"gemini-3-flash",
-				)
-			} else {
-				_ = isProTier
-				raw = append(raw,
-					"gemini-3.8-flash-high",
-					"gemini-3.8-flash-tiered",
-					"gemini-3-flash",
-				)
-			}
-
-		case strings.HasPrefix(resolved.CCPAModelID, "gemini-3.8-flash") || strings.Contains(canonLower, "gemini-3.8-flash"):
-			if strings.Contains(reqLower, "tiered") || strings.Contains(canonLower, "tiered") {
-				raw = append(raw,
-					"gemini-3.8-flash-tiered",
-					"gemini-3.8-flash-high",
-					"gemini-3-flash",
-				)
-			} else if resolved.ThinkingLevel == ThinkingLevelLow {
-				raw = append(raw,
-					"gemini-3-flash",
-					"gemini-3.8-flash-low",
-					"gemini-3.5-flash-lite",
-				)
-			} else if resolved.ThinkingLevel == ThinkingLevelMedium {
-				raw = append(raw,
-					"gemini-3.8-flash-medium",
-					"gemini-3.8-flash-high",
-					"gemini-3.8-flash-tiered",
-					"gemini-3-flash",
-				)
-			} else {
-				raw = append(raw,
-					"gemini-3.8-flash-high",
-					"gemini-3.8-flash-tiered",
-					"gemini-3-flash",
-				)
-			}
-
-		case strings.Contains(canonLower, "lite") || resolved.CCPAModelID == "gemini-3-flash":
-			if resolved.CCPAModelID != "" && !isVirtualCCPAIDEAlias(resolved.CCPAModelID) {
-				raw = append(raw, resolved.CCPAModelID)
-			}
-			raw = append(raw,
-				"gemini-3-flash",
-				"gemini-3.5-flash-lite",
-				"gemini-3.1-flash-lite",
-			)
-
-		case strings.Contains(resolved.CCPAModelID, "image"):
-			raw = append(raw, "gemini-3.1-flash-image")
-
-		case strings.HasPrefix(resolved.CCPAModelID, "claude-opus"):
-			appendClaude("claude-opus-4-6-thinking", "claude-sonnet-4-6")
-			raw = append(raw,
-				"gemini-3.8-flash-high",
-				"gemini-3.8-flash-tiered",
-				"gemini-3-flash",
-			)
-
-		case strings.HasPrefix(resolved.CCPAModelID, "claude-sonnet"):
-			appendClaude("claude-sonnet-4-6", "claude-opus-4-6-thinking")
-			raw = append(raw,
-				"gemini-3.8-flash-medium",
-				"gemini-3.8-flash-high",
-				"gemini-3.8-flash-tiered",
-				"gemini-3-flash",
-			)
-
-		default:
-			if resolved.CCPAModelID != "" && !isVirtualCCPAIDEAlias(resolved.CCPAModelID) {
-				raw = append(raw, resolved.CCPAModelID)
-			}
-			raw = append(raw, "gemini-3.8-flash-high")
-			appendClaude("claude-sonnet-4-6", "claude-opus-4-6-thinking")
-			raw = append(raw,
-				"gemini-3.8-flash-tiered",
-				"gemini-3-flash",
-			)
-		}
-	} else {
-		switch {
-		case isDefaultProdEndpoint && isAutoFastExplicit:
-			raw = append(raw,
-				"gemini-3-flash",
-				"gemini-3.8-flash-low",
-				"gemini-3.5-flash-lite",
-			)
-		case resolved.IsCarbonFamily || strings.HasPrefix(resolved.CCPAModelID, "gemini-4-carbon"):
-			switch resolved.ThinkingLevel {
-			case ThinkingLevelLow:
-				if isDefaultProdEndpoint && isAutoFastExplicit {
-					raw = append(raw,
-						"gemini-3-flash",
-						"gemini-3.8-flash-low",
-						"gemini-3.5-flash-lite",
-					)
-				} else {
-					raw = append(raw,
-						"gemini-4-carbon-low",
-						"gemini-3-flash",
-						"gemini-3.8-flash-low",
-						"gemini-3.5-flash-lite",
-						"gemini-3.8-flash-tiered",
-					)
-				}
-			case ThinkingLevelMedium:
-				raw = append(raw,
-					"gemini-4-carbon-medium",
-					"gemini-4-argon-medium",
-					"gemini-4-carbon",
-					"gemini-3.8-flash-medium",
-					"gemini-3.8-flash-high",
-					"gemini-3-flash",
-					"gemini-3.8-flash-tiered",
-				)
-			default:
-				raw = append(raw,
-					"gemini-4-carbon-high",
-					"gemini-4-argon-high",
-					"gemini-4-carbon",
-					"gemini-3.8-flash-high",
-					"gemini-3-flash",
-					"gemini-3.8-flash-tiered",
-				)
-			}
-
-		case resolved.IsArgonFamily || strings.HasPrefix(resolved.CCPAModelID, "gemini-4-argon"):
-			if resolved.CCPAModelID != "" {
-				raw = append(raw, resolved.CCPAModelID)
-			}
-			switch resolved.ThinkingLevel {
-			case ThinkingLevelLow:
-				raw = append(raw,
-					"gemini-4-argon-low",
-					"gemini-3-flash",
-					"gemini-3.8-flash-low",
-					"gemini-3.5-flash-lite",
-					"gemini-3.8-flash-tiered",
-				)
-			case ThinkingLevelMedium:
-				raw = append(raw,
-					"gemini-4-argon-medium",
-					"gemini-4-carbon-medium",
-					"gemini-4-argon",
-					"gemini-3.8-flash-medium",
-					"gemini-3.8-flash-high",
-					"gemini-3-flash",
-					"gemini-3.8-flash-tiered",
-				)
-			default:
-				raw = append(raw,
-					"gemini-4-argon-high",
-					"gemini-4-carbon-high",
-					"gemini-4-argon",
-					"gemini-3.8-flash-high",
-					"gemini-3-flash",
-					"gemini-3.8-flash-tiered",
-				)
-			}
-
-		case strings.HasPrefix(resolved.CCPAModelID, "gemini-3.1-pro") || strings.Contains(resolved.CanonicalID, "gemini-3.1-pro"):
-			if resolved.CCPAModelID != "" {
-				raw = append(raw, resolved.CCPAModelID)
-			}
-			raw = append(raw,
-				"gemini-3.8-flash-high",
-				"gemini-3-flash",
-				"gemini-3.8-flash-tiered",
-			)
-
-		case strings.HasPrefix(resolved.CCPAModelID, "gemini-3.8-flash"):
-			if resolved.CCPAModelID != "" && !(isDefaultProdEndpoint && resolved.ThinkingLevel == ThinkingLevelLow) {
-				raw = append(raw, resolved.CCPAModelID)
-			}
-			if resolved.ThinkingLevel == ThinkingLevelLow {
-				raw = append(raw,
-					"gemini-3-flash",
-					"gemini-3.8-flash-low",
-					"gemini-3.5-flash-lite",
-					"gemini-3.8-flash-tiered",
-				)
-			} else if !isDefaultProdEndpoint {
-				raw = append(raw,
-					"gemini-3.8-flash-high",
-					"gemini-3-flash",
-					"gemini-3.8-flash-tiered",
-				)
-			} else {
-				raw = append(raw,
-					"gemini-3-flash",
-					"gemini-3.8-flash-high",
-					"gemini-3.8-flash-tiered",
-				)
-			}
-
-		case strings.Contains(resolved.CanonicalID, "lite") || resolved.CCPAModelID == "gemini-3-flash":
-			if resolved.CCPAModelID != "" {
-				raw = append(raw, resolved.CCPAModelID)
-			}
-			raw = append(raw,
-				"gemini-3-flash",
-				"gemini-3.5-flash-lite",
-				"gemini-3.1-flash-lite",
-			)
-
-		case strings.HasPrefix(resolved.CCPAModelID, "claude-opus"):
-			if resolved.CCPAModelID != "" {
-				raw = append(raw, resolved.CCPAModelID)
-			}
-			raw = append(raw,
-				"claude-opus-4-6-thinking",
-				"claude-sonnet-4-6",
-				"gemini-3.8-flash-high",
-				"gemini-3-flash",
-				"gemini-3.8-flash-tiered",
-			)
-
-		case strings.HasPrefix(resolved.CCPAModelID, "claude-sonnet"):
-			if resolved.CCPAModelID != "" {
-				raw = append(raw, resolved.CCPAModelID)
-			}
-			raw = append(raw,
-				"claude-sonnet-4-6",
-				"claude-opus-4-6-thinking",
-				"gemini-3.8-flash-medium",
-				"gemini-3-flash",
-				"gemini-3.8-flash-tiered",
-			)
-
-		default:
-			if resolved.CCPAModelID != "" {
-				raw = append(raw, resolved.CCPAModelID)
-			}
-			canonLower := strings.ToLower(resolved.CanonicalID)
-			if strings.Contains(canonLower, "claude") {
-				raw = append(raw,
-					"claude-sonnet-4-6",
-					"claude-opus-4-6-thinking",
-					"gemini-3.8-flash-high",
-					"gemini-3-flash",
-					"gemini-3.8-flash-tiered",
-				)
-			} else {
-				raw = append(raw,
-					"gemini-3.8-flash-high",
-					"gemini-3-flash",
-					"gemini-3.8-flash-tiered",
-				)
-			}
-		}
-	}
-
-	seen := make(map[string]bool, len(raw))
-	deduped := make([]string, 0, len(raw))
-	for _, m := range raw {
-		m = strings.TrimSpace(m)
-		if m != "" && !seen[m] {
-			seen[m] = true
-			deduped = append(deduped, m)
-		}
-	}
-
-	// On DefaultCCPAEndpoint ONLY, strip virtual Antigravity IDE 404/503 aliases so requests
-	// never pay 400-1400ms probing dead model IDs on cold start or quota exhaustion.
-	if isDefaultProdEndpoint && len(deduped) > 0 {
-		realIDs := make([]string, 0, len(deduped))
-		for idx, m := range deduped {
-			if idx == 0 && cachedWinner != "" && m == cachedWinner && !isVirtualCCPAIDEAlias(m) {
-				realIDs = append(realIDs, m)
-				continue
-			}
-			if !isVirtualCCPAIDEAlias(m) {
-				realIDs = append(realIDs, m)
-			}
-		}
-		if len(realIDs) > 0 {
-			deduped = realIDs
-		}
-	}
-
-	now := time.Now()
-	alive := make([]string, 0, len(deduped))
-	for _, m := range deduped {
-		if isDeadCCPAModel(endpoint, m, now) || isAccountDeadCCPAModel(endpoint, scope, m, now) {
-			continue
-		}
-		alive = append(alive, m)
-	}
-	if len(alive) > 0 {
-		return alive
-	}
-	return deduped
+	return buildStrictCCPACandidates(endpoint, accScope, resolved, noThinking)
 }
 
 func normalizeCCPAFinishReason(raw string) string {

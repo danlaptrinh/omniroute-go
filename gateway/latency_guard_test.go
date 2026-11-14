@@ -121,7 +121,7 @@ func TestCCPAFirstChunkTimeoutFailsOverAndCachesDeadModel(t *testing.T) {
 		mu.Unlock()
 
 		switch payload.Model {
-		case "claude-opus-4-6-thinking":
+		case "gemini-4-carbon-high":
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.WriteHeader(http.StatusOK)
 			if fl, ok := w.(http.Flusher); ok {
@@ -132,7 +132,7 @@ func TestCCPAFirstChunkTimeoutFailsOverAndCachesDeadModel(t *testing.T) {
 			case <-r.Context().Done():
 			case <-time.After(500 * time.Millisecond):
 			}
-		case "claude-sonnet-4-6":
+		case "gemini-4-argon-high":
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte("data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Fast failover success!\"}]}}]}}\n\ndata: [DONE]\n\n"))
@@ -147,6 +147,7 @@ func TestCCPAFirstChunkTimeoutFailsOverAndCachesDeadModel(t *testing.T) {
 		Email:       "fast-watchdog@gmail.com",
 		AccessToken: "ya29.watchdog-token",
 		ProjectID:   "proj-watchdog",
+		Tier:        "Ultra",
 		ExpiresAt:   time.Now().Unix() + 3600,
 	}
 	if _, err := UpsertConnectedAccount(acc); err != nil {
@@ -154,11 +155,11 @@ func TestCCPAFirstChunkTimeoutFailsOverAndCachesDeadModel(t *testing.T) {
 	}
 
 	upstream := NewUpstream(GatewayConfig{CCPAEndpoint: mockCCPA.URL})
-	resolved := ResolveModel("antigravity/claude-opus-4-6-thinking", nil)
+	resolved := ResolveModel("antigravity/gemini-4-carbon-high", nil)
 
-	// Request 1: 80ms TTFT timeout on claude-opus-4-6-thinking -> 200 OK on claude-sonnet-4-6
+	// Request 1: 80ms TTFT timeout on gemini-4-carbon-high -> 200 OK on gemini-4-argon-high (Ultra internal backend, zero Pro/Flash stepdown)
 	req1 := OpenAIChatRequest{
-		Model: "antigravity/claude-opus-4-6-thinking",
+		Model: "antigravity/gemini-4-carbon-high",
 		Messages: []OpenAIChatMessage{
 			{Role: "user", Content: json.RawMessage(`"First request with stalled model"`)},
 		},
@@ -176,25 +177,25 @@ func TestCCPAFirstChunkTimeoutFailsOverAndCachesDeadModel(t *testing.T) {
 	if rec1.Code != http.StatusOK || !strings.Contains(rec1.Body.String(), "Fast failover success!") {
 		t.Fatalf("unexpected Request 1 response (%d): %s", rec1.Code, rec1.Body.String())
 	}
-	if gotModel := rec1.Header().Get("X-Omni-Gateway-Resolved-Model"); gotModel != "claude-sonnet-4-6" {
-		t.Fatalf("expected X-Omni-Gateway-Resolved-Model=claude-sonnet-4-6, got %q", gotModel)
+	if gotModel := rec1.Header().Get("X-Omni-Gateway-Resolved-Model"); gotModel != "gemini-4-argon-high" {
+		t.Fatalf("expected X-Omni-Gateway-Resolved-Model=gemini-4-argon-high, got %q", gotModel)
 	}
 
 	mu.Lock()
-	opusAfter1 := callsByModel["claude-opus-4-6-thinking"]
-	sonnetAfter1 := callsByModel["claude-sonnet-4-6"]
+	carbonAfter1 := callsByModel["gemini-4-carbon-high"]
+	argonAfter1 := callsByModel["gemini-4-argon-high"]
 	mu.Unlock()
 
-	if opusAfter1 != 1 || sonnetAfter1 != 1 {
+	if carbonAfter1 != 1 || argonAfter1 != 1 {
 		t.Fatalf("unexpected Request 1 call counts: %+v", map[string]int{
-			"claude-opus-4-6-thinking": opusAfter1,
-			"claude-sonnet-4-6":        sonnetAfter1,
+			"gemini-4-carbon-high": carbonAfter1,
+			"gemini-4-argon-high":  argonAfter1,
 		})
 	}
 
-	// Request 2 (distinct prompt so response cache is bypassed): must skip stalled opus model (0 new calls!)
+	// Request 2 (distinct prompt so response cache is bypassed): must skip stalled carbon model (0 new calls!)
 	req2 := OpenAIChatRequest{
-		Model: "antigravity/claude-opus-4-6-thinking",
+		Model: "antigravity/gemini-4-carbon-high",
 		Messages: []OpenAIChatMessage{
 			{Role: "user", Content: json.RawMessage(`"Second request must hit cached winning model directly"`)},
 		},
@@ -210,11 +211,11 @@ func TestCCPAFirstChunkTimeoutFailsOverAndCachesDeadModel(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	if callsByModel["claude-opus-4-6-thinking"] != opusAfter1 {
-		t.Fatalf("Request 2 did not skip stalled opus model! counts=%+v", callsByModel)
+	if callsByModel["gemini-4-carbon-high"] != carbonAfter1 {
+		t.Fatalf("Request 2 did not skip stalled carbon model! counts=%+v", callsByModel)
 	}
-	if callsByModel["claude-sonnet-4-6"] != 2 {
-		t.Fatalf("expected claude-sonnet-4-6 to be called immediately on Request 2 (total=2), got %d", callsByModel["claude-sonnet-4-6"])
+	if callsByModel["gemini-4-argon-high"] != 2 {
+		t.Fatalf("expected gemini-4-argon-high to be called immediately on Request 2 (total=2), got %d", callsByModel["gemini-4-argon-high"])
 	}
 }
 
@@ -230,32 +231,25 @@ func TestCCPA503CachedAndCarbonCandidateOrder(t *testing.T) {
 		resetAuthCacheForTest(t)
 	})
 
-	// 1. Verify Carbon High & Argon High prioritize Opus, Sonnet, and Gemini 3 Flash BEFORE gemini-3.8-flash-tiered
+	// 1. Verify Carbon High & Argon High strictly stay on Ultra candidates (including gemini-3.8-flash-high) and NEVER step down to gemini-3.8-flash-tiered or gemini-3-flash
 	for _, modelID := range []string{"antigravity/gemini-4-carbon-high", "antigravity/gemini-4-argon-high"} {
 		res := ResolveModel(modelID, nil)
 		cands := buildCCPACandidatesWithCache("https://test.ccpa.local", "", res, false)
-		tieredIdx := indexOfString(cands, "gemini-3.8-flash-tiered")
-		if tieredIdx == -1 {
-			t.Fatalf("%s candidates missing gemini-3.8-flash-tiered: %v", modelID, cands)
+		if idx := indexOfString(cands, "gemini-3.8-flash-high"); idx == -1 {
+			t.Fatalf("%s candidates missing Ultra backend gemini-3.8-flash-high: %v", modelID, cands)
 		}
-		for _, fastModel := range []string{"gemini-3.8-flash-high", "gemini-3-flash"} {
-			idx := indexOfString(cands, fastModel)
-			if idx == -1 || idx >= tieredIdx {
-				t.Fatalf("%s: expected %q (idx=%d) before gemini-3.8-flash-tiered (idx=%d) in %v", modelID, fastModel, idx, tieredIdx, cands)
+		for _, forbidden := range []string{"gemini-3.8-flash-tiered", "gemini-3-flash", "gemini-3.5-flash-lite"} {
+			if idx := indexOfString(cands, forbidden); idx != -1 {
+				t.Fatalf("%s must NEVER step down to %q (found at idx=%d in %v)", modelID, forbidden, idx, cands)
 			}
 		}
 	}
 
-	// 2. Verify gemini-3.8-flash-low places gemini-3-flash BEFORE gemini-3.8-flash-tiered (and never puts tiered at front)
+	// 2. Verify gemini-3.8-flash-low executes strictly 1-to-1 ["gemini-3.8-flash-low"] without stepping down to gemini-3-flash or gemini-3.8-flash-tiered
 	flashLowRes := ResolveModel("antigravity/gemini-3.8-flash-low", nil)
 	flashLowCands := buildCCPACandidatesWithCache("https://test.ccpa.local", "", flashLowRes, false)
-	if len(flashLowCands) == 0 || flashLowCands[0] == "gemini-3.8-flash-tiered" {
-		t.Fatalf("gemini-3.8-flash-low must not place gemini-3.8-flash-tiered first: %v", flashLowCands)
-	}
-	g3Idx := indexOfString(flashLowCands, "gemini-3-flash")
-	tieredLowIdx := indexOfString(flashLowCands, "gemini-3.8-flash-tiered")
-	if g3Idx == -1 || tieredLowIdx == -1 || g3Idx >= tieredLowIdx {
-		t.Fatalf("gemini-3.8-flash-low: expected gemini-3-flash (idx=%d) before gemini-3.8-flash-tiered (idx=%d): %v", g3Idx, tieredLowIdx, flashLowCands)
+	if len(flashLowCands) != 1 || flashLowCands[0] != "gemini-3.8-flash-low" {
+		t.Fatalf("gemini-3.8-flash-low must strictly equal [\"gemini-3.8-flash-low\"], got: %v", flashLowCands)
 	}
 
 	// 3. Verify HTTP 503 is cached in deadCCPAModelCache so subsequent requests skip 503 models
@@ -534,7 +528,7 @@ func TestPerAccount429DoesNotDowngradeOtherAccounts(t *testing.T) {
 	upstream := NewUpstream(GatewayConfig{CCPAEndpoint: mockCCPA.URL})
 	resolved := ResolveModel("antigravity/claude-opus-4-6-thinking", nil)
 
-	// 1. Account 1 (exhausted@gmail.com): hits 429 on opus & sonnet, succeeds on gemini-3-flash
+	// 1. Account 1 (exhausted@gmail.com, pinned): hits 429 on claude-opus-4-6-thinking and NEVER downgrades to sonnet or gemini-3-flash
 	req1 := OpenAIChatRequest{
 		Model: "antigravity/claude-opus-4-6-thinking",
 		Messages: []OpenAIChatMessage{
@@ -543,19 +537,19 @@ func TestPerAccount429DoesNotDowngradeOtherAccounts(t *testing.T) {
 	}
 	rec1 := httptest.NewRecorder()
 	ctx1 := WithPinnedAccount(context.Background(), "exhausted@gmail.com")
-	if err := upstream.HandleChatCompletion(ctx1, rec1, req1, resolved, ""); err != nil {
-		t.Fatalf("Account 1 request failed: %v", err)
-	}
-	if gotAcc := rec1.Header().Get("X-Omni-Gateway-Account"); gotAcc != "exhausted@gmail.com" {
-		t.Fatalf("Account 1 header = %q, want exhausted@gmail.com", gotAcc)
-	}
-	if gotModel := rec1.Header().Get("X-Omni-Gateway-Resolved-Model"); gotModel != "gemini-3.8-flash-high" && gotModel != "gemini-3-flash" {
-		t.Fatalf("Account 1 resolved model = %q, want gemini-3.8-flash-high or gemini-3-flash", gotModel)
+	if err := upstream.HandleChatCompletion(ctx1, rec1, req1, resolved, ""); err == nil {
+		t.Fatalf("expected pinned exhausted Account 1 to return HTTP 429 error instead of stepping down to another model, got 200 OK (model=%q)", rec1.Header().Get("X-Omni-Gateway-Resolved-Model"))
 	}
 
 	mu.Lock()
+	exhaustedFlashCalls := callsByTokenAndModel["Bearer ya29.exhausted-claude-quota|gemini-3-flash"] +
+		callsByTokenAndModel["Bearer ya29.exhausted-claude-quota|gemini-3.8-flash-high"]
 	after1Global404s := global404Calls
 	mu.Unlock()
+
+	if exhaustedFlashCalls != 0 {
+		t.Fatalf("expected zero model stepdown to flash on exhausted@gmail.com, got %d", exhaustedFlashCalls)
+	}
 
 	// 2. Account 2 (fresh@gmail.com): hits claude-opus-4-6-thinking directly!
 	req2 := OpenAIChatRequest{

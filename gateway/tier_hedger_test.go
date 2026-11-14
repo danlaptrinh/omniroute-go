@@ -228,17 +228,16 @@ func TestTierHedger_UltraVsProRoutingAndSpillover(t *testing.T) {
 		}
 	}
 
-	// 3. Fallback to Ultra occurs ONLY when 100% of Pro accounts are unavailable (rate-limited).
+	// 3. When Pro accounts ARE configured and 100% of Pro accounts are rate-limited, Bucket C MUST NOT spill non-flagship requests onto Ultra.
 	for i := 1; i <= 5; i++ {
 		RecordAccountModelRateLimit(fmt.Sprintf("pro%d@gmail.com", i), "auto/fast", 2*time.Minute)
 	}
 	allProDownAcc, allProDownRel, err := AcquireProviderAccountForModel(context.Background(), ProviderAntigravity, "auto/fast", "auto/fast")
-	if err != nil {
-		t.Fatalf("fallback acquire when all Pro rate-limited failed: %v", err)
+	if allProDownRel != nil {
+		allProDownRel()
 	}
-	releases = append(releases, allProDownRel)
-	if !strings.HasPrefix(allProDownAcc.Email, "ultra") {
-		t.Fatalf("expected fallback to Ultra only when 100%% of Pro accounts are unavailable, got %q", allProDownAcc.Email)
+	if err == nil || allProDownAcc != nil {
+		t.Fatalf("expected Ultra tier to remain shielded when all Pro accounts are rate-limited for auto/fast, got acc=%+v err=%v", allProDownAcc, err)
 	}
 	ClearAccountModelRateLimits("")
 
@@ -370,20 +369,21 @@ func TestTierHedger_ThinkingLevelLowDirectFastPath(t *testing.T) {
 	// fast-path directly to gemini-3-flash!
 	for _, tc := range []struct {
 		modelID string
-		want0   string
-		want1   string
+		want    []string
 	}{
-		{"antigravity/gemini-4-carbon-low", "gemini-4-carbon-low", "gemini-3-flash"},
-		{"antigravity/gemini-4-argon-low", "gemini-4-argon-low", "gemini-3-flash"},
-		{"antigravity/gemini-3.8-flash-low", "gemini-3-flash", "gemini-3.8-flash-low"},
+		{"antigravity/gemini-4-carbon-low", []string{"gemini-4-carbon-low", "gemini-3.8-flash-low"}},
+		{"antigravity/gemini-4-argon-low", []string{"gemini-4-argon-low", "gemini-3.8-flash-low"}},
+		{"antigravity/gemini-3.8-flash-low", []string{"gemini-3.8-flash-low"}},
 	} {
 		res := ResolveModel(tc.modelID, nil)
 		cands := buildCCPACandidatesWithCache(DefaultCCPAEndpoint, acc.Email, res, false)
-		if len(cands) < 2 {
-			t.Fatalf("%s candidates too short: %v", tc.modelID, cands)
+		if len(cands) != len(tc.want) {
+			t.Fatalf("%s candidates = %v, want %v", tc.modelID, cands, tc.want)
 		}
-		if cands[0] != tc.want0 || cands[1] != tc.want1 {
-			t.Fatalf("%s candidates = %v, want [%q, %q, ...]", tc.modelID, cands, tc.want0, tc.want1)
+		for i := range tc.want {
+			if cands[i] != tc.want[i] {
+				t.Fatalf("%s candidates = %v, want %v", tc.modelID, cands, tc.want)
+			}
 		}
 	}
 

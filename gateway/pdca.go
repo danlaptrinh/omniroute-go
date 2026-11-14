@@ -694,6 +694,34 @@ func RunPDCACycle(now time.Time) PDCACycleReport {
 	}
 
 	// -------------------------------------------------------------
+	// 3.5. Plan-Do-Check-Act: Global Zero-Stepdown Working Pin Sanitizer & Pro Carbon Leak Detector
+	// -------------------------------------------------------------
+	proEmails := make(map[string]bool)
+	for _, acc := range auth.Accounts {
+		if acc.Disabled {
+			continue
+		}
+		p := acc.Provider
+		if p == "" {
+			p = ProviderAntigravity
+		}
+		if p != ProviderAntigravity {
+			continue
+		}
+		tier := LookupCachedAccountTier(acc, cs)
+		if !strings.EqualFold(strings.TrimSpace(tier), "Ultra") && strings.TrimSpace(acc.Email) != "" {
+			proEmails[strings.ToLower(strings.TrimSpace(acc.Email))] = true
+		}
+	}
+	if purgedStepdownPins, pinAnoms, pinActs := sanitizeSteppedDownWorkingPins(cycleID, nowRFC); purgedStepdownPins > 0 {
+		report.Anomalies = append(report.Anomalies, pinAnoms...)
+		report.Actions = append(report.Actions, pinActs...)
+	}
+	if proLeaks := detectProCarbonStepdownLeaks(recentLogs, proEmails, cycleID, nowRFC); len(proLeaks) > 0 {
+		report.Anomalies = append(report.Anomalies, proLeaks...)
+	}
+
+	// -------------------------------------------------------------
 	// 4. Plan-Do-Check-Act: Provider Auth & Upstream Spike Sentinel
 	// -------------------------------------------------------------
 	type accountFailStats struct {

@@ -738,16 +738,15 @@ func ExecuteAntigravityWithReactiveRefresh(
 				accountEmail = acc.Email
 				releaseInFlight = rel
 
-				// Tier-Aware Ultra fallback: If requested model is Carbon or Argon High, but an Ultra account was not used
-				// (because all Ultra accounts are exhausted), step down to Gemini 3.8 Flash High on the Pro account for coding continuity.
+				// Strict Ultra Lock (Zero Stepdown Policy): Carbon and Argon High/Medium must NEVER execute or step down on non-Ultra accounts.
 				if HasConfiguredUltraAccount() &&
 					IsCarbonOrArgonHighOrMedium(target.CanonicalID) &&
+					strings.TrimSpace(acc.Tier) != "" &&
 					!strings.EqualFold(strings.TrimSpace(acc.Tier), "Ultra") {
-					target = ResolveModel("antigravity/gemini-3.8-flash-high", nil)
-					modelHint = target.CanonicalID
-					w.Header().Set("X-Omni-Gateway-Tier-Stepdown", "gemini-3.8-flash-high")
-					log.Printf("[omniroute-go] Antigravity Ultra accounts exhausted for %q; stepping down to Gemini 3.8 Flash High on Pro account %s for coding continuity",
-						req.Model, accountEmail)
+					if releaseInFlight != nil {
+						releaseInFlight()
+					}
+					return fmt.Errorf("model %q requires an Antigravity Ultra account; refusing to step down on %s (%s)", req.Model, accountEmail, acc.Tier)
 				}
 			} else {
 				if rel != nil {
@@ -956,8 +955,11 @@ func ExecuteAntigravityWithReactiveRefresh(
 		lastErr = err
 		log.Printf("[omniroute-go] antigravity CCPA attempt %d for %q (%s, acc=%s) failed: %v", attempt+1, target.RequestedID, target.CCPAModelID, accountEmail, err)
 
-		// 1. Carbon 4 / Argon 4 High: if stuck, failed, or rate-limited on Ultra account,
-		// check if another healthy Ultra account exists. If not, IMMEDIATELY step down to Gemini 3.1 Pro High on Pro accounts!
+		if PinnedAccountFromContext(ctx) != "" {
+			break
+		}
+
+		// 1. Carbon 4 / Argon 4 High & Medium: strictly Ultra-only failover (Zero Stepdown Policy — NEVER jump to Pro accounts!).
 		if isCarbonArgon && accountEmail != "" {
 			flagshipCands := []string{"gemini-4-carbon-high", "gemini-4-argon-high", "gemini-3.8-flash-high"}
 			if target.ThinkingLevel == ThinkingLevelMedium {
@@ -970,25 +972,14 @@ func ExecuteAntigravityWithReactiveRefresh(
 				forcedAcc = nil
 				continue
 			}
-
-			// All Ultra accounts are stuck/exhausted or this was the last Ultra account:
-			// Jump immediately to Gemini 3.8 Flash High on Pro accounts to avoid hanging!
-			log.Printf("[omniroute-go] Carbon/Argon stuck or exhausted on Ultra accounts (%v); immediately jumping to antigravity/gemini-3.8-flash-high on Pro accounts", err)
-			target = ResolveModel("antigravity/gemini-3.8-flash-high", nil)
-			modelHint = target.CanonicalID
-			w.Header().Set("X-Omni-Gateway-Tier-Stepdown", "gemini-3.8-flash-high")
-			forcedAcc = nil
-			if attempt+1 >= maxAttempts {
-				maxAttempts = attempt + 2
-			}
-			continue
+			break
 		}
 
-		// 1.5. Claude Antigravity Flagship: if Claude quota is exhausted across accounts, step down cleanly to Pro Gemini!
+		// 1.5. Claude Antigravity Flagship: fail over across Claude-healthy accounts ONLY (NEVER step down to Gemini!).
 		if isFlagshipFailover && IsClaudeAntigravityModel(target.CanonicalID) && accountEmail != "" {
-			claudeFlagshipCands := []string{"claude-opus-4-6-thinking", "claude-sonnet-4-6"}
-			if strings.Contains(strings.ToLower(target.CanonicalID), "opus") {
-				claudeFlagshipCands = []string{"claude-opus-4-6-thinking"}
+			claudeFlagshipCands := []string{"claude-opus-4-6-thinking"}
+			if strings.Contains(strings.ToLower(target.CanonicalID), "sonnet") {
+				claudeFlagshipCands = []string{"claude-sonnet-4-6"}
 			}
 			if hasAlternateFlagshipAccount(u.cfg.CCPAEndpoint, accountEmail, target.CanonicalID, claudeFlagshipCands) && attempt+1 < maxAttempts {
 				log.Printf("[omniroute-go] Claude flagship quota exhausted on %s; failing over to alternate Claude-healthy account (attempt %d/%d)",
@@ -996,23 +987,13 @@ func ExecuteAntigravityWithReactiveRefresh(
 				forcedAcc = nil
 				continue
 			}
-			if HasHealthyNonUltraAntigravityAccount("gemini-3.8-flash-high") {
-				log.Printf("[omniroute-go] Claude flagship quota exhausted across Antigravity accounts (%v); stepping down to antigravity/gemini-3.8-flash-high on Pro accounts", err)
-				target = ResolveModel("antigravity/gemini-3.8-flash-high", nil)
-				modelHint = target.CanonicalID
-				w.Header().Set("X-Omni-Gateway-Tier-Stepdown", "gemini-3.8-flash-high")
-				forcedAcc = nil
-				if attempt+1 >= maxAttempts {
-					maxAttempts = attempt + 2
-				}
-				continue
-			}
+			break
 		}
 
-		// 2. Generic flagship failover across accounts
-		if isFlagshipFailover && accountEmail != "" && attempt+1 < maxAttempts {
-			log.Printf("[omniroute-go] antigravity flagship quota exhausted on %s for %q; failing over to alternate account (attempt %d/%d)",
-				accountEmail, modelHint, attempt+1, maxAttempts)
+		// 2. Generic flagship or HTTP 429 same-model failover across alternate accounts
+		if (isFlagshipFailover || failCode == http.StatusTooManyRequests) && PinnedAccountFromContext(ctx) == "" && accountEmail != "" && attempt+1 < maxAttempts {
+			log.Printf("[omniroute-go] antigravity model %q rate-limited/exhausted on %s; failing over to alternate account on same model (attempt %d/%d)",
+				modelHint, accountEmail, attempt+1, maxAttempts)
 			forcedAcc = nil
 			continue
 		}
@@ -1025,9 +1006,13 @@ func ExecuteAntigravityWithReactiveRefresh(
 			continue
 		}
 
-		if failCode != http.StatusUnauthorized && failCode != http.StatusForbidden && failCode != http.StatusTooManyRequests && failCode != http.StatusBadGateway && failCode != http.StatusServiceUnavailable && failCode != http.StatusGatewayTimeout {
-			break
+		// 4. HTTP 403 account-level isolation (VALIDATION_REQUIRED / TOS): fail over to alternate healthy account
+		if failCode == http.StatusForbidden && accountEmail != "" && attempt+1 < maxAttempts {
+			forcedAcc = nil
+			continue
 		}
+
+		break
 	}
 
 	return lastErr
@@ -1163,7 +1148,15 @@ func SyncAccountValidationState(emailOrID string, requiresValidation bool) {
 			continue
 		}
 		if acc.ID == target || strings.EqualFold(acc.Email, target) {
+			emailScope := strings.ToLower(strings.TrimSpace(acc.Email))
+			idScope := strings.ToLower(strings.TrimSpace(acc.ID))
 			if requiresValidation {
+				if emailScope != "" {
+					validationIsolatedAccounts.Store(emailScope, true)
+				}
+				if idScope != "" {
+					validationIsolatedAccounts.Store(idScope, true)
+				}
 				if acc.CooldownUntil < now+1800 {
 					acc.CooldownUntil = now + 7200
 					acc.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
@@ -1171,6 +1164,12 @@ func SyncAccountValidationState(emailOrID string, requiresValidation bool) {
 					saveAuthConfigAsyncLocked(cfg)
 				}
 			} else {
+				if emailScope != "" {
+					validationIsolatedAccounts.Delete(emailScope)
+				}
+				if idScope != "" {
+					validationIsolatedAccounts.Delete(idScope)
+				}
 				if acc.CooldownUntil > now+600 {
 					acc.CooldownUntil = 0
 					acc.FailureCount = 0

@@ -387,14 +387,14 @@ func TestEndToEndCCPA429AutoRecordsPerAccountModelCooldownForNextRequest(t *test
 	upstream := NewUpstream(GatewayConfig{CCPAEndpoint: mockCCPA.URL})
 	resolved := ResolveModel("antigravity/claude-opus-4-6-thinking", nil)
 
-	// Seed 1st request pinned to opus-429@example.com so it discovers the 429 on claude-opus-4-6-thinking
+	// Seed 1st request pinned to opus-429@example.com so it discovers the 429 on claude-opus-4-6-thinking (no Gemini stepdown under Zero Stepdown Policy)
 	seedReq := OpenAIChatRequest{
 		Model:    "antigravity/claude-opus-4-6-thinking",
 		Messages: []OpenAIChatMessage{{Role: "user", Content: json.RawMessage(`"seed 429 discovery"`)}},
 	}
 	seedRec := httptest.NewRecorder()
-	if err := upstream.HandleChatCompletion(WithPinnedAccount(context.Background(), "opus-429@example.com"), seedRec, seedReq, resolved, ""); err != nil {
-		t.Fatalf("seed HandleChatCompletion failed: %v", err)
+	if err := upstream.HandleChatCompletion(WithPinnedAccount(context.Background(), "opus-429@example.com"), seedRec, seedReq, resolved, ""); err == nil {
+		t.Fatalf("expected HTTP 429 error on pinned exhausted opus-429@example.com without Gemini stepdown")
 	}
 	if opus429Hits.Load() != 1 {
 		t.Fatalf("expected 1 initial 429 hit on opus-429@example.com, got %d", opus429Hits.Load())

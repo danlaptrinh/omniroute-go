@@ -1485,16 +1485,12 @@ func rateLimitProbeKeysForHint(modelHint string) []string {
 		addUnique("claude-sonnet-4-6")
 	case m == "gemini-4-carbon-low" || m == "gemini-4-argon-low":
 		addUnique("gemini-3.8-flash-low")
-		addUnique("gemini-3-flash")
 	case m == "gemini-3.8-flash-high" || m == "gemini-3.8-flash":
 		addUnique("gemini-3.8-flash-high")
-		addUnique("gemini-3-flash")
 	case m == "gemini-3.8-flash-medium":
 		addUnique("gemini-3.8-flash-medium")
-		addUnique("gemini-3-flash")
 	case strings.HasPrefix(m, "gemini-3.8-flash"):
 		addUnique("gemini-3.8-flash-low")
-		addUnique("gemini-3-flash")
 	}
 	return keys
 }
@@ -1942,10 +1938,8 @@ func selectProviderAccountCore(ctx context.Context, provider ProviderID, modelHi
 		trimmedHint := strings.TrimSpace(modelHint)
 		switch {
 		case IsCarbonOrArgonHighOrMedium(trimmedHint):
-			// Bucket A: Carbon 4 / Argon 4 High & Medium -> strictly Ultra while ANY Ultra account has Gemini quota > 0%.
+			// Bucket A: Carbon 4 / Argon 4 High & Medium -> strictly locked to Ultra accounts (NEVER step down or spill onto Pro).
 			ultraCands := make([]ConnectedAccount, 0, len(candidates))
-			nonUltraCands := make([]ConnectedAccount, 0, len(candidates))
-			nonUltraAll := make([]ConnectedAccount, 0, len(candidates))
 			for _, c := range candidates {
 				geminiExhausted := c.WeeklyGeminiPercent != nil && *c.WeeklyGeminiPercent <= 0
 				if strings.EqualFold(strings.TrimSpace(c.Tier), "Ultra") {
@@ -1953,11 +1947,6 @@ func selectProviderAccountCore(ctx context.Context, provider ProviderID, modelHi
 						!isDirectGeminiTierRateLimited(c.Email, trimmedHint) &&
 						!IsAccountModelRateLimited(c.Email, trimmedHint) {
 						ultraCands = append(ultraCands, c)
-					}
-				} else {
-					nonUltraAll = append(nonUltraAll, c)
-					if !geminiExhausted && !IsAccountModelRateLimited(c.Email, "gemini-3.8-flash-high") {
-						nonUltraCands = append(nonUltraCands, c)
 					}
 				}
 			}
@@ -1984,50 +1973,24 @@ func selectProviderAccountCore(ctx context.Context, provider ProviderID, modelHi
 				} else {
 					candidates = ultraCands
 				}
-			} else if len(nonUltraCands) > 0 {
-				if isHedgePickFromContext(ctx) {
-					proLowLoad := make([]ConnectedAccount, 0, len(nonUltraCands))
-					for _, c := range nonUltraCands {
-						if GetAccountInFlight(c.Email) <= 3 {
-							proLowLoad = append(proLowLoad, c)
-						}
-					}
-					if len(proLowLoad) > 0 {
-						candidates = proLowLoad
-					} else {
-						candidates = nonUltraCands
-					}
-				} else {
-					candidates = nonUltraCands
-				}
-			} else if isHedgePickFromContext(ctx) {
+			} else {
 				accountSelectMu.Unlock()
-				return nil, func() {}, fmt.Errorf("no rate-limit-free alternate account for %s", trimmedHint)
-			} else if len(nonUltraAll) > 0 {
-				candidates = nonUltraAll
+				return nil, func() {}, fmt.Errorf("no healthy Antigravity Ultra account available for %s (model stepdown to Pro disabled)", trimmedHint)
 			}
 
 		case IsClaudeAntigravityModel(trimmedHint):
 			// Bucket B: Claude Antigravity models -> require Claude quota > 0%; prioritize Ultra first, then Pro.
-			// If ALL accounts have 0% Claude quota, route fallback strictly to nonUltraCands (NEVER 0%-Claude Ultra!).
+			// Zero Model Stepdown: when ALL accounts have 0% Claude quota or are rate-limited, return error instead of stepping down to Gemini.
 			ultraClaudeCands := make([]ConnectedAccount, 0, len(candidates))
 			proClaudeCands := make([]ConnectedAccount, 0, len(candidates))
-			nonUltraFallback := make([]ConnectedAccount, 0, len(candidates))
-			nonUltraAll := make([]ConnectedAccount, 0, len(candidates))
 			for _, c := range candidates {
 				claudeHealthy := !isAccountClaudeQuotaExhaustedFast(c.Email) && !IsAccountModelRateLimited(c.Email, trimmedHint)
 				if strings.EqualFold(strings.TrimSpace(c.Tier), "Ultra") {
 					if claudeHealthy {
 						ultraClaudeCands = append(ultraClaudeCands, c)
 					}
-				} else {
-					nonUltraAll = append(nonUltraAll, c)
-					if !IsAccountModelRateLimited(c.Email, "gemini-3.8-flash-high") {
-						nonUltraFallback = append(nonUltraFallback, c)
-					}
-					if claudeHealthy {
-						proClaudeCands = append(proClaudeCands, c)
-					}
+				} else if claudeHealthy {
+					proClaudeCands = append(proClaudeCands, c)
 				}
 			}
 			if len(ultraClaudeCands) > 0 {
@@ -2069,13 +2032,9 @@ func selectProviderAccountCore(ctx context.Context, provider ProviderID, modelHi
 				} else {
 					candidates = proClaudeCands
 				}
-			} else if isHedgePickFromContext(ctx) {
+			} else {
 				accountSelectMu.Unlock()
-				return nil, func() {}, fmt.Errorf("no Claude-quota-healthy alternate account for %s", trimmedHint)
-			} else if len(nonUltraFallback) > 0 {
-				candidates = nonUltraFallback
-			} else if len(nonUltraAll) > 0 {
-				candidates = nonUltraAll
+				return nil, func() {}, fmt.Errorf("no Claude-quota-healthy Antigravity account available for %s (model stepdown disabled)", trimmedHint)
 			}
 
 		default:
@@ -2123,10 +2082,11 @@ func selectProviderAccountCore(ctx context.Context, provider ProviderID, modelHi
 				}
 			} else if len(nonUltraCands) > 0 {
 				candidates = nonUltraCands
+			} else if len(nonUltraAll) > 0 {
+				accountSelectMu.Unlock()
+				return nil, func() {}, fmt.Errorf("all non-Ultra Antigravity accounts are rate-limited for %s (Ultra tier shielded)", trimmedHint)
 			} else if len(ultraFresh) > 0 {
 				candidates = ultraFresh
-			} else if len(nonUltraAll) > 0 {
-				candidates = nonUltraAll
 			}
 		}
 	} else if provider == ProviderAntigravity && len(candidates) > 1 && strings.TrimSpace(modelHint) != "" {

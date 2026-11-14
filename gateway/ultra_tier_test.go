@@ -8,7 +8,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
-	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -95,7 +95,7 @@ func TestCarbonArgonExclusivelyUltraAccounts(t *testing.T) {
 	}
 }
 
-func TestCarbonArgonExhaustionStepdownToProAccounts(t *testing.T) {
+func TestCarbonArgonExhaustionNeverStepsDownToProAccounts(t *testing.T) {
 	resetAuthCacheForTest(t)
 	ClearAccountModelRateLimits("")
 
@@ -138,16 +138,16 @@ func TestCarbonArgonExhaustionStepdownToProAccounts(t *testing.T) {
 	RecordAccountModelRateLimit("ultra1@gmail.com", "antigravity/gemini-4-carbon-high", 2*time.Minute)
 	RecordAccountModelRateLimit("ultra2@gmail.com", "antigravity/gemini-4-carbon-high", 2*time.Minute)
 
-	// Since all Ultra accounts are exhausted, scheduler must safely fall back to Pro account
+	// Direct Carbon/Argon is 100% locked to Ultra accounts; zero stepdown to Pro is strictly enforced
 	acc, rel, err := AcquireProviderAccountForModel(ctx, ProviderAntigravity, "antigravity/gemini-4-carbon-high", "antigravity/gemini-4-carbon-high")
-	if err != nil {
-		t.Fatalf("expected fallback to Pro account on Ultra exhaustion, got err: %v", err)
-	}
 	if rel != nil {
 		rel()
 	}
-	if acc.Email != "pro1@gmail.com" || strings.EqualFold(acc.Tier, "Ultra") {
-		t.Fatalf("expected Pro account pro1@gmail.com fallback, got %s (tier=%s)", acc.Email, acc.Tier)
+	if err == nil {
+		t.Fatalf("expected error acquiring account when all Ultra accounts are exhausted, got account: email=%s tier=%s", acc.Email, acc.Tier)
+	}
+	if acc != nil && acc.Email == "pro1@gmail.com" {
+		t.Fatalf("security violation: Carbon High stepped down to Pro account pro1@gmail.com")
 	}
 
 	// Verify IsCarbonOrArgonFamilyModel helper correctly detects Carbon & Argon
@@ -289,7 +289,7 @@ func TestEveningAlibabaQwen38MaxCodingSupport(t *testing.T) {
 	}
 }
 
-func TestCarbonArgonStuckFailsOverToProGemini31ProHigh(t *testing.T) {
+func TestCarbonArgonStuckFailsOverToUltraPeerAndNeverStepsDownToPro(t *testing.T) {
 	tmpCfg := filepath.Join(t.TempDir(), "gateway_config.json")
 	t.Setenv("GATEWAY_CONFIG_FILE", tmpCfg)
 	resetAuthCacheForTest(t)
@@ -301,41 +301,44 @@ func TestCarbonArgonStuckFailsOverToProGemini31ProHigh(t *testing.T) {
 		resetAuthCacheForTest(t)
 	})
 
-	var mu sync.Mutex
-	callsByTokenAndModel := make(map[string]int)
+	var ultra1Calls atomic.Int32
+	var ultra2Calls atomic.Int32
+	var pro1Calls atomic.Int32
+	var failUltra2 atomic.Bool
 
 	mockCCPA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var payload ccpaRequestPayload
-		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
+		_ = json.NewDecoder(r.Body).Decode(&payload)
 		authHdr := strings.TrimSpace(r.Header.Get("Authorization"))
 
-		mu.Lock()
-		callsByTokenAndModel[authHdr+"|"+payload.Model]++
-		mu.Unlock()
-
-		// Ultra account gets 503 / congestion on Carbon / Argon High
-		if authHdr == "Bearer ya29.ultra1" && (payload.Model == "gemini-4-carbon" || payload.Model == "gemini-4-carbon-high" || payload.Model == "gemini-4-argon-high") {
+		// Ultra1 is stuck / returns 503
+		if strings.Contains(authHdr, "ya29.ultra1") {
+			ultra1Calls.Add(1)
 			w.WriteHeader(http.StatusServiceUnavailable)
-			_, _ = w.Write([]byte(`{"error":{"code":503,"status":"UNAVAILABLE","message":"upstream model congested"}}`))
+			_, _ = w.Write([]byte(`{"error":{"code":503,"status":"UNAVAILABLE","message":"upstream model congested on ultra1"}}`))
 			return
 		}
 
-		// Pro account succeeds on gemini-3.8-flash-high (and variants)
-		if authHdr == "Bearer ya29.pro1" && strings.Contains(payload.Model, "gemini-3.8-flash") {
+		// Ultra2 succeeds in sub-check 1, or fails with 503 in sub-check 2
+		if strings.Contains(authHdr, "ya29.ultra2") {
+			ultra2Calls.Add(1)
+			if failUltra2.Load() {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = w.Write([]byte(`{"error":{"code":503,"status":"UNAVAILABLE","message":"upstream model congested on ultra2"}}`))
+				return
+			}
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.WriteHeader(http.StatusOK)
-			_, _ = fmt.Fprintf(w, "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"served-by-pro-gemini-3.8-flash-high\"}]}}]}}\n\ndata: [DONE]\n\n")
+			_, _ = fmt.Fprintf(w, "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"served-by-ultra2\"}]}}]}}\n\ndata: [DONE]\n\n")
 			return
 		}
 
-		// Fallback for other flash
-		if strings.Contains(payload.Model, "flash") {
+		// Pro account should NEVER be invoked for Carbon/Argon requests
+		if strings.Contains(authHdr, "ya29.pro1") {
+			pro1Calls.Add(1)
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.WriteHeader(http.StatusOK)
-			_, _ = fmt.Fprintf(w, "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"served-by-%s\"}]}}]}}\n\ndata: [DONE]\n\n", payload.Model)
+			_, _ = fmt.Fprintf(w, "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"served-by-pro1-forbidden\"}]}}]}}\n\ndata: [DONE]\n\n")
 			return
 		}
 
@@ -352,6 +355,14 @@ func TestCarbonArgonStuckFailsOverToProGemini31ProHigh(t *testing.T) {
 				Tier:        "Ultra",
 				AccessToken: "ya29.ultra1",
 				ProjectID:   "proj-ultra1",
+				ExpiresAt:   time.Now().Unix() + 3600,
+			},
+			{
+				Email:       "ultra2@gmail.com",
+				Provider:    ProviderAntigravity,
+				Tier:        "Ultra",
+				AccessToken: "ya29.ultra2",
+				ProjectID:   "proj-ultra2",
 				ExpiresAt:   time.Now().Unix() + 3600,
 			},
 			{
@@ -377,33 +388,41 @@ func TestCarbonArgonStuckFailsOverToProGemini31ProHigh(t *testing.T) {
 			{Role: "user", Content: json.RawMessage(`"Write production code"`)},
 		},
 	}
-	rec := httptest.NewRecorder()
-	if err := upstream.HandleChatCompletion(context.Background(), rec, req, resolved, ""); err != nil {
-		t.Fatalf("HandleChatCompletion failed: %v", err)
+
+	// Sub-check 1: Ultra1 stuck (503) -> fails over to Ultra peer (ultra2). Pro account must receive 0 calls.
+	rec1 := httptest.NewRecorder()
+	if err := upstream.HandleChatCompletion(context.Background(), rec1, req, resolved, ""); err != nil {
+		t.Fatalf("HandleChatCompletion sub-check 1 failed: %v", err)
 	}
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected status 200 OK, got %d, body: %s", rec.Code, rec.Body.String())
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("expected status 200 OK, got %d, body: %s", rec1.Code, rec1.Body.String())
+	}
+	if gotAcc := rec1.Header().Get("X-Omni-Gateway-Account"); gotAcc != "ultra2@gmail.com" {
+		t.Fatalf("expected failover to Ultra peer ultra2@gmail.com, got %q", gotAcc)
+	}
+	if gotStepdown := rec1.Header().Get("X-Omni-Gateway-Tier-Stepdown"); gotStepdown != "" {
+		t.Fatalf("expected empty X-Omni-Gateway-Tier-Stepdown header, got %q", gotStepdown)
+	}
+	if pro1Calls.Load() != 0 {
+		t.Fatalf("security violation: pro1 received %d calls during Ultra-to-Ultra failover", pro1Calls.Load())
+	}
+	if !strings.Contains(rec1.Body.String(), "served-by-ultra2") {
+		t.Fatalf("expected response served by ultra2, got: %s", rec1.Body.String())
 	}
 
-	if gotAcc := rec.Header().Get("X-Omni-Gateway-Account"); gotAcc != "pro1@gmail.com" {
-		t.Fatalf("expected stepdown to Pro account pro1@gmail.com, got %q", gotAcc)
+	// Sub-check 2: Both Ultra1 and Ultra2 return 503 while Pro1 is healthy.
+	// Request must error out and NEVER step down or spill over onto pro1@gmail.com.
+	failUltra2.Store(true)
+	rec2 := httptest.NewRecorder()
+	err := upstream.HandleChatCompletion(context.Background(), rec2, req, resolved, "")
+	if err == nil && rec2.Code == http.StatusOK {
+		t.Fatalf("expected error when all Ultra accounts are congested/exhausted, got HTTP 200 OK")
 	}
-
-	if gotStepdown := rec.Header().Get("X-Omni-Gateway-Tier-Stepdown"); gotStepdown != "gemini-3.8-flash-high" {
-		t.Fatalf("expected X-Omni-Gateway-Tier-Stepdown = gemini-3.8-flash-high, got %q", gotStepdown)
+	if pro1Calls.Load() != 0 {
+		t.Fatalf("security violation: pro1 received %d calls when all Ultra accounts failed", pro1Calls.Load())
 	}
-
-	if !strings.Contains(rec.Body.String(), "served-by-pro-gemini-3.8-flash-high") {
-		t.Fatalf("expected response served by Pro gemini-3.8-flash-high, got: %s", rec.Body.String())
+	if gotStepdown := rec2.Header().Get("X-Omni-Gateway-Tier-Stepdown"); gotStepdown != "" {
+		t.Fatalf("expected empty X-Omni-Gateway-Tier-Stepdown header, got %q", gotStepdown)
 	}
-
-	// Verify Claude models were NEVER invoked
-	mu.Lock()
-	for k := range callsByTokenAndModel {
-		if strings.Contains(k, "claude") {
-			t.Fatalf("unexpected call to Claude model %q during Gemini failover: %v", k, callsByTokenAndModel)
-		}
-	}
-	mu.Unlock()
 }

@@ -109,8 +109,8 @@ func TestDefaultCCPAEndpointSkipsColdStart404VirtualAliasesAndWarmup(t *testing.
 		{"auto/fast", "gemini-3-flash"},
 		{"antigravity/gemini-4-argon-high", "gemini-4-argon-high"},
 		{"antigravity/gemini-3.1-pro-high", "gemini-3.8-flash-high"},
-		{"antigravity/gemini-3.8-flash-high", "gemini-3-flash"},
-		{"antigravity/gemini-3.8-flash-low", "gemini-3-flash"},
+		{"antigravity/gemini-3.8-flash-high", "gemini-3.8-flash-high"},
+		{"antigravity/gemini-3.8-flash-low", "gemini-3.8-flash-low"},
 	}
 
 	for _, tc := range cases {

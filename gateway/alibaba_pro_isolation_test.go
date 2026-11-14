@@ -237,32 +237,19 @@ func TestCarbonStepdownToProOnDefaultEndpointUsesGemini38FlashHighWithoutCooldow
 		},
 	}
 
-	if err := upstream.HandleChatCompletion(context.Background(), rec, req, resolved, ""); err != nil {
-		t.Fatalf("HandleChatCompletion failed: %v", err)
-	}
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected HTTP 200 OK, got %d (body: %s)", rec.Code, rec.Body.String())
+	err := upstream.HandleChatCompletion(context.Background(), rec, req, resolved, "")
+	if err == nil && rec.Code == http.StatusOK {
+		t.Fatalf("expected error when Ultra is exhausted on Carbon High (Zero Stepdown Policy), got HTTP 200 OK (body: %s)", rec.Body.String())
 	}
 
 	stepdownHdr := rec.Header().Get("X-Omni-Gateway-Tier-Stepdown")
-	if stepdownHdr != "gemini-3.8-flash-high" {
-		t.Fatalf("expected X-Omni-Gateway-Tier-Stepdown == gemini-3.8-flash-high, got %q", stepdownHdr)
-	}
-
-	resolvedModelHdr := rec.Header().Get("X-Omni-Gateway-Resolved-Model")
-	if resolvedModelHdr != "gemini-3.8-flash-high" {
-		t.Fatalf("expected X-Omni-Gateway-Resolved-Model == gemini-3.8-flash-high, got %q", resolvedModelHdr)
-	}
-
-	bodyStr := rec.Body.String()
-	if !strings.Contains(bodyStr, "pro-flash-high-ok") {
-		t.Fatalf("expected response body to contain %q, got: %s", "pro-flash-high-ok", bodyStr)
+	if stepdownHdr != "" {
+		t.Fatalf("expected empty X-Omni-Gateway-Tier-Stepdown under Zero Stepdown Policy, got %q", stepdownHdr)
 	}
 
 	winningAcc := rec.Header().Get("X-Omni-Gateway-Account")
-	if winningAcc != "pro1@gmail.com" && winningAcc != "pro2@gmail.com" {
-		t.Fatalf("expected winning account to be pro1 or pro2, got %q", winningAcc)
+	if winningAcc == "pro1@gmail.com" || winningAcc == "pro2@gmail.com" {
+		t.Fatalf("expected Carbon High NEVER to spill over onto Pro account, got %q", winningAcc)
 	}
 
 	savedCfg := LoadSavedAuthConfig()

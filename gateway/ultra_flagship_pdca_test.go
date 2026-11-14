@@ -219,7 +219,7 @@ func TestWeeklyClaudePercentRemainingSemanticsAndBucketB(t *testing.T) {
 		t.Fatalf("expected 100%% Claude Ultra to be selected for Claude Opus, got %+v (err=%v)", acc, err)
 	}
 
-	// When ALL accounts have 0% Claude remaining, fallback routes strictly to Pro (NEVER 0%-Claude Ultra!)
+	// When ALL accounts have 0% Claude remaining, Zero Stepdown Policy rejects 0%-Claude accounts instead of stepping down to Gemini!
 	if err := saveTestGatewayAuth(SavedGatewayAuth{
 		RoutingStrategy: StrategyRoundRobin,
 		Accounts: []ConnectedAccount{
@@ -230,14 +230,13 @@ func TestWeeklyClaudePercentRemainingSemanticsAndBucketB(t *testing.T) {
 		t.Fatalf("saveTestGatewayAuth: %v", err)
 	}
 	fallbackAcc, err := SelectProviderAccountForModel(context.Background(), ProviderAntigravity, "antigravity/claude-opus-4-6-thinking")
-	if err != nil || fallbackAcc.Email != "pro-claude0@gmail.com" {
-		t.Fatalf("expected 0%%-Claude fallback to route strictly to Pro pro-claude0@gmail.com, got %+v (err=%v)", fallbackAcc, err)
+	if err == nil || fallbackAcc != nil {
+		t.Fatalf("expected error when ALL accounts have 0%% Claude remaining (model stepdown disabled), got %+v (err=%v)", fallbackAcc, err)
 	}
 }
 
-// 3. Pro accounts on DefaultCCPAEndpoint prioritize "gemini-3.8-flash-high" FIRST
-// ahead of "gemini-3.8-flash-tiered" for gemini-3.8-flash-high and legacy gemini-3.1-pro-high,
-// and prioritize "gemini-3.8-flash-medium" FIRST for gemini-3.8-flash-medium.
+// 3. Pro accounts on DefaultCCPAEndpoint strictly execute "gemini-3.8-flash-high" ONLY (zero tiered stepdown)
+// for gemini-3.8-flash-high and legacy gemini-3.1-pro-high, and strictly "gemini-3.8-flash-medium" for gemini-3.8-flash-medium.
 func TestProAccountPrioritizesGemini38FlashHighFirst(t *testing.T) {
 	setupUltraFlagshipPDCATestEnv(t)
 
@@ -255,31 +254,14 @@ func TestProAccountPrioritizesGemini38FlashHighFirst(t *testing.T) {
 		"antigravity/gemini-3.1-pro-high",
 	} {
 		cands := buildCCPACandidatesWithCache(DefaultCCPAEndpoint, "advietnam789@gmail.com", ResolveModel(mod, nil), false)
-		if len(cands) < 2 {
-			t.Fatalf("expected at least 2 candidates for %s on Pro account, got %v", mod, cands)
-		}
-		if cands[0] != "gemini-3.8-flash-high" {
-			t.Fatalf("expected Pro account cands[0] for %s to be gemini-3.8-flash-high, got %q (all: %v)", mod, cands[0], cands)
-		}
-		if cands[1] != "gemini-3.8-flash-tiered" {
-			t.Fatalf("expected Pro account cands[1] for %s to be gemini-3.8-flash-tiered, got %q (all: %v)", mod, cands[1], cands)
-		}
-		for _, c := range cands {
-			if strings.Contains(c, "gemini-3.1-pro") {
-				t.Fatalf("expected zero gemini-3.1-pro candidates for %s on discontinued Pro account, found %q (all: %v)", mod, c, cands)
-			}
+		if len(cands) != 1 || cands[0] != "gemini-3.8-flash-high" {
+			t.Fatalf("expected Pro account cands for %s to be strictly [gemini-3.8-flash-high], got %v", mod, cands)
 		}
 	}
 
 	candsMed := buildCCPACandidatesWithCache(DefaultCCPAEndpoint, "advietnam789@gmail.com", ResolveModel("antigravity/gemini-3.8-flash-medium", nil), false)
-	if len(candsMed) < 2 {
-		t.Fatalf("expected at least 2 candidates for antigravity/gemini-3.8-flash-medium on Pro account, got %v", candsMed)
-	}
-	if candsMed[0] != "gemini-3.8-flash-medium" {
-		t.Fatalf("expected Pro account cands[0] for gemini-3.8-flash-medium to be gemini-3.8-flash-medium, got %q (all: %v)", candsMed[0], candsMed)
-	}
-	if candsMed[1] != "gemini-3.8-flash-high" {
-		t.Fatalf("expected Pro account cands[1] for gemini-3.8-flash-medium to be gemini-3.8-flash-high, got %q (all: %v)", candsMed[1], candsMed)
+	if len(candsMed) != 1 || candsMed[0] != "gemini-3.8-flash-medium" {
+		t.Fatalf("expected Pro account cands for gemini-3.8-flash-medium to be strictly [gemini-3.8-flash-medium], got %v", candsMed)
 	}
 }
 
