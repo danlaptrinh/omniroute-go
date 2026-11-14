@@ -415,10 +415,16 @@ func sanitizeSteppedDownWorkingPins(cycleID, nowRFC string) (int, []PDCAAnomaly,
 func detectProCarbonStepdownLeaks(recentLogs []GatewayLogEntry, proEmails map[string]bool, cycleID, nowRFC string) []PDCAAnomaly {
 	var anomalies []PDCAAnomaly
 	seenAccs := make(map[string]bool)
+	nowTime, nowErr := time.Parse(time.RFC3339, nowRFC)
 
 	for _, entry := range recentLogs {
 		if entry.Provider != ProviderAntigravity || entry.IsError {
 			continue
+		}
+		if nowErr == nil && strings.TrimSpace(entry.Timestamp) != "" {
+			if ts, err := time.Parse(time.RFC3339, strings.TrimSpace(entry.Timestamp)); err == nil && nowTime.Sub(ts) > 5*time.Minute {
+				continue
+			}
 		}
 
 		cleanAcc := strings.ToLower(strings.TrimSpace(entry.Account))
